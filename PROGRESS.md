@@ -4,7 +4,7 @@ Tracks completion status of each Phase 1 build-order step (see `riddimroom-studi
 
 | # | Step | Status |
 |---|------|--------|
-| 1 | Project foundation | In progress — repo, Firebase project, and codebase scaffold complete; build verification pending |
+| 1 | Project foundation | **Complete** — repo, Firebase project, codebase scaffold, all verified (tsc clean, dev + prod builds boot and serve correctly) |
 | 2 | Authentication | Not started |
 | 3 | Shared storage | Not started |
 | 4 | Capture | Not started |
