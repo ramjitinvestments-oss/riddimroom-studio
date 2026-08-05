@@ -1,0 +1,49 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny — every collection below must explicitly opt in.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Unified user schema (merges caption's quota fields + EventCam's status/usage fields —
+    // see riddimroom-studio-phase0-plan.md section 4.2 for the full field list).
+    function isValidUser(data) {
+      return data.email is string && data.email.size() <= 256
+          && data.displayName is string && data.displayName.size() <= 256
+          && (data.role == 'user' || data.role == 'admin')
+          && (data.status == 'pending' || data.status == 'approved' || data.status == 'denied' || data.status == 'suspended');
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data)
+        && request.resource.data.role == 'user'
+        && request.resource.data.status == 'pending';
+      allow update: if isOwner(userId) && isValidUser(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'email', 'displayName', 'photoURL', 'lastUpdated', 'lastActiveAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // Admin trust-root — console/backend managed only (ported from EventCam's model).
+    match /admins/{userId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    match /projects/{projectId} {
+      allow read, write: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.ownerUid == request.auth.uid;
+    }
+  }
+}
