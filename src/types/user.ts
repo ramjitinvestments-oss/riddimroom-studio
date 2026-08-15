@@ -49,3 +49,31 @@ export interface UserProfile {
 }
 
 export const DEFAULT_DAILY_QUOTA = 2;
+
+/**
+ * The shape `GET /api/user/status` actually returns (`server.ts`'s
+ * `toClientUser`) — a subset of `UserProfile` (omits server-internal
+ * timestamp fields) plus `maxFree`, which is not stored on the Firestore
+ * document at all but computed server-side from `DEFAULT_DAILY_QUOTA`.
+ * `AuthContext`'s `userProfile` holds this shape, not a raw `UserProfile`;
+ * added here (Phase 1 quota-enforcement build step) after the two were
+ * found to have drifted — `AuthContext` had been typed as `UserProfile`,
+ * which doesn't actually have `maxFree`.
+ */
+export interface ClientUserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string | null;
+  provider: string;
+  role: UserRole;
+  status: UserStatus;
+  dailyCount: number;
+  maxFree: number;
+  totalTranscribes: number;
+  captureCount: number;
+  photoCount: number;
+  videoCount: number;
+  subscription: string;
+  plan: string;
+}

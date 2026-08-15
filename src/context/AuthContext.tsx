@@ -13,7 +13,7 @@ import {
   type User as FirebaseUser,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
-import type { UserProfile } from '../types/user';
+import type { ClientUserProfile } from '../types/user';
 
 /**
  * Shared authentication context/provider.
@@ -33,7 +33,7 @@ import type { UserProfile } from '../types/user';
 
 interface AuthContextValue {
   currentUser: FirebaseUser | null;
-  userProfile: UserProfile | null;
+  userProfile: ClientUserProfile | null;
   idToken: string | null;
   isAuthLoading: boolean;
   authError: string | null;
@@ -70,7 +70,7 @@ function friendlyAuthError(err: any): string {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [userProfile, setUserProfile] = useState<ClientUserProfile | null>(null);
   const [idToken, setIdToken] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);

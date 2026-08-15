@@ -27,9 +27,15 @@ async function identityToolkit(path, body) {
 }
 
 async function callApi(path, token) {
+  // 20s, not 10s: in this sandbox there is no reachable real Firestore
+  // backend, so a request carrying a *valid* token still has to wait out
+  // the Admin SDK's application-default-credentials resolution retries
+  // (observed ~8.5s) before the route's own try/catch returns a clean 500 —
+  // see PROGRESS.md. That's the route correctly failing closed, not a hang;
+  // the timeout here just needs to outlast it.
   const res = await fetch(`http://localhost:${APP_PORT}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(20000),
   });
   let json = null;
   try { json = await res.json(); } catch { /* ignore */ }

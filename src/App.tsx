@@ -2,11 +2,22 @@ import React, { useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './components/LoginPage';
+import { Dashboard } from './components/Dashboard';
+import { EditorShell } from './components/Editor/EditorShell';
 import { useRouter } from './lib/router';
 
+/**
+ * Phase 1 Step 14 (UI refinement). Replaces the Step 2 placeholder
+ * ("Capture, upload, and the shared editor are added in the next build
+ * steps") with the real product: `Dashboard` (project list/create) at `/`,
+ * `EditorShell` at `/editor/:projectId`. `useRouter` only tracks the raw
+ * path string (by design — see its own header comment); route param
+ * parsing happens here rather than growing the router into a full routing
+ * library for two routes.
+ */
 function AppShell() {
   const { currentPath, navigateTo } = useRouter();
-  const { currentUser, userProfile, isAuthLoading, isAccountDisabled, signOut } = useAuth();
+  const { currentUser, isAuthLoading, isAccountDisabled } = useAuth();
 
   // Redirect unauthenticated users to /login; redirect authenticated users
   // away from /login — same behavior as riddimroom-caption's two
@@ -38,25 +49,15 @@ function AppShell() {
     return <LoginPage />;
   }
 
+  const editorMatch = currentPath.match(/^\/editor\/([^/]+)$/);
+
   return (
     <ProtectedRoute redirectTo={navigateTo}>
-      <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6 text-center bg-[#070707] text-white">
-        <h1 className="text-2xl font-black tracking-tight uppercase">RiddimRoom Studio</h1>
-        <p className="text-sm text-white/50 max-w-md">
-          Signed in as <span className="text-emerald-400">{userProfile?.email || currentUser?.email}</span>
-          {' · '}role <span className="text-emerald-400">{userProfile?.role ?? '…'}</span>
-          {' · '}status <span className="text-emerald-400">{userProfile?.status ?? '…'}</span>
-        </p>
-        <p className="text-xs text-white/30 max-w-md">
-          Capture, upload, and the shared editor are added in the next build steps.
-        </p>
-        <button
-          onClick={signOut}
-          className="mt-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs font-bold uppercase tracking-wider"
-        >
-          Sign out
-        </button>
-      </div>
+      {editorMatch ? (
+        <EditorShell projectId={decodeURIComponent(editorMatch[1])} />
+      ) : (
+        <Dashboard onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)} />
+      )}
     </ProtectedRoute>
   );
 }

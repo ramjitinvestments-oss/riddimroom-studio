@@ -14,6 +14,7 @@ import { initializeApp, getApps, applicationDefault, cert } from 'firebase-admin
 import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import type { UserProfile } from './src/types/user';
+import { getTranscriptionProvider, TranscriptionConfigurationError } from './src/lib/transcription';
 
 dotenv.config();
 
@@ -214,6 +215,95 @@ async function createServer() {
     } catch (err: any) {
       console.error('[user/status] Firestore operation failed:', err.code || err.message);
       return res.status(500).json({ success: false, error: 'Failed to load user profile' });
+    }
+  });
+
+  // AI transcription (Phase 1 Step 10) + server-side quota enforcement
+  // (Step 13). Source of the quota-reset logic: the same
+  // lastTranscribeDate-based daily reset already used by
+  // /api/user/status, applied here as the actual gate on the actual
+  // quota-consuming operation (dailyCount was previously only ever reset
+  // and read, never incremented by anything real).
+  //
+  // Ownership check: the client sends a Storage download URL, not just an
+  // asset id, since transcription needs to fetch the actual media bytes.
+  // Storage rules already restrict who can *read* that URL's bytes
+  // (users/{uid}/**), but this route also refuses to even attempt a
+  // transcription against a URL that doesn't look like it belongs to the
+  // authenticated caller, so a client bug can't burn one user's quota
+  // transcribing another user's media path.
+  app.post('/api/transcribe', verifyFirebaseToken, async (req: AuthedRequest, res: Response): Promise<any> => {
+    const decoded = req.decodedToken!;
+    const uid = decoded.uid;
+    const { storageUrl, mimeType, durationSeconds } = req.body || {};
+
+    if (typeof storageUrl !== 'string' || !storageUrl) {
+      return res.status(400).json({ success: false, error: 'storageUrl is required.' });
+    }
+    if (typeof mimeType !== 'string' || !mimeType) {
+      return res.status(400).json({ success: false, error: 'mimeType is required.' });
+    }
+    const ownedPrefix = `users%2F${uid}%2Fmedia%2F`;
+    if (!storageUrl.includes(ownedPrefix)) {
+      return res.status(403).json({ success: false, error: 'This media does not belong to the authenticated user.' });
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    try {
+      const userRef = db.collection('users').doc(uid);
+      const userDoc = await userRef.get();
+      if (!userDoc.exists) {
+        return res.status(404).json({ success: false, error: 'User profile not found — call /api/user/status first.' });
+      }
+      const data = userDoc.data() as UserProfile;
+      const dailyCount = data.lastTranscribeDate === todayStr ? data.dailyCount || 0 : 0;
+
+      if (dailyCount >= DEFAULT_DAILY_QUOTA) {
+        return res.status(429).json({
+          success: false,
+          error: `Daily transcription quota (${DEFAULT_DAILY_QUOTA}) reached. Try again tomorrow.`,
+          dailyCount,
+          maxFree: DEFAULT_DAILY_QUOTA,
+        });
+      }
+
+      const transcriptionRequest = { mediaUrl: storageUrl, mimeType, durationSeconds };
+      let result;
+      try {
+        result = await getTranscriptionProvider('gemini').transcribe(transcriptionRequest);
+      } catch (err: any) {
+        if (err instanceof TranscriptionConfigurationError) {
+          // Explicit fallback attempt, per the Phase 1 requirement — only on
+          // a configuration error, not on every Gemini failure.
+          try {
+            result = await getTranscriptionProvider('whisper').transcribe(transcriptionRequest);
+          } catch (fallbackErr: any) {
+            if (fallbackErr instanceof TranscriptionConfigurationError) {
+              return res.status(503).json({
+                success: false,
+                error: 'Transcription is not configured on this server (no GEMINI_API_KEY and no WHISPER_API_URL). This is a configuration issue, not a code failure.',
+              });
+            }
+            throw fallbackErr;
+          }
+        } else {
+          throw err;
+        }
+      }
+
+      const newDailyCount = dailyCount + 1;
+      await userRef.update({
+        dailyCount: newDailyCount,
+        lastTranscribeDate: todayStr,
+        totalTranscribes: FieldValue.increment(1),
+        lastUpdated: FieldValue.serverTimestamp(),
+      });
+
+      return res.json({ success: true, words: result.words, provider: result.provider, dailyCount: newDailyCount, maxFree: DEFAULT_DAILY_QUOTA });
+    } catch (err: any) {
+      console.error('[transcribe] failed:', err?.message || err);
+      return res.status(500).json({ success: false, error: err?.message || 'Transcription failed.' });
     }
   });
 

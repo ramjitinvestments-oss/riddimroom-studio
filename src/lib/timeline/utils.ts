@@ -95,6 +95,24 @@ export function addItem(project: Project, item: TimelineItem): Project {
   };
 }
 
+/**
+ * Returns a new Project with `itemId` shallow-patched by `patch`. Added in
+ * the editor-shell build step (Step 6) once a real UI needed to mutate an
+ * item's existing fields (position/timing/text/etc), not just add/remove
+ * whole items. `patch` is typed loosely (`Partial<TimelineItem>` would
+ * reject a patch object that doesn't include a `type` discriminant even
+ * when the caller isn't changing it) — callers are expected to only pass
+ * fields valid for that item's actual type; `validateProject`/
+ * `assertValidProject` remain the real safety net before persistence.
+ */
+export function updateItem(project: Project, itemId: string, patch: Record<string, unknown>): Project {
+  return {
+    ...project,
+    items: project.items.map((item) => (item.id === itemId ? ({ ...item, ...patch } as TimelineItem) : item)),
+    updatedAt: Date.now(),
+  };
+}
+
 export function removeItem(project: Project, itemId: string): Project {
   return {
     ...project,

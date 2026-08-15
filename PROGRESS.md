@@ -6,19 +6,19 @@ Tracks completion status of each Phase 1 build-order step (see `riddimroom-studi
 |---|------|--------|
 | 1 | Project foundation | **Complete** — repo, Firebase project, codebase scaffold, all verified (tsc clean, dev + prod builds boot and serve correctly) |
 | 2 | Authentication | **Complete** — Google + email/password auth, shared context, ProtectedRoute, Admin SDK middleware, unified user doc upsert; verified live against Firebase Auth emulator + real dev/prod server, plus code review for browser-only flows (see Step 2 completion report) |
-| 3 | Shared storage | Not started |
-| 4 | Capture | Not started |
-| 5 | Upload | Not started |
-| 6 | Shared editor shell | Not started |
-| 7 | Background removal | Not started |
-| 8 | Watermark overlay | Not started |
-| 9 | Text overlay | Not started |
-| 10 | AI transcription | Not started |
-| 11 | Caption engine | Not started |
-| 12 | Export engine | Not started |
-| 13 | Quota enforcement | Not started |
-| 14 | UI refinement | Not started |
-| 15 | Final Phase 1 verification | Not started |
+| 3 | Shared storage | **Complete** — `projects/{projectId}` read/write via client SDK direct to Firestore (see "Phase 1 completion pass" below for why this deviates from server-mediated) |
+| 4 | Capture | **Complete** — `CameraCapture.tsx`, getUserMedia + MediaRecorder, front/back toggle, photo + video |
+| 5 | Upload | **Complete** — `MediaImportPanel.tsx` + `lib/media/*`, validation, progress, retry, real Storage upload, `MediaAsset` creation |
+| 6 | Shared editor shell | **Complete** — `EditorShell.tsx`, `ProjectContext`, `PreviewPane`, `TimelinePanel`, project survives refresh (Firestore-backed) |
+| 7 | Background removal | **Complete** — `@imgly/background-removal` (client-side WASM, no credential needed), provider abstraction, dynamically imported |
+| 8 | Watermark overlay | **Complete** — `WatermarkPanel.tsx`, real `ImageTimelineItem` with `role: 'watermark'` |
+| 9 | Text overlay | **Complete** — `AddTextPanel.tsx` + `ItemInspector.tsx`, real `TextTimelineItem` |
+| 10 | AI transcription | **Complete (Gemini configured), config-gated (Whisper)** — `POST /api/transcribe`, Gemini primary via `@google/genai`, Whisper fallback abstraction; no real `GEMINI_API_KEY` available in the build sandbox (see Risks) |
+| 11 | Caption engine | **Complete** — `addCaptionItems` (chunking), `TranscribePanel.tsx`, 3-style catalog (`captions/styles.ts`), editable in `ItemInspector` |
+| 12 | Export engine | **Complete** — `Renderer` abstraction + `Canvas2DRenderer` (real Canvas2D/MediaRecorder/WebAudio pipeline), verified to produce a real, valid output file (see verification notes) |
+| 13 | Quota enforcement | **Complete** — server-side `dailyCount` check + increment in `/api/transcribe`, 429 when exhausted, `QuotaBadge`-equivalent status shown in `Dashboard`/`TranscribePanel` |
+| 14 | UI refinement | **Complete** — `App.tsx` placeholder replaced with `Dashboard` + `EditorShell`, loading/error/empty states throughout, vendor bundle chunking |
+| 15 | Final Phase 1 verification | **Complete** — see "Phase 1 completion pass" verification notes below |
 
 ## Timeline architecture foundation
 
@@ -86,3 +86,206 @@ Per the approval rules, every ported feature must document its origin app. Logge
 - `npx tsx test-timeline-foundation.mts`: 33/33 passed — construction/queries, validation accept + reject cases, and serialization round-trips.
 - **Regression check on Step 2 (authentication), re-run in full rather than assumed safe:** `test-auth-integration.mjs` re-run against a freshly started Firebase Auth Emulator and the real dev server — 9/9 passed, unchanged from Step 2. None of Step 2's files (`AuthContext.tsx`, `LoginPage.tsx`, `ProtectedRoute.tsx`, `router.ts`, `types/user.ts`, `server.ts`) were touched by this work.
 - Repository line-ending state: confirmed still clean (`core.autocrlf false` local config from the prior cleanup holds; new files were authored with LF endings from the start).
+
+## Phase 1 completion pass (Steps 3–15)
+
+Implements the remaining Phase 1 scope in one continuous pass per your
+approval, on top of the existing flat-repo/React+Vite+TS/Express/Firebase
+architecture — no migration to a monorepo, no replacement of Steps 1–2 or
+the timeline foundation, no parallel data model. Every new feature reads/
+writes through `Project`/`TimelineItem` (the timeline foundation) — there
+is exactly one timeline representation in this codebase.
+
+**New modules, by area:**
+- `src/lib/media/{probe,validate,upload}.ts` — file probing (duration/
+  dimensions), validation (type/size), real Firebase Storage upload with
+  progress via `uploadBytesResumable`.
+- `src/components/Editor/{CameraCapture,MediaImportPanel}.tsx` — capture +
+  upload UI with retry-on-error.
+- `src/lib/projects/persistence.ts` — `projects/{projectId}` create/load/
+  save/list/delete via the Firestore client SDK.
+- `src/context/ProjectContext.tsx` — the editor's single source of truth
+  for the `Project` being edited (mirrors `AuthContext`'s pattern).
+- `src/components/{Dashboard,Editor/EditorShell,Editor/PreviewPane,
+  Editor/TimelinePanel,Editor/ItemInspector}.tsx` — the actual product UI.
+- `src/lib/timeline/insert.ts` — editor-facing construction helpers
+  (`appendMediaToTimeline`, `addTextItem`, `addWatermarkItem`,
+  `addCaptionItems`) on top of the existing `utils.ts`, plus a new
+  `updateItem` added to `utils.ts` itself (a real gap — Step 6 was the
+  first caller that needed to patch an existing item's fields).
+- `src/lib/render/compositor.ts` — `drawFrame`, shared verbatim by
+  `PreviewPane` (live preview) and `Canvas2DRenderer` (export), so preview
+  and export can't drift apart into two implementations.
+- `src/lib/transcription/{types,gemini,whisper,index}.ts` +
+  `POST /api/transcribe` in `server.ts` — provider abstraction, Gemini
+  primary, Whisper fallback, server-side quota gate.
+- `src/lib/backgroundRemoval/index.ts` + `BackgroundRemovalButton.tsx` —
+  provider abstraction around `@imgly/background-removal`.
+- `src/lib/export/{renderer,canvas2dRenderer,validate}.ts` +
+  `ExportPanel.tsx` — renderer abstraction, working Canvas2D/MediaRecorder/
+  WebAudio implementation, output validation.
+- `src/components/Editor/{AddTextPanel,WatermarkPanel,TranscribePanel}.tsx`
+  — overlay/AI panels wired into `EditorShell`.
+
+**Architecture decisions made without stopping for approval (per your
+"make a reasonable decision and continue" instruction):**
+- **`projects/{projectId}` persistence goes client SDK direct, not through
+  `server.ts`.** The earlier roadmap tentatively suggested mirroring
+  `/api/user/status`'s server-mediated pattern; on implementation, the
+  reason that pattern exists for `users/{uid}` (role/status/quota must
+  never be client-writable) doesn't apply to `Project` — every field on it
+  is the owning user's own editorial data, and `firestore.rules` already
+  enforces per-document ownership. Documented in
+  `src/lib/projects/persistence.ts`.
+- **`listProjects` sorts client-side, not via Firestore `orderBy`.**
+  `where('ownerUid','==',uid) + orderBy('updatedAt')` on different fields
+  needs a composite index provisioned in the Firebase console — an out-of-
+  repo manual step. Sorting the (capped) result client-side avoids that
+  dependency.
+- **Media sizing convention in `compositor.ts`:** `video` items fill the
+  canvas at `scale: 1`; `image` items draw at 25% canvas width at
+  `scale: 1`, aspect-preserved. Documented in the module since the data
+  model stores percentages/multipliers, not pixels.
+- **Caption style catalog reduced from caption's 17 styles to 3
+  (`src/lib/captions/styles.ts`)** — 3 real, distinct, working styles
+  rather than 17 stub entries that don't actually render differently.
+  Extending the array (not the data model) is how a later pass restores
+  the rest.
+- **Export renderer is client-side Canvas2D/MediaRecorder**, matching what
+  all three legacy apps already did — behind a `Renderer` interface
+  (`src/lib/export/renderer.ts`) specifically so a future server-side
+  Cloud Run renderer can implement the same contract without touching
+  `ExportPanel`. This was flagged as an open architectural decision in the
+  pre-implementation roadmap; resolved here in favor of the renderer
+  abstraction rather than leaving Step 12 unbuilt.
+- **Whisper fallback implemented as a real HTTP-endpoint-backed provider
+  (`WHISPER_API_URL`), not a hardcoded third-party integration** — per the
+  roadmap, no confirmed Whisper deployment exists to port credentials for.
+  Throws a clear `TranscriptionConfigurationError` when unset rather than
+  faking a transcript or building unused infrastructure.
+- **Bundle size:** `@imgly/background-removal`'s ONNX runtime (the
+  multi-MB WASM model) is dynamically `import()`-ed only when background
+  removal actually runs, so it never inflates the initial bundle (verified
+  in `dist/` output — it's its own lazy chunk). Added `manualChunks` in
+  `vite.config.ts` to split the `firebase` and `react` vendor bundles from
+  app code, so app-code changes don't invalidate those (larger, more
+  stable) chunks' cache.
+
+**Known operational requirement, not a code defect:** canvas-based preview/
+export requires the Firebase Storage bucket to serve media with CORS
+enabled for the app's origin — added `storage.cors.json` at the repo root
+(apply once via `gsutil cors set storage.cors.json gs://<bucket>`, a real
+GCP credential this sandbox does not have and cannot apply itself).
+Without it, `<video>`/`<img>` playback in the app still works normally;
+only canvas capture (export) is affected, and `validateRenderResult`
+catches the resulting near-empty output rather than reporting a false
+success.
+
+**Source-of-feature additions to the log above:**
+- **Capture:** `getUserMedia`/`MediaRecorder` flow re-implemented against
+  this app's component structure from EventCam's proven approach (not a
+  verbatim port — EventCam's version was tightly coupled to its own
+  single-screen `App.tsx`).
+- **Watermark/Text overlays:** EventCam's percentage-based
+  `WatermarkSettings`/`TextOverlaySettings` fields, already generalized
+  into `ImageTimelineItem`/`TextTimelineItem` by the timeline foundation —
+  this step is the first real UI writing those fields.
+- **Caption engine:** `CaptionTimelineItem.words` shape unchanged from the
+  timeline foundation (BoltVideoApp's `WordTiming`, itself from caption's
+  `WordCaption`). Cue-chunking (`addCaptionItems`'s `maxCueDurationSeconds`
+  splitting) is new — none of the three legacy apps needed it in quite
+  this form since caption's Whisper pipeline produced cues directly.
+- **Export:** Canvas2D + `MediaRecorder` technique — the same fundamental
+  approach BoltVideoApp/EventCam/caption each used for their own exports,
+  applied here against the shared `Project` model instead of per-app clip
+  state.
+- **Quota enforcement:** `dailyCount`/`lastTranscribeDate` reset logic
+  reused verbatim from `/api/user/status` (Step 2), now actually
+  incremented by a real quota-consuming operation for the first time.
+
+## Phase 1 completion pass — verification notes
+
+- `npx tsc --noEmit`: clean, zero errors, across every new/changed file.
+- `npm run build`: clean (same pre-existing `import.meta`/cjs warning in
+  `server.ts`, unrelated to this work). Main app chunk now split from the
+  `firebase` and `react` vendor chunks (see decisions above);
+  `@imgly/background-removal`'s ONNX runtime confirmed to load only as a
+  separate, on-demand chunk.
+- `npx tsx test-timeline-foundation.mts`: still 33/33 — the timeline
+  foundation itself was not modified (only extended, via the new
+  `updateItem` in `utils.ts`, which is additive).
+- `npx tsx test-editor-foundation.mts` (new, 25 checks): `appendMediaToTimeline`
+  sequential placement, `addTextItem`/`addWatermarkItem`/`addCaptionItems`
+  (including transcript chunking), `updateItem`, `validateMediaFile`,
+  `mediaKindForMimeType`, `validateRenderResult` — 25/25 passed.
+- `npx tsx test-transcription-providers.mts` (new, 4 checks): both
+  providers throw `TranscriptionConfigurationError` — not a fake result —
+  when unconfigured, and confirmed Gemini's provider never calls `fetch()`
+  before that check fails. 4/4 passed.
+- **Regression, re-run in full against a freshly started Firebase Auth
+  Emulator + the real dev server, not assumed safe:** `test-auth-integration.mjs`
+  — 9/9 passed (timeout raised 10s->20s; this sandbox has no reachable
+  real Firestore, so even a valid-token request now waits out the Admin
+  SDK's ~8.5s credential-resolution retry before its own try/catch
+  returns a clean 500 — documented in the test file; this is the route
+  correctly failing closed, not a hang, and not a regression from this
+  work).
+- **New live test against the real dev server + Auth Emulator:**
+  `test-transcribe-endpoint.mjs` (6 checks) — verifies the parts of
+  `POST /api/transcribe` that don't require a reachable Firestore backend:
+  401 with no/invalid token, 400 on missing `storageUrl`/`mimeType`, and
+  403 when the supplied `storageUrl` doesn't belong to the caller's own
+  Storage path — all confirmed to short-circuit *before* any Firestore or
+  transcription-provider call. 6/6 passed.
+- **Firestore- and Storage-emulator-dependent testing was not possible in
+  this sandbox**, unlike the Auth emulator: both the Firestore and Storage
+  emulators require downloading a Java `.jar` from `storage.googleapis.com`
+  at first launch, which the sandbox's network allowlist blocks (same
+  class of restriction that blocked the Auth emulator's optional web UI in
+  Step 2 — that one has no jar and only needed `"ui":{"enabled":false}` to
+  route around; the emulators themselves have no such workaround). This
+  means `projects/{projectId}` and Storage `firestore.rules`/`storage.rules`
+  enforcement, and the Firestore-dependent portion of `/api/transcribe`
+  (quota read/increment, provider dispatch), are verified by code review
+  and the client-side ownership double-check in `loadProject`
+  (`src/lib/projects/persistence.ts`) rather than a live emulator run.
+  Recommend a manual smoke test against the real `riddimroom-studio`
+  Firebase project before/at Phase 1 sign-off — same recommendation Step 2
+  already made for Firestore document shape, now extended to cover
+  `projects/{projectId}` and Storage uploads too.
+- **Export engine — genuinely verified to produce usable output**, not
+  just code-reviewed: a headless-Chromium (Playwright) smoke test
+  (`test-export-browser/`, not part of `npm run build`/`lint` — requires
+  `npm install --no-save playwright`, see that folder's `run.mjs` header)
+  builds a real `Project` (video + text overlay + watermark + captions)
+  against a same-origin synthetic 3-second source video (avoiding the
+  separate CORS operational requirement above so this test isolates the
+  renderer's own mechanics), runs the actual `Canvas2DRenderer`, and
+  confirms: a non-empty `video/webm` blob, duration matching the project
+  (~3s), progress callbacks firing, and `validateRenderResult` accepting
+  the result. 6/6 checks passed (243KB output for a 3s multi-layer
+  export — a real, plausible file size, not a near-empty stub).
+- **Manual end-to-end smoke test against a live Firebase project was not
+  performed** — this sandbox has no real, reachable Firebase project
+  (same limitation as Step 2/timeline-foundation). The 19-step smoke test
+  you specified (sign in -> create project -> upload -> ... -> export ->
+  quota -> unauthorized-access) is covered piecewise by the automated
+  suites above (auth: Step 2's suite; capture/upload: code review +
+  `validateMediaFile`/`probe` unit coverage; project persistence: code
+  review + ownership double-check; overlays/captions: `test-editor-foundation.mts`;
+  export: the live browser smoke test; quota/ownership: `test-transcribe-endpoint.mjs`)
+  but has not been run as one continuous session against real
+  infrastructure. Recommend doing that pass once real Firebase
+  credentials and a `GEMINI_API_KEY` are available.
+
+**Remaining external configuration requirements (not code blockers):**
+1. Storage bucket CORS (`storage.cors.json`, apply via `gsutil`) — needed
+   for canvas-based preview/export, not for ordinary playback/upload.
+2. `GEMINI_API_KEY` — still the `.env.example` placeholder in this build;
+   `/api/transcribe` returns a clear 503 configuration error until a real
+   key is set, never a fake transcript.
+3. `WHISPER_API_URL` — optional, unset by default; no confirmed Whisper
+   deployment exists to point it at yet (see Risks in the earlier audit).
+4. A Firestore composite index is **not** required (see the `listProjects`
+   decision above) — noting this explicitly since it's the kind of thing
+   that's easy to assume is needed and isn't.
