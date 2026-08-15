@@ -66,6 +66,16 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     if (!el) {
       el = new Image();
       el.crossOrigin = 'anonymous';
+      // Diagnostic only — this does not change what gets drawn. A failed
+      // load (network error, 404, or a Storage bucket missing CORS config
+      // for this origin) leaves `el` in the "broken" state (complete=true,
+      // naturalWidth=0); `drawFrame`'s `isImageReady` check in
+      // compositor.ts is what actually keeps a broken image out of
+      // `ctx.drawImage()`, so this handler only surfaces the failure for
+      // debugging rather than papering over it.
+      el.onerror = () => {
+        console.warn(`[PreviewPane] failed to load image asset "${assetId}" from ${storageUrl}`);
+      };
       el.src = storageUrl;
       imageElsRef.current.set(assetId, el);
     }

@@ -2,6 +2,33 @@
 
 All notable changes to RiddimRoom Studio are documented here, in order, per the approved build process (small logical commits, changelog updated continuously).
 
+## [Unreleased] — CORS + broken-canvas-image fix
+
+Fixes a live bug: an existing Firebase-Storage-backed image failed to load
+in the browser (missing Storage CORS configuration) and then crashed the
+canvas render loop (`InvalidStateError` from calling `drawImage()` on a
+broken `<img>`).
+
+- `storage.cors.json` — rewritten to restrict `origin` to
+  `http://localhost:3000` (no bare `*`), methods `GET, HEAD, OPTIONS`,
+  response headers `Content-Type, Authorization`. **Not yet applied to the
+  real bucket** — no GCP-authenticated CLI is reachable from this sandbox
+  or the device environment; the exact command to run is documented in
+  PROGRESS.md.
+- `src/lib/render/compositor.ts` — added an `isImageReady()` guard
+  (`complete && naturalWidth > 0 && naturalHeight > 0`) before drawing any
+  `image` timeline item, plus a defensive try/catch around the
+  `drawImage()` call itself (mirroring the existing video-draw pattern).
+  Render-loop safety net only; does not address the CORS root cause.
+- `src/components/Editor/PreviewPane.tsx` — `getImageEl` now logs a
+  `console.warn` on image load failure, for diagnostics only.
+- `storage.rules` reviewed and confirmed unchanged — the bug is a CORS
+  configuration gap, not an authorization problem; security was not
+  weakened to work around it.
+- Full existing test suite (77 checks across 5 suites) plus the
+  `test-export-browser/` Playwright smoke test re-run: all passing, no
+  regressions.
+
 ## [Unreleased] — Phase 1
 
 ### Phase 1 completion pass (Steps 3–15: Shared storage, Capture, Upload, Shared editor shell, Background removal, Watermark overlay, Text overlay, AI transcription, Caption engine, Export engine, Quota enforcement, UI refinement, Final Phase 1 verification)

@@ -71,6 +71,19 @@ function drawVideoItem(
   );
 }
 
+/**
+ * True once `img` has finished loading successfully and has real pixel
+ * dimensions. A broken image (failed network fetch, CORS rejection, 404,
+ * etc.) still has `complete === true` but `naturalWidth === 0` — this is
+ * the standard way to tell "loaded" apart from "finished trying and
+ * failed" for an `HTMLImageElement`. `drawImage()` throws a synchronous
+ * `InvalidStateError` on a broken image, so every caller must gate on this
+ * before drawing rather than assuming a non-null `img` is usable.
+ */
+function isImageReady(img: HTMLImageElement): boolean {
+  return img.complete && img.naturalWidth > 0 && img.naturalHeight > 0;
+}
+
 function drawImageItem(
   ctx: CanvasRenderingContext2D,
   item: ImageTimelineItem,
@@ -84,7 +97,22 @@ function drawImageItem(
   const aspect = img.naturalHeight > 0 && img.naturalWidth > 0 ? img.naturalHeight / img.naturalWidth : 1;
   const w = baseWidth;
   const h = baseWidth * aspect;
-  applyTransformedDraw(ctx, (c) => c.drawImage(img, -w / 2, -h / 2, w, h), item, centerX, centerY);
+  applyTransformedDraw(
+    ctx,
+    (c) => {
+      try {
+        c.drawImage(img, -w / 2, -h / 2, w, h);
+      } catch {
+        // Defense in depth only — the isImageReady() gate in drawFrame is
+        // the real guard against a broken image. Mirrors drawVideoItem's
+        // existing try/catch so a race between the check and the draw call
+        // can never crash the render/animation loop.
+      }
+    },
+    item,
+    centerX,
+    centerY,
+  );
 }
 
 function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, canvasWidth: number, canvasHeight: number) {
@@ -182,7 +210,11 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
       }
       case 'image': {
         const img = assets.images.get(item.mediaAssetId);
-        if (img) drawImageItem(ctx, item, img, canvasWidth, canvasHeight);
+        // isImageReady guards against drawing a broken image (failed
+        // fetch/CORS-rejected/still-loading) — see its doc comment above.
+        // This is a render-loop safety net, not a fix for *why* an image
+        // might fail to load (e.g. missing Storage CORS config).
+        if (img && isImageReady(img)) drawImageItem(ctx, item, img, canvasWidth, canvasHeight);
         break;
       }
       case 'text': {

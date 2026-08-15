@@ -289,3 +289,104 @@ success.
 4. A Firestore composite index is **not** required (see the `listProjects`
    decision above) — noting this explicitly since it's the kind of thing
    that's easy to assume is needed and isn't.
+
+## CORS + broken-canvas-image fix (post-Phase-1 live bug report)
+
+**Bug reported:** loading an existing Artistly PNG from Firebase Storage in
+the browser at `http://localhost:3000` failed with a CORS error
+(`No 'Access-Control-Allow-Origin' header is present`) followed by
+`net::ERR_FAILED`, followed by `compositor.ts:87 Uncaught
+InvalidStateError: Failed to execute 'drawImage' ... 'broken' state` — this
+is exactly the risk flagged (but not yet resolved) in the Phase 1
+completion pass notes above: `storage.cors.json` existed in the repo but
+was never actually applied to the real bucket, because neither this
+sandbox nor the device environment has GCP credentials to run
+`gsutil`/`gcloud`/`firebase` against the real `riddimroom-studio` project.
+Re-verified fresh in this pass: `which gcloud gsutil firebase` and
+`~/.config/gcloud` both come back empty on the device, and this sandbox
+has network but no authenticated access to this specific GCP project — so
+the CORS config is written and correct but **not applied**; that remains a
+real action the project owner needs to perform (see below).
+
+**Root cause, confirmed (not assumed):** a default Firebase Storage bucket
+has no CORS configuration at all — every cross-origin `<img
+crossOrigin="anonymous">`/`<video crossOrigin="anonymous">` request to it
+fails at the browser's CORS check regardless of whether the request would
+otherwise have been authorized. This is independent of `storage.rules`:
+confirmed via a fresh read of `src/lib/media/upload.ts` that
+`getDownloadURL()` returns real, unmodified Firebase Storage URLs (no
+proxying), and confirmed via Firebase's own documented behavior that the
+token embedded in a download URL is itself the access-control mechanism
+for that specific object once obtained — a plain `<img>` GET to it does
+not send an `Authorization` header and is not gated by `storage.rules` a
+second time at fetch time. That means the reported failure is a genuine,
+isolated CORS-configuration gap, not a masked authorization problem —
+**`storage.rules` was reviewed and is unchanged and does not need to
+change.**
+
+**Fixes applied (smallest safe change, per your explicit constraint):**
+1. `storage.cors.json` rewritten to the precise spec requested: origin
+   restricted to `http://localhost:3000` (no bare `*`), methods
+   `GET, HEAD, OPTIONS` (added `OPTIONS` for the preflight itself),
+   response headers `Content-Type, Authorization`. No production origin
+   was added because none exists yet in this repo — `firebase.json` has no
+   `hosting` block, there's no Dockerfile/Cloud Build config, and
+   `.env.example`'s `APP_URL` is still the literal placeholder
+   `"MY_APP_URL"`. **Add the real production origin to this file's
+   `origin` array once one exists, then re-run the command below.**
+2. **Still not applied to the real bucket** — no GCP credentials are
+   reachable from this sandbox or the device environment. The exact
+   command to run once, from a machine with `gcloud`/`gsutil`
+   authenticated against the `riddimroom-studio` project:
+   ```
+   gsutil cors set storage.cors.json gs://riddimroom-studio.firebasestorage.app
+   ```
+   or, with the newer `gcloud storage` surface:
+   ```
+   gcloud storage buckets update gs://riddimroom-studio.firebasestorage.app --cors-file=storage.cors.json
+   ```
+3. `src/lib/render/compositor.ts` — added `isImageReady(img)` (`img.complete
+   && img.naturalWidth > 0 && img.naturalHeight > 0`, the standard way to
+   tell a successfully-loaded image apart from a broken one) and gated
+   `drawFrame`'s `image` case on it before ever calling `drawImageItem`;
+   also wrapped `drawImageItem`'s `ctx.drawImage()` call in the same
+   try/catch pattern `drawVideoItem` already used, as defense in depth.
+   This is a render-loop safety net only — it does **not** fix or mask the
+   CORS root cause; a broken image is now silently skipped for that frame
+   instead of crashing the whole render/animation loop.
+4. `src/components/Editor/PreviewPane.tsx` — `getImageEl` now attaches an
+   `onerror` handler that `console.warn`s the failed asset id/URL, purely
+   for diagnostics. It does not change what gets drawn (that's
+   `compositor.ts`'s job) and does not retry or substitute a fallback
+   image.
+
+**Validation performed:**
+- `npx tsc --noEmit`: clean.
+- `npm run build`: clean (same pre-existing unrelated `import.meta`/cjs
+  warning in `server.ts`).
+- Full existing regression suite re-run, nothing skipped:
+  `test-timeline-foundation.mts` 33/33, `test-editor-foundation.mts`
+  25/25, `test-transcription-providers.mts` 4/4, `test-auth-integration.mjs`
+  9/9 (against a freshly started Auth Emulator + real dev server),
+  `test-transcribe-endpoint.mjs` 6/6 (same) — 77/77 passed, zero skipped,
+  zero new failures.
+- `test-export-browser/` (headless Chromium/Playwright), re-run after the
+  `compositor.ts` change since it exercises `drawImageItem`/`isImageReady`
+  on a real (same-origin, data-URL) watermark image: 6/6 checks passed,
+  222KB real `video/webm` output — confirms the new readiness gate does
+  not regress the working-image path.
+- **What was not, and could not be, verified from this environment:**
+  loading a real `https://firebasestorage.googleapis.com/...` image in an
+  actual browser at `http://localhost:3000` after the CORS config is
+  applied. This sandbox and the device bridge have no way to open a real
+  browser against the user's live Firebase project with real uploaded
+  assets and observe the network/console. **The CORS fix itself has not
+  been applied to the real bucket** (see step 2 above) — until that gsutil/
+  gcloud command is run, the original bug will still reproduce exactly as
+  reported, because the code-side fixes (3 and 4) are a safety net for
+  *already-broken* images, not a substitute for the actual CORS headers a
+  successful cross-origin image load requires. Once the CORS command is
+  run, the recommended check is: hard-refresh `http://localhost:3000`,
+  open an existing project with a Firebase-Storage-backed image, confirm
+  no CORS error in the console, and confirm the image renders in the
+  preview canvas.
