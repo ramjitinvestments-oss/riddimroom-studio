@@ -9,6 +9,7 @@
 
 import type {
   CaptionTimelineItem,
+  FadeSettings,
   Project,
   Track,
   TrackType,
@@ -325,6 +326,108 @@ export function splitItemAtTime(project: Project, itemId: string, atTime: number
   let next = updateItem(project, itemId, firstPatch);
   next = addItem(next, newItem);
   return next;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-dissolve — a real, user-facing adjacent-clip transition built on
+// the fade mechanism the compositor already implements (see
+// `lib/render/compositor.ts`'s `computeFadeOpacity`): two adjacent same-
+// track items with an overlapping time range and complementary fade-out/
+// fade-in genuinely cross-dissolve, because both get drawn (back-to-front
+// by zIndex) during the overlap with opposing opacity ramps. This isn't a
+// new rendering feature — it's a one-click way to set up the two
+// ingredients (overlap + complementary fades) `applyCrossDissolve`'s
+// caller (ItemInspector) would otherwise require the user to configure by
+// hand across two different items.
+// ---------------------------------------------------------------------------
+
+function hasFadeField(item: TimelineItem): item is Extract<TimelineItem, { fade?: FadeSettings } | { fade: FadeSettings }> {
+  return item.type === 'video' || item.type === 'image' || item.type === 'text' || item.type === 'audio';
+}
+
+/**
+ * The item on the same track as `itemId` that follows it in time — i.e.
+ * the "appropriate neighboring clip" a cross-dissolve control needs to
+ * exist before it can offer anything. Returns undefined if there is no
+ * item on the same track after this one, or if the nearest one is too far
+ * away (more than 2s gap) to plausibly be an intentional back-to-back
+ * pairing rather than two unrelated clips.
+ */
+export function findAdjacentNextItem(project: Project, itemId: string): TimelineItem | undefined {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item) return undefined;
+  const candidates = project.items
+    .filter((i) => i.id !== itemId && i.trackId === item.trackId && i.startTime >= item.startTime)
+    .sort((a, b) => a.startTime - b.startTime);
+  const next = candidates[0];
+  if (!next) return undefined;
+  const MAX_ADJACENCY_GAP_SECONDS = 2;
+  if (next.startTime - item.endTime > MAX_ADJACENCY_GAP_SECONDS) return undefined;
+  return next;
+}
+
+/** True if `itemId` and its adjacent next item (see `findAdjacentNextItem`) both support `fade`, i.e. a cross-dissolve control has something real to offer here. */
+export function canCrossDissolve(project: Project, itemId: string): boolean {
+  const item = project.items.find((i) => i.id === itemId);
+  const next = findAdjacentNextItem(project, itemId);
+  return !!item && !!next && hasFadeField(item) && hasFadeField(next);
+}
+
+/** True if `itemId` and its adjacent next item already overlap by roughly `durationSeconds` — i.e. a cross-dissolve has already been applied here, so the control shouldn't re-apply (and cumulatively re-shift) it. */
+export function crossDissolveAlreadyApplied(project: Project, itemId: string, durationSeconds = 0.6): boolean {
+  const item = project.items.find((i) => i.id === itemId);
+  const next = findAdjacentNextItem(project, itemId);
+  if (!item || !next) return false;
+  const overlap = item.endTime - next.startTime;
+  return overlap >= durationSeconds - 0.05;
+}
+
+/**
+ * Pulls the adjacent next item on the same track earlier so it overlaps
+ * `itemId`'s tail by `durationSeconds`, and sets complementary fade-out
+ * (on `itemId`) / fade-in (on the next item) for that same duration — a
+ * real cross-dissolve: both clips draw simultaneously during the overlap
+ * with opposing opacity ramps, not a cosmetic flag. No-op if there's no
+ * adjacent next item or either item lacks a `fade` field (e.g. captions).
+ */
+export function applyCrossDissolve(project: Project, itemId: string, durationSeconds = 0.6): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item) return project;
+  const next = findAdjacentNextItem(project, itemId);
+  if (!next || !hasFadeField(item) || !hasFadeField(next)) return project;
+
+  const dur = Math.max(0.1, Math.min(durationSeconds, getItemDuration(item), getItemDuration(next)));
+  // The overlap is intentional here, so preventOverlap is explicitly off —
+  // this is the one legitimate caller of moveItem that WANTS an overlap.
+  let next_ = moveItem(project, next.id, item.endTime - dur, { preventOverlap: false });
+  const itemFade = (item as { fade?: FadeSettings }).fade;
+  const nextFade = (next as { fade?: FadeSettings }).fade;
+  next_ = updateItem(next_, item.id, { fade: { fadeInDuration: itemFade?.fadeInDuration ?? 0, fadeOutDuration: dur } });
+  next_ = updateItem(next_, next.id, { fade: { fadeInDuration: dur, fadeOutDuration: nextFade?.fadeOutDuration ?? 0 } });
+  return next_;
+}
+
+// ---------------------------------------------------------------------------
+// Caption word editing — "Add word"
+// ---------------------------------------------------------------------------
+
+/**
+ * Appends a new word to a caption item, placed chronologically after the
+ * last existing word (or at t=0 for an empty caption) with sane default
+ * timing that is never negative or reversed — the two invalid states the
+ * caption editor's Add Word control must never produce. Returns `project`
+ * unchanged if `itemId` doesn't reference an existing caption item.
+ */
+export function addCaptionWord(project: Project, itemId: string, text = 'word'): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || item.type !== 'caption') return project;
+  const GAP_SECONDS = 0.1;
+  const DEFAULT_WORD_DURATION_SECONDS = 0.4;
+  const last = item.words[item.words.length - 1];
+  const start = Math.max(0, last ? last.end + GAP_SECONDS : 0);
+  const end = start + DEFAULT_WORD_DURATION_SECONDS;
+  const words = [...item.words, { text, start, end }];
+  return updateItem(project, itemId, { words });
 }
 
 // ---------------------------------------------------------------------------

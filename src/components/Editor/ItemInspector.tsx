@@ -1,8 +1,20 @@
 import React from 'react';
 import type { AnimationPreset, CaptionTimelineItem, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
-import { updateItem, removeItem, getItemDuration, trimItemStart, setItemDuration } from '../../lib/timeline/utils';
+import {
+  updateItem,
+  removeItem,
+  getItemDuration,
+  trimItemStart,
+  setItemDuration,
+  canCrossDissolve,
+  crossDissolveAlreadyApplied,
+  applyCrossDissolve,
+  addCaptionWord,
+} from '../../lib/timeline/utils';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
+
+const CROSS_DISSOLVE_DURATION_SECONDS = 0.6;
 
 /**
  * Generic property inspector for the currently-selected timeline item.
@@ -39,7 +51,7 @@ const TEXT_ONLY_ANIMATION_OPTIONS: { value: AnimationPreset; label: string }[] =
 ];
 
 export function ItemInspector({ item }: { item: TimelineItem }) {
-  const { mutate } = useProject();
+  const { mutate, project } = useProject();
 
   const patch = (fields: Record<string, unknown>) => {
     mutate((project) => updateItem(project, item.id, fields));
@@ -59,6 +71,13 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
   const animation = hasAnimation ? (item as any).animation as { entrance?: AnimationPreset; exit?: AnimationPreset } | undefined : undefined;
   const fade = hasAnimation ? (item as any).fade as { fadeInDuration: number; fadeOutDuration: number } | undefined : undefined;
   const animationOptions = item.type === 'text' ? [...ANIMATION_OPTIONS, ...TEXT_ONLY_ANIMATION_OPTIONS] : ANIMATION_OPTIONS;
+
+  // Cross Dissolve — only offered when there's an actual adjacent same-
+  // track item to dissolve into/from (see `findAdjacentNextItem`'s doc
+  // comment); this is what keeps the control from ever being a cosmetic
+  // button with nothing real to do.
+  const dissolveAvailable = hasAnimation && !!project && canCrossDissolve(project, item.id);
+  const dissolveApplied = dissolveAvailable && !!project && crossDissolveAlreadyApplied(project, item.id, CROSS_DISSOLVE_DURATION_SECONDS);
 
   return (
     <div className="flex flex-col gap-3 bg-white/5 rounded-lg p-3 text-xs">
@@ -205,6 +224,20 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
               />
             </label>
           </div>
+          {dissolveAvailable && (
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={() => mutate((p) => applyCrossDissolve(p, item.id, CROSS_DISSOLVE_DURATION_SECONDS))}
+                disabled={dissolveApplied}
+                className={`px-2 py-1 rounded uppercase tracking-wide font-bold text-[11px] ${
+                  dissolveApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                }`}
+                title="Overlap this clip with the next one on this track and cross-fade between them"
+              >
+                {dissolveApplied ? 'Cross Dissolve Applied' : 'Cross Dissolve →'}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -262,11 +295,22 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
   };
 
   const updateWord = (index: number, fields: Partial<CaptionTimelineItem['words'][number]>) => {
-    patchWords(item.words.map((w, i) => (i === index ? { ...w, ...fields } : w)));
+    const words = item.words.map((w, i) => (i === index ? { ...w, ...fields } : w));
+    // Guard against invalid negative/reversed timing from a manual edit —
+    // same invariant `addCaptionWord` enforces for the Add Word control.
+    const edited = words[index];
+    const start = Math.max(0, edited.start);
+    const end = Math.max(start + 0.01, edited.end);
+    words[index] = { ...edited, start, end };
+    patchWords(words);
   };
 
   const deleteWord = (index: number) => {
     patchWords(item.words.filter((_, i) => i !== index));
+  };
+
+  const addWord = () => {
+    mutate((project) => addCaptionWord(project, item.id));
   };
 
   return (
@@ -320,6 +364,12 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
           </div>
         ))}
       </div>
+      <button
+        onClick={addWord}
+        className="self-start px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white uppercase tracking-wide font-bold text-[11px]"
+      >
+        + Add word
+      </button>
       <p className="text-white/30">
         Timeline span: {item.startTime.toFixed(1)}s – {item.endTime.toFixed(1)}s ({(item.endTime - item.startTime).toFixed(1)}s)
       </p>

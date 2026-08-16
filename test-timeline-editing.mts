@@ -288,6 +288,30 @@ function buildProject(): Project {
     'computeEntranceExit falls back to a real fade (not a silent no-op) for a preset without bespoke motion',
     unimplementedPreset.opacityMul < 1,
   );
+
+  // Regression test — "final editor completion pass" (Priority 6/7 headless
+  // verification) found that the identity-adjustment early returns handed
+  // back the shared IDENTITY_ADJUSTMENT object by reference. Callers (e.g.
+  // `animationFor` in compositor.ts) mutate the returned object in place
+  // (`a.opacityMul *= someFadeValue`), so a single caller multiplying an
+  // identity result down (e.g. a video item mid fade-in) permanently
+  // corrupted the shared singleton for every other item/frame that hit the
+  // identity fast path for the rest of the session — items silently
+  // rendered invisible with no console error. Simulates that exact caller
+  // pattern here: mutate the object returned by one identity call, then
+  // confirm a later identity call is unaffected.
+  const firstIdentity = computeEntranceExit(undefined, 0, 5, 5, 1080, 1920);
+  (firstIdentity as any).opacityMul *= 0; // mimic a caller's `a.opacityMul *= computeFadeOpacity(...)`
+  const secondIdentity = computeEntranceExit('none', 0, 5, 5, 1080, 1920);
+  check(
+    'computeEntranceExit identity results are independent objects — mutating one does not corrupt a later call',
+    secondIdentity.opacityMul === 1,
+  );
+  const thirdIdentity = computeEntranceExit(undefined, 2, 2, 5, 1080, 1920); // outside any enter/exit window -> also hits the identity fast path
+  check(
+    'computeEntranceExit "outside animation window" identity result is also independent (not the corrupted singleton)',
+    thirdIdentity.opacityMul === 1,
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

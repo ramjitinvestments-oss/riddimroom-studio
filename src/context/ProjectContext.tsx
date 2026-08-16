@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { Project } from '../types/timeline';
 import { loadProject, saveProject } from '../lib/projects/persistence';
+import { emptyHistory, pushHistory, undoHistory, redoHistory, shouldCoalesce, type History } from '../lib/history';
 
 /**
  * Phase 1 Step 6 (Shared editor shell) — holds the single `Project` the
@@ -17,6 +18,16 @@ import { loadProject, saveProject } from '../lib/projects/persistence';
  * every keystroke, so a caption-text edit-in-progress doesn't spam
  * Firestore writes; callers debounce or trigger save at natural points
  * (blur, "Save" button, before export).
+ *
+ * Undo/redo (added in the "final editor completion" pass): every `mutate`
+ * call now also records a history snapshot via `lib/history` — no caller
+ * (TimelinePanel, ItemInspector, TranscribePanel, etc.) needed to change,
+ * since `mutate`'s own signature is unchanged. History lives in a ref
+ * (`historyRef`), not React state, because snapshotting on every `mutate`
+ * already forces a re-render via `setProject`; `historyVersion` is a tiny
+ * extra state bump solely so `canUndo`/`canRedo` recompute on undo/redo
+ * calls that don't otherwise change `project` identity in a way consumers
+ * would notice (they do, but this makes the intent explicit and cheap).
  */
 
 interface ProjectContextValue {
@@ -30,6 +41,10 @@ interface ProjectContextValue {
   mutate: (updater: (project: Project) => Project) => void;
   save: () => Promise<void>;
   reload: () => Promise<void>;
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 const ProjectContext = createContext<ProjectContextValue | undefined>(undefined);
@@ -51,6 +66,9 @@ export function ProjectProvider({
   const [isDirty, setIsDirty] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const projectRef = useRef<Project | null>(null);
+  const historyRef = useRef<History<Project>>(emptyHistory());
+  const lastEditAtRef = useRef<number>(0);
+  const [historyVersion, setHistoryVersion] = useState(0);
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -62,6 +80,11 @@ export function ProjectProvider({
         projectRef.current = result.project;
         setLastSavedAt(result.project.updatedAt);
         setIsDirty(false);
+        // A freshly-loaded project starts with a clean slate — undoing past
+        // it would have nothing meaningful to restore to.
+        historyRef.current = emptyHistory();
+        lastEditAtRef.current = 0;
+        setHistoryVersion((v) => v + 1);
       } else {
         setLoadError(result.error || 'Failed to load project.');
       }
@@ -82,11 +105,52 @@ export function ProjectProvider({
   const mutate = useCallback((updater: (project: Project) => Project) => {
     setProject((current) => {
       if (!current) return current;
+      const now = Date.now();
+      // Coalesce a burst of rapid edits (one continuous clip drag firing
+      // `mutate` on every mousemove, or one continuous typing burst firing
+      // it on every keystroke) into a single undo step — see lib/history's
+      // header comment for why this matters.
+      const coalesce = shouldCoalesce(now - lastEditAtRef.current);
+      historyRef.current = pushHistory(historyRef.current, current, { coalesce });
+      lastEditAtRef.current = now;
       const next = updater(current);
       projectRef.current = next;
       return next;
     });
     setIsDirty(true);
+    setHistoryVersion((v) => v + 1);
+  }, []);
+
+  const undo = useCallback(() => {
+    setProject((current) => {
+      if (!current) return current;
+      const result = undoHistory(historyRef.current, current);
+      if (result.value === null) return current;
+      historyRef.current = result.history;
+      projectRef.current = result.value;
+      return result.value;
+    });
+    // Reset the coalescing clock so the NEXT edit always starts a fresh
+    // history step rather than folding into whatever step undo just
+    // restored — otherwise a quick edit right after undo could silently
+    // merge into (and destroy) the just-restored snapshot.
+    lastEditAtRef.current = 0;
+    setIsDirty(true);
+    setHistoryVersion((v) => v + 1);
+  }, []);
+
+  const redo = useCallback(() => {
+    setProject((current) => {
+      if (!current) return current;
+      const result = redoHistory(historyRef.current, current);
+      if (result.value === null) return current;
+      historyRef.current = result.history;
+      projectRef.current = result.value;
+      return result.value;
+    });
+    lastEditAtRef.current = 0;
+    setIsDirty(true);
+    setHistoryVersion((v) => v + 1);
   }, []);
 
   const save = useCallback(async () => {
@@ -107,9 +171,30 @@ export function ProjectProvider({
     }
   }, []);
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- historyVersion exists solely to force this recompute
+  const canUndo = historyRef.current.past.length > 0;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const canRedo = historyRef.current.future.length > 0;
+  void historyVersion; // referenced only to satisfy the "why does this re-render" reader; canUndo/canRedo are read fresh from the ref every render
+
   return (
     <ProjectContext.Provider
-      value={{ project, isLoading, loadError, isSaving, saveError, isDirty, lastSavedAt, mutate, save, reload: load }}
+      value={{
+        project,
+        isLoading,
+        loadError,
+        isSaving,
+        saveError,
+        isDirty,
+        lastSavedAt,
+        mutate,
+        save,
+        reload: load,
+        undo,
+        redo,
+        canUndo,
+        canRedo,
+      }}
     >
       {children}
     </ProjectContext.Provider>

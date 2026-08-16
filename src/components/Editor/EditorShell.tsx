@@ -23,7 +23,8 @@ import type { MediaAsset } from '../../types/timeline';
  */
 
 function EditorInner({ uid }: { uid: string }) {
-  const { project, isLoading, loadError, isSaving, saveError, isDirty, lastSavedAt, mutate, save } = useProject();
+  const { project, isLoading, loadError, isSaving, saveError, isDirty, lastSavedAt, mutate, save, undo, redo, canUndo, canRedo } =
+    useProject();
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -44,11 +45,17 @@ function EditorInner({ uid }: { uid: string }) {
     [mutate, currentTime],
   );
 
-  // Minimal, real keyboard shortcut set (Phase-10 audit item): Space play/
-  // pause, Delete/Backspace deletes the selected item, arrow keys nudge the
-  // playhead by one frame (Shift+arrow for a 1s jump). Ignored while focus
-  // is in a text field/textarea/select so typing a caption word or a text
-  // item's content never gets hijacked by a shortcut.
+  // Minimal, real keyboard shortcut set (Phase-10 audit item, extended in
+  // the "final completion" pass with undo/redo): Space play/pause,
+  // Delete/Backspace deletes the selected item, arrow keys nudge the
+  // playhead by one frame (Shift+arrow for a 1s jump), Ctrl/Cmd+Z undoes,
+  // Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redoes. Ignored while focus is in a
+  // text field/textarea/select so typing a caption word or a text item's
+  // content never gets hijacked by a shortcut — e.g. pressing Delete while
+  // editing caption text deletes text (the browser's native input
+  // behavior), not the whole caption item; Ctrl+Z while typing invokes the
+  // browser's own per-field text undo rather than our project-level undo,
+  // which is the behavior a user actually wants while composing text.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -56,9 +63,18 @@ function EditorInner({ uid }: { uid: string }) {
       const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!target?.isContentEditable;
       if (isEditable) return;
 
+      const mod = e.ctrlKey || e.metaKey;
+
       if (e.code === 'Space') {
         e.preventDefault();
         setIsPlaying((p) => !p);
+      } else if (mod && e.code === 'KeyZ') {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (mod && e.code === 'KeyY') {
+        e.preventDefault();
+        redo();
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedItemId) {
           e.preventDefault();
@@ -78,7 +94,7 @@ function EditorInner({ uid }: { uid: string }) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedItemId, mutate]);
+  }, [selectedItemId, mutate, undo, redo]);
 
   if (isLoading) {
     return (
@@ -115,6 +131,24 @@ function EditorInner({ uid }: { uid: string }) {
           />
         </div>
         <div className="flex items-center gap-3 text-xs">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              title="Undo (Ctrl/Cmd+Z)"
+              className="px-2.5 py-1.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white"
+            >
+              ↺ Undo
+            </button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              title="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
+              className="px-2.5 py-1.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white"
+            >
+              ↻ Redo
+            </button>
+          </div>
           {saveError && <span className="text-red-400">{saveError}</span>}
           <span className="text-white/30">
             {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}

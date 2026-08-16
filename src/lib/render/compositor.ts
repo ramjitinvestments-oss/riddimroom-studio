@@ -97,11 +97,22 @@ export function computeEntranceExit(
   canvasWidth: number,
   canvasHeight: number,
 ): AnimatedAdjustment {
-  if (!preset || preset === 'none') return IDENTITY_ADJUSTMENT;
+  // Callers (`animationFor`) mutate the returned object in place
+  // (`a.opacityMul *= computeFadeOpacity(...)`), so every early return here
+  // MUST hand back a fresh copy, never the shared `IDENTITY_ADJUSTMENT`
+  // singleton by reference — returning the singleton directly let a single
+  // faded/animating item permanently corrupt it (e.g. one video item's
+  // fade-in multiplying it down to 0), after which every other item that
+  // hit this fast path for the rest of the session inherited that same
+  // corrupted opacity and silently rendered invisible. Found via headless
+  // pixel-sampling verification (Priority 6/7 real-content checks) — a
+  // video item and a kinetic text item both progressively faded to fully
+  // transparent a few seconds into playback with no console error.
+  if (!preset || preset === 'none') return { ...IDENTITY_ADJUSTMENT };
   const dur = Math.min(ANIMATION_DURATION_SECONDS, Math.max(0.05, itemDurationSeconds / 2));
   const inEnter = sinceStart < dur;
   const inExit = untilEnd < dur;
-  if (!inEnter && !inExit) return IDENTITY_ADJUSTMENT;
+  if (!inEnter && !inExit) return { ...IDENTITY_ADJUSTMENT };
 
   const enterP = easeOutCubic(clamp01(sinceStart / dur));
   const exitP = easeOutCubic(clamp01(untilEnd / dur));
