@@ -1,16 +1,42 @@
 import React from 'react';
-import type { TimelineItem } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
-import { updateItem, removeItem, getItemDuration } from '../../lib/timeline/utils';
+import { updateItem, removeItem, getItemDuration, trimItemStart, setItemDuration } from '../../lib/timeline/utils';
+import { CAPTION_STYLES } from '../../lib/captions/styles';
 
 /**
  * Generic property inspector for the currently-selected timeline item.
  * Fields shown depend on the item's `type` (position/size/opacity for
  * anything visual, text content/font/color for `text`, timing for
  * everything) — all edits go through `useProject().mutate` +
- * `updateItem`, i.e. through the Project/Timeline model, never local
- * component state that would need reconciling with it later.
+ * `updateItem`/the trim/duration helpers, i.e. through the Project/Timeline
+ * model, never local component state that would need reconciling with it
+ * later.
+ *
+ * Start/Duration route through `trimItemStart`/`setItemDuration` (not a raw
+ * `updateItem({startTime/endTime})` patch) specifically because a video/
+ * audio item also carries a `trimStart`/`trimEnd` source-playback window
+ * that must move in lockstep with the timeline slot — see those functions'
+ * doc comments in `lib/timeline/utils.ts` for the bug this replaced
+ * ("shortening" a clip used to change its timeline slot but not which part
+ * of the source video actually played).
  */
+
+const ANIMATION_OPTIONS: { value: AnimationPreset; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'fade', label: 'Fade' },
+  { value: 'slide-up', label: 'Slide up' },
+  { value: 'slide-down', label: 'Slide down' },
+  { value: 'slide-left', label: 'Slide left' },
+  { value: 'slide-right', label: 'Slide right' },
+  { value: 'zoom', label: 'Zoom' },
+  { value: 'pop', label: 'Pop' },
+];
+
+const TEXT_ONLY_ANIMATION_OPTIONS: { value: AnimationPreset; label: string }[] = [
+  { value: 'typewriter', label: 'Typewriter' },
+  { value: 'word-by-word', label: 'Word by word' },
+];
 
 export function ItemInspector({ item }: { item: TimelineItem }) {
   const { mutate } = useProject();
@@ -29,6 +55,10 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
   };
 
   const duration = getItemDuration(item);
+  const hasAnimation = item.type === 'video' || item.type === 'image' || item.type === 'text';
+  const animation = hasAnimation ? (item as any).animation as { entrance?: AnimationPreset; exit?: AnimationPreset } | undefined : undefined;
+  const fade = hasAnimation ? (item as any).fade as { fadeInDuration: number; fadeOutDuration: number } | undefined : undefined;
+  const animationOptions = item.type === 'text' ? [...ANIMATION_OPTIONS, ...TEXT_ONLY_ANIMATION_OPTIONS] : ANIMATION_OPTIONS;
 
   return (
     <div className="flex flex-col gap-3 bg-white/5 rounded-lg p-3 text-xs">
@@ -114,34 +144,185 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
         </>
       )}
 
-      <div className="flex items-center gap-2">
-        <label className="flex flex-col gap-1 flex-1">
-          Start (s)
-          <input
-            type="number"
-            step={0.1}
-            value={item.startTime}
-            onChange={(e) => patch({ startTime: Number(e.target.value) })}
-            className="bg-white/10 rounded px-2 py-1 text-white"
-          />
-        </label>
-        <label className="flex flex-col gap-1 flex-1">
-          End (s)
-          <input
-            type="number"
-            step={0.1}
-            value={item.endTime}
-            onChange={(e) => patch({ endTime: Number(e.target.value) })}
-            className="bg-white/10 rounded px-2 py-1 text-white"
-          />
-        </label>
-      </div>
-      <p className="text-white/30">Duration: {duration.toFixed(1)}s</p>
+      {hasAnimation && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Transition</span>
+          <div className="flex items-center gap-2">
+            <label className="flex flex-col gap-1 flex-1">
+              Entrance
+              <select
+                value={animation?.entrance ?? 'none'}
+                onChange={(e) => patch({ animation: { ...animation, entrance: e.target.value as AnimationPreset } })}
+                className="bg-white/10 rounded px-2 py-1 text-white"
+              >
+                {animationOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 flex-1">
+              Exit
+              <select
+                value={animation?.exit ?? 'none'}
+                onChange={(e) => patch({ animation: { ...animation, exit: e.target.value as AnimationPreset } })}
+                className="bg-white/10 rounded px-2 py-1 text-white"
+              >
+                {animationOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="flex flex-col gap-1 flex-1">
+              Fade in (s)
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={fade?.fadeInDuration ?? 0}
+                onChange={(e) =>
+                  patch({ fade: { fadeInDuration: Number(e.target.value), fadeOutDuration: fade?.fadeOutDuration ?? 0 } })
+                }
+                className="bg-white/10 rounded px-2 py-1 text-white"
+              />
+            </label>
+            <label className="flex flex-col gap-1 flex-1">
+              Fade out (s)
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={fade?.fadeOutDuration ?? 0}
+                onChange={(e) =>
+                  patch({ fade: { fadeInDuration: fade?.fadeInDuration ?? 0, fadeOutDuration: Number(e.target.value) } })
+                }
+                className="bg-white/10 rounded px-2 py-1 text-white"
+              />
+            </label>
+          </div>
+        </div>
+      )}
+
+      {item.type !== 'caption' && (
+        <div className="flex items-center gap-2">
+          <label className="flex flex-col gap-1 flex-1">
+            Start (s)
+            <input
+              type="number"
+              step={0.1}
+              value={item.startTime}
+              onChange={(e) => mutate((project) => trimItemStart(project, item.id, Number(e.target.value)))}
+              className="bg-white/10 rounded px-2 py-1 text-white"
+            />
+          </label>
+          <label className="flex flex-col gap-1 flex-1">
+            Duration (s)
+            <input
+              type="number"
+              step={0.1}
+              min={0.1}
+              value={duration}
+              onChange={(e) => mutate((project) => setItemDuration(project, item.id, Number(e.target.value)))}
+              className="bg-white/10 rounded px-2 py-1 text-white"
+            />
+          </label>
+        </div>
+      )}
+      {item.type !== 'caption' && <p className="text-white/30">Duration: {duration.toFixed(1)}s</p>}
+
+      {item.type === 'caption' && <CaptionInspector item={item} />}
 
       <label className="flex items-center gap-2">
         <input type="checkbox" checked={item.visible} onChange={(e) => patch({ visible: e.target.checked })} />
         Visible
       </label>
+    </div>
+  );
+}
+
+/**
+ * Caption-specific editing UI — the caption pipeline had ZERO caption-
+ * specific fields before this pass (a caption item could only be deleted
+ * via the generic Delete button above). Per-word text/timing edits and the
+ * style picker below all go through `updateItem(..., {words})` /
+ * `updateItem(..., {captionStyleId})`, so a change is visible in the
+ * preview/export on the very next `drawFrame` call — there is no separate
+ * "decorative" caption editor state to keep in sync.
+ */
+function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
+  const { mutate } = useProject();
+
+  const patchWords = (words: CaptionTimelineItem['words']) => {
+    mutate((project) => updateItem(project, item.id, { words }));
+  };
+
+  const updateWord = (index: number, fields: Partial<CaptionTimelineItem['words'][number]>) => {
+    patchWords(item.words.map((w, i) => (i === index ? { ...w, ...fields } : w)));
+  };
+
+  const deleteWord = (index: number) => {
+    patchWords(item.words.filter((_, i) => i !== index));
+  };
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+      <span className="font-bold uppercase tracking-wide text-white/40">Caption</span>
+
+      <label className="flex flex-col gap-1">
+        Style
+        <select
+          value={item.captionStyleId}
+          onChange={(e) => mutate((project) => updateItem(project, item.id, { captionStyleId: e.target.value }))}
+          className="bg-white/10 rounded px-2 py-1 text-white"
+        >
+          {CAPTION_STYLES.map((style) => (
+            <option key={style.id} value={style.id}>
+              {style.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="flex flex-col gap-1 max-h-56 overflow-y-auto pr-1">
+        {item.words.length === 0 && <p className="text-white/30 italic">No words in this caption.</p>}
+        {item.words.map((word, index) => (
+          <div key={index} className="flex items-center gap-1 bg-white/5 rounded p-1">
+            <input
+              type="text"
+              value={word.text}
+              onChange={(e) => updateWord(index, { text: e.target.value })}
+              className="bg-white/10 rounded px-2 py-1 text-white flex-1 min-w-0"
+            />
+            <input
+              type="number"
+              step={0.05}
+              value={Number(word.start.toFixed(2))}
+              onChange={(e) => updateWord(index, { start: Number(e.target.value) })}
+              title="Word start (s, relative to caption start)"
+              className="bg-white/10 rounded px-1 py-1 text-white w-14"
+            />
+            <input
+              type="number"
+              step={0.05}
+              value={Number(word.end.toFixed(2))}
+              onChange={(e) => updateWord(index, { end: Number(e.target.value) })}
+              title="Word end (s, relative to caption start)"
+              className="bg-white/10 rounded px-1 py-1 text-white w-14"
+            />
+            <button onClick={() => deleteWord(index)} className="text-red-400 hover:text-red-300 font-bold px-1">
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
+      <p className="text-white/30">
+        Timeline span: {item.startTime.toFixed(1)}s – {item.endTime.toFixed(1)}s ({(item.endTime - item.startTime).toFixed(1)}s)
+      </p>
     </div>
   );
 }

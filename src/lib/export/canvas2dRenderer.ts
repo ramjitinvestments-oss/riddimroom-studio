@@ -63,6 +63,23 @@ export class Canvas2DRenderer implements Renderer {
     const videoHandles = new Map<string, MediaElementHandle>();
     const imageEls = new Map<string, HTMLImageElement>();
 
+    // Video/audio elements must be attached to the document (off-screen is
+    // fine) to reliably decode in every browser/extension configuration —
+    // found via live browser testing: a detached <video> can sit at
+    // readyState 0 forever (fires `loadstart` then `stalled`, never
+    // decodes). See the matching fix + longer explanation in
+    // PreviewPane.tsx's `getVideoEl`. Canvas and <img> do not have this
+    // requirement, so they're left as-is.
+    const attachOffscreen = (el: HTMLVideoElement | HTMLAudioElement) => {
+      el.style.position = 'fixed';
+      el.style.width = '1px';
+      el.style.height = '1px';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      el.tabIndex = -1;
+      document.body.appendChild(el);
+    };
+
     const getVideoHandle = (assetId: string, storageUrl: string): MediaElementHandle => {
       let handle = videoHandles.get(assetId);
       if (!handle) {
@@ -71,6 +88,7 @@ export class Canvas2DRenderer implements Renderer {
         element.preload = 'auto';
         element.muted = true; // audio is routed through the Web Audio graph instead of the element's own output
         element.playsInline = true;
+        attachOffscreen(element);
         element.src = storageUrl;
         const source = audioCtx.createMediaElementSource(element);
         const gain = audioCtx.createGain();
@@ -88,6 +106,7 @@ export class Canvas2DRenderer implements Renderer {
         const element = document.createElement('audio');
         element.crossOrigin = 'anonymous';
         element.preload = 'auto';
+        attachOffscreen(element);
         element.src = storageUrl;
         const source = audioCtx.createMediaElementSource(element);
         const gain = audioCtx.createGain();
@@ -152,6 +171,7 @@ export class Canvas2DRenderer implements Renderer {
       videoHandles.forEach((h) => {
         h.element.pause();
         h.element.src = '';
+        if (h.element.parentNode) h.element.parentNode.removeChild(h.element);
       });
       videoHandles.clear();
       imageEls.clear();

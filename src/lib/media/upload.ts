@@ -22,7 +22,7 @@ import {
 import { storage } from '../firebase';
 import { generateTimelineId } from '../timeline/utils';
 import type { MediaAsset, MediaAssetKind } from '../../types/timeline';
-import { probeMediaFile } from './probe';
+import { probeMediaFile, mediaKindForMimeType } from './probe';
 
 export interface UploadProgressEvent {
   bytesTransferred: number;
@@ -60,7 +60,22 @@ export async function uploadMediaFile(options: UploadMediaOptions): Promise<Uplo
   const assetId = options.assetId ?? generateTimelineId('asset');
   const mimeType = file.type || 'application/octet-stream';
 
-  const probed = await probeMediaFile(file, mimeType);
+  // Metadata probing (duration/dimensions) is best-effort. Found via live
+  // browser testing: some real-world video files never fire a usable
+  // metadata event in every browser/codec/extension combination (probe.ts
+  // now times out after 12s instead of hanging forever) — but a probe
+  // quirk on THIS file must never block the user from getting real bytes
+  // into Storage and onto the timeline. Fall back to safe unknown-duration
+  // defaults (appendMediaToTimeline already treats a missing duration as
+  // 5s) rather than aborting the whole upload.
+  let probed: Awaited<ReturnType<typeof probeMediaFile>>;
+  try {
+    probed = await probeMediaFile(file, mimeType);
+  } catch (err) {
+    const kind = mediaKindForMimeType(mimeType);
+    if (!kind) throw err; // genuinely unsupported type — still a real, fatal error
+    probed = { kind, durationSeconds: undefined, width: undefined, height: undefined };
+  }
 
   const storagePath = `users/${uid}/media/${assetId}/${sanitizeFileName(file.name)}`;
   const storageRef = ref(storage, storagePath);

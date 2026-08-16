@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { ProjectProvider, useProject } from '../../context/ProjectContext';
 import { PreviewPane } from './PreviewPane';
@@ -11,6 +11,7 @@ import { TranscribePanel } from './TranscribePanel';
 import { ExportPanel } from './ExportPanel';
 import { BackgroundRemovalButton } from './BackgroundRemovalButton';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
+import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import type { MediaAsset } from '../../types/timeline';
 
 /**
@@ -26,6 +27,8 @@ function EditorInner({ uid }: { uid: string }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const projectStateRef = useRef(project);
+  projectStateRef.current = project;
 
   const handleAssetUploaded = useCallback(
     (asset: MediaAsset) => {
@@ -40,6 +43,42 @@ function EditorInner({ uid }: { uid: string }) {
     },
     [mutate, currentTime],
   );
+
+  // Minimal, real keyboard shortcut set (Phase-10 audit item): Space play/
+  // pause, Delete/Backspace deletes the selected item, arrow keys nudge the
+  // playhead by one frame (Shift+arrow for a 1s jump). Ignored while focus
+  // is in a text field/textarea/select so typing a caption word or a text
+  // item's content never gets hijacked by a shortcut.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!target?.isContentEditable;
+      if (isEditable) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setIsPlaying((p) => !p);
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedItemId) {
+          e.preventDefault();
+          mutate((p) => removeItem(p, selectedItemId));
+          setSelectedItemId(null);
+        }
+      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const step = e.shiftKey ? 1 : 1 / 30;
+        const delta = e.key === 'ArrowLeft' ? -step : step;
+        setCurrentTime((t) => {
+          const proj = projectStateRef.current;
+          const max = proj ? Math.max(getProjectDuration(proj), 0) : Infinity;
+          return Math.max(0, Math.min(max, t + delta));
+        });
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedItemId, mutate]);
 
   if (isLoading) {
     return (

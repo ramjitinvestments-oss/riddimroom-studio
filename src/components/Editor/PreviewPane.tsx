@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import type { Project } from '../../types/timeline';
-import { getItemsByTrackType } from '../../lib/timeline/utils';
+import { getItemsByTrackType, getProjectDuration } from '../../lib/timeline/utils';
 import { drawFrame, type FrameAssets } from '../../lib/render/compositor';
 
 /**
@@ -42,10 +42,12 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   const projectRef = useRef(project);
   const currentTimeRef = useRef(currentTime);
   const isPlayingRef = useRef(isPlaying);
+  const onPlayingChangeRef = useRef(onPlayingChange);
 
   projectRef.current = project;
   currentTimeRef.current = currentTime;
   isPlayingRef.current = isPlaying;
+  onPlayingChangeRef.current = onPlayingChange;
 
   const getVideoEl = useCallback((assetId: string, storageUrl: string) => {
     let el = videoElsRef.current.get(assetId);
@@ -55,6 +57,22 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       el.preload = 'auto';
       el.muted = false;
       el.playsInline = true;
+      // Found via live browser testing: a <video> element that is never
+      // connected to the document can sit at readyState 0 (HAVE_NOTHING)
+      // forever in some browser/extension configurations — it fires
+      // `loadstart` then `stalled` and never actually decodes, so
+      // `currentTime`/`play()`/`drawImage()` all silently do nothing. An
+      // <img>/`new Image()` does not have this requirement (it decodes
+      // fine detached), which is why only the video path needs this.
+      // Kept fully off-screen and non-interactive; this is a decode
+      // requirement, not a visible player.
+      el.style.position = 'fixed';
+      el.style.width = '1px';
+      el.style.height = '1px';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      el.tabIndex = -1;
+      document.body.appendChild(el);
       el.src = storageUrl;
       videoElsRef.current.set(assetId, el);
     }
@@ -167,6 +185,26 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       }
       lastFrameWallClockRef.current = wallClockNow;
 
+      // Single authoritative project-duration clamp (Phase 3 requirement):
+      // playback — video-driven or the manual clock above — must never let
+      // the playhead move past `getProjectDuration(project)`, and must stop
+      // (not loop) once it gets there. Per-item pausing (the video branch
+      // above stopping at that item's own endTime) already handles the
+      // common case where the last item ends exactly at the project's end,
+      // but this clamp is what makes it correct in general (e.g. a
+      // shorter video item followed by an image/text/caption tail, or a
+      // manual-clock-only project with no video at all).
+      const projectDuration = getProjectDuration(proj);
+      if (projectDuration > 0 && t >= projectDuration) {
+        t = projectDuration;
+        currentTimeRef.current = t;
+        if (isPlayingRef.current) {
+          onTimeChange(t);
+          onPlayingChangeRef.current(false);
+          videoElsRef.current.forEach((el) => el.pause());
+        }
+      }
+
       canvas.width = proj.canvasWidth;
       canvas.height = proj.canvasHeight;
       drawFrame(ctx, proj, t, frameAssets);
@@ -210,12 +248,16 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTime, project.id]);
 
-  // Cleanup media elements when the whole preview unmounts.
+  // Cleanup media elements when the whole preview unmounts. Video elements
+  // are appended to document.body by getVideoEl (see its comment) and must
+  // be explicitly removed here — they don't unmount on their own the way a
+  // React-rendered element would.
   useEffect(
     () => () => {
       videoElsRef.current.forEach((el) => {
         el.pause();
         el.src = '';
+        if (el.parentNode) el.parentNode.removeChild(el);
       });
       videoElsRef.current.clear();
       imageElsRef.current.clear();
