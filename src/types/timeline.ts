@@ -124,6 +124,46 @@ export interface AnimationSettings {
   intensity?: number;
 }
 
+/**
+ * "Final production fix" spec item 8 — motion/zoom effects (Ken Burns
+ * family), a section explicitly distinct from `AnimationSettings`
+ * (entrance/exit transitions, which only play briefly at an item's start/
+ * end). A `MotionSettings` effect instead runs CONTINUOUSLY across an
+ * item's entire on-screen duration — e.g. a slow pan+zoom the whole time a
+ * photo is on screen — and can be active at the same time as an
+ * entrance/exit transition (both apply to the same frame; see
+ * `computeMotionAdjustment`/`combineAdjustments` in
+ * `lib/render/compositor.ts`).
+ */
+export type MotionEffectType =
+  | 'none'
+  | 'ken-burns'
+  | 'slow-zoom-in'
+  | 'slow-zoom-out'
+  | 'dynamic-zoom'
+  | 'punch-zoom'
+  | 'product-focus'
+  | 'parallax'
+  | 'subtle-shake'
+  | 'spotlight'
+  | 'vignette'
+  | 'flash'
+  | 'light-sweep';
+
+/** Used only by the directional effects (ken-burns, parallax); ignored by the rest. */
+export type MotionDirection = 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out';
+
+export interface MotionSettings {
+  type: MotionEffectType;
+  direction?: MotionDirection;
+  /**
+   * 0.5-2, multiplies the effect's displacement/scale/overlay amount (same
+   * range and meaning as `AnimationSettings.intensity`). Undefined behaves
+   * exactly like 1.
+   */
+  intensity?: number;
+}
+
 export interface TrimSettings {
   /** Seconds into the source media where playback of this item begins. */
   trimStart: number;
@@ -218,6 +258,8 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
   colorGrade?: ColorGradeSettings;
   fade?: FadeSettings;
   animation?: AnimationSettings;
+  /** "Final production fix" spec item 8 — see `MotionSettings`'s doc comment. Video's own motion (e.g. a subtle Ken Burns treatment layered on top of the clip's normal playback). */
+  motion?: MotionSettings;
 }
 
 export interface ImageTimelineItem extends TimelineItemBase, Transform {
@@ -229,11 +271,7 @@ export interface ImageTimelineItem extends TimelineItemBase, Transform {
    * a track named "Watermark", never a special-cased global setting.
    */
   role: 'overlay' | 'watermark' | 'logo' | 'sticker' | 'photo' | 'graphic';
-  motion?: {
-    type: 'none' | 'ken-burns' | 'pan' | 'zoom' | 'parallax' | 'bounce';
-    direction?: 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out';
-    strength?: number;
-  };
+  motion?: MotionSettings;
   fade?: FadeSettings;
   animation?: AnimationSettings;
 }

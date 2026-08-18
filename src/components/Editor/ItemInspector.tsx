@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, TimelineItem } from '../../types/timeline';
+import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
 import {
   updateItem,
@@ -29,6 +29,7 @@ import {
   findTransitionPreset,
   transitionPresetsByCategory,
 } from '../../lib/transitions';
+import { MOTION_DIRECTIONS, MOTION_EFFECTS, MOTION_INTENSITY_DEFAULT, MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN, findMotionEffect } from '../../lib/motionEffects';
 
 const CROSS_DISSOLVE_DURATION_SECONDS = 0.6;
 
@@ -80,6 +81,20 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
   const hasAnimation = item.type === 'video' || item.type === 'image' || item.type === 'text';
   const animation = hasAnimation ? (item as any).animation as { entrance?: AnimationPreset; exit?: AnimationPreset; intensity?: number } | undefined : undefined;
   const fade = hasAnimation ? (item as any).fade as { fadeInDuration: number; fadeOutDuration: number } | undefined : undefined;
+
+  // "Final production fix" spec item 8 — Motion/Zoom Effects (Ken Burns
+  // family), image/video only (Position/Scale/Rotation above already covers
+  // text, and motion effects are a photo/video-camera-movement concept).
+  // Deliberately a separate "Effects" section from "Transition" above:
+  // motion runs continuously across the item's whole on-screen duration,
+  // transitions only play briefly at entrance/exit — see
+  // `computeMotionAdjustment`'s doc comment in `lib/render/compositor.ts`.
+  const hasMotion = item.type === 'video' || item.type === 'image';
+  const motion = hasMotion ? ((item as any).motion as MotionSettings | undefined) : undefined;
+  const motionEffectInfo = findMotionEffect(motion?.type);
+  const patchMotion = (fields: Partial<MotionSettings>) => {
+    patch({ motion: { type: 'none', ...motion, ...fields } });
+  };
 
   // Cross Dissolve — only offered when there's an actual adjacent same-
   // track item to dissolve into/from (see `findAdjacentNextItem`'s doc
@@ -247,6 +262,62 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
           >
             Front ⇥
           </button>
+        </div>
+      )}
+
+      {hasMotion && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Effects</span>
+          <label className="flex flex-col gap-1">
+            Motion effect
+            <select
+              value={motion?.type ?? 'none'}
+              onChange={(e) => patchMotion({ type: e.target.value as MotionEffectType })}
+              className="bg-white/10 rounded px-2 py-1 text-white"
+            >
+              <option value="none">None</option>
+              {MOTION_EFFECTS.map((effect) => (
+                <option key={effect.id} value={effect.id} title={effect.description}>
+                  {effect.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {motionEffectInfo && (
+            <>
+              <p className="text-white/30 text-[11px]">{motionEffectInfo.description}</p>
+              {motionEffectInfo.usesDirection && (
+                <label className="flex flex-col gap-1">
+                  Direction
+                  <select
+                    value={motion?.direction ?? 'right'}
+                    onChange={(e) => patchMotion({ direction: e.target.value as MotionDirection })}
+                    className="bg-white/10 rounded px-2 py-1 text-white"
+                  >
+                    {MOTION_DIRECTIONS.map((dir) => (
+                      <option key={dir.id} value={dir.id}>
+                        {dir.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label className="flex flex-col gap-1">
+                <span className="flex items-center justify-between">
+                  <span>Effect intensity</span>
+                  <span className="text-white/40">{(motion?.intensity ?? MOTION_INTENSITY_DEFAULT).toFixed(1)}x</span>
+                </span>
+                <input
+                  type="range"
+                  min={MOTION_INTENSITY_MIN}
+                  max={MOTION_INTENSITY_MAX}
+                  step={0.1}
+                  value={motion?.intensity ?? MOTION_INTENSITY_DEFAULT}
+                  onChange={(e) => patchMotion({ intensity: Number(e.target.value) })}
+                />
+              </label>
+            </>
+          )}
         </div>
       )}
 

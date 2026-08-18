@@ -258,7 +258,8 @@ function buildProject(): Project {
 {
   // "Final production fix" Phase 2a added several more optional fields to
   // AnimatedAdjustment (overlay wash, skew, per-axis scale, rotation delta,
-  // hue-rotate) to back the expanded transitions catalog — see
+  // hue-rotate) to back the expanded transitions catalog, and Phase 2c
+  // added the motion-effects fields (vignette/spotlight/sweep) — see
   // lib/render/compositor.ts's IDENTITY_ADJUSTMENT and lib/transitions.ts.
   const IDENTITY = {
     opacityMul: 1,
@@ -273,6 +274,12 @@ function buildProject(): Project {
     scaleYMul: 1,
     rotationDeltaDeg: 0,
     hueRotateDeg: 0,
+    vignetteAlpha: 0,
+    spotlightBoost: 0,
+    vignetteCenterOffsetXPx: 0,
+    vignetteCenterOffsetYPx: 0,
+    sweepAlpha: 0,
+    sweepPositionPercent: 0.5,
   };
   check(
     "computeEntranceExit('none') is the identity adjustment (no motion)",

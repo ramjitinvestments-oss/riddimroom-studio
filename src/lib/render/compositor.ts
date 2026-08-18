@@ -35,10 +35,11 @@
  * opposing opacity ramps.
  */
 
-import type { AnimationPreset, CaptionTimelineItem, ImageTimelineItem, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { getItemsAtTime } from '../timeline/utils';
 import { getCaptionStyle } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
+import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
 
 export interface FrameAssets {
   /** Loaded <img> elements keyed by MediaAsset id, for `image` timeline items. */
@@ -102,6 +103,25 @@ export interface AnimatedAdjustment {
   rotationDeltaDeg: number;
   /** CSS `hue-rotate()` degrees, combined into the same canvas filter as blur (rainbow). */
   hueRotateDeg: number;
+  /**
+   * "Final production fix" spec item 8 (motion/zoom effects) additions —
+   * `spotlight`/`vignette` need a radial darken-the-edges treatment (not a
+   * flat single-alpha wash like `overlayAlpha`), and `light-sweep` needs a
+   * moving linear-gradient highlight band. Both are drawn by
+   * `drawMotionOverlay`, separately from `drawAdjustmentOverlay`'s flat
+   * rect, since neither is expressible as a uniform color+alpha.
+   */
+  /** 0-1, radial darken-toward-edges strength (vignette/spotlight/product-focus). */
+  vignetteAlpha: number;
+  /** 0-1, extra brightness at the vignette's center, on top of `vignetteAlpha`'s darkened edges (spotlight only). */
+  spotlightBoost: number;
+  /** Offsets the vignette/spotlight gradient's center away from the item's own center (spotlight's slow drift). */
+  vignetteCenterOffsetXPx: number;
+  vignetteCenterOffsetYPx: number;
+  /** 0-1 peak brightness of the light-sweep band; 0 = no sweep drawn. */
+  sweepAlpha: number;
+  /** 0-1, where along the item's own width the sweep band currently sits. */
+  sweepPositionPercent: number;
 }
 
 const IDENTITY_ADJUSTMENT: AnimatedAdjustment = {
@@ -117,6 +137,12 @@ const IDENTITY_ADJUSTMENT: AnimatedAdjustment = {
   scaleYMul: 1,
   rotationDeltaDeg: 0,
   hueRotateDeg: 0,
+  vignetteAlpha: 0,
+  spotlightBoost: 0,
+  vignetteCenterOffsetXPx: 0,
+  vignetteCenterOffsetYPx: 0,
+  sweepAlpha: 0,
+  sweepPositionPercent: 0.5,
 };
 
 /**
@@ -380,6 +406,159 @@ export function computeFadeOpacity(
   return opacity;
 }
 
+// ---------------------------------------------------------------------------
+// Motion/zoom effects (Ken Burns family) — "final production fix" spec item
+// 8. Deliberately separate from `computeEntranceExit`: these run
+// CONTINUOUSLY across an item's entire on-screen duration (as a function of
+// how far into its own lifespan the current frame is), not just briefly at
+// entrance/exit, and can be layered on top of an entrance/exit transition
+// that's active on the very same frame (`combineAdjustments` below).
+// ---------------------------------------------------------------------------
+
+function motionDirectionVector(direction: MotionSettings['direction'] | undefined, fallback: 'x' | 'y'): { dx: number; dy: number } {
+  switch (direction) {
+    case 'left':
+      return { dx: -1, dy: 0 };
+    case 'right':
+      return { dx: 1, dy: 0 };
+    case 'up':
+      return { dx: 0, dy: -1 };
+    case 'down':
+      return { dx: 0, dy: 1 };
+    default:
+      // No direction chosen — pick a sane default axis per effect so it's
+      // never a silent no-op just because direction was left unset.
+      return fallback === 'x' ? { dx: 1, dy: 0 } : { dx: 0, dy: -1 };
+  }
+}
+
+/**
+ * Computes the continuous motion-effect adjustment for a frame `elapsedSeconds`
+ * into an item's own on-screen lifespan (`durationSeconds` long). Every
+ * implemented effect does real, distinct, deterministic motion — never
+ * `Math.random()`, so preview and export always agree frame-for-frame,
+ * matching `computeEntranceExit`'s own guarantee.
+ */
+export function computeMotionAdjustment(
+  motion: MotionSettings | undefined,
+  elapsedSeconds: number,
+  durationSeconds: number,
+  canvasWidth: number,
+  canvasHeight: number,
+): AnimatedAdjustment {
+  if (!motion || motion.type === 'none') return { ...IDENTITY_ADJUSTMENT };
+  const k = Math.max(MOTION_INTENSITY_MIN, Math.min(MOTION_INTENSITY_MAX, motion.intensity || 1));
+  const duration = Math.max(0.1, durationSeconds);
+  const p = clamp01(elapsedSeconds / duration);
+  const a: AnimatedAdjustment = { ...IDENTITY_ADJUSTMENT };
+
+  switch (motion.type) {
+    case 'ken-burns': {
+      const { dx, dy } = motionDirectionVector(motion.direction, 'x');
+      a.offsetXPx += -(p - 0.5) * canvasWidth * 0.12 * k * dx;
+      a.offsetYPx += -(p - 0.5) * canvasHeight * 0.12 * k * dy;
+      a.scaleMul *= 1 + p * 0.15 * k;
+      break;
+    }
+    case 'slow-zoom-in':
+      a.scaleMul *= 1 + p * 0.2 * k;
+      break;
+    case 'slow-zoom-out':
+      a.scaleMul *= 1 + (1 - p) * 0.2 * k;
+      break;
+    case 'dynamic-zoom':
+      a.scaleMul *= 1 + Math.sin(p * Math.PI) * 0.18 * k;
+      break;
+    case 'punch-zoom':
+      // Exponential decay — a sharp punch-in right at the start that
+      // quickly settles to normal size, rather than a linear ease.
+      a.scaleMul *= 1 + Math.exp(-p * 10) * 0.3 * k;
+      break;
+    case 'product-focus':
+      a.scaleMul *= 1 + p * 0.08 * k;
+      a.vignetteAlpha = Math.max(a.vignetteAlpha, 0.25 * k);
+      break;
+    case 'parallax': {
+      const { dx, dy } = motionDirectionVector(motion.direction, 'x');
+      a.offsetXPx += (p - 0.5) * canvasWidth * 0.18 * k * dx;
+      a.offsetYPx += (p - 0.5) * canvasHeight * 0.18 * k * dy;
+      // Scaled up a little so the wider drift never exposes an edge gap.
+      a.scaleMul *= 1.08;
+      break;
+    }
+    case 'subtle-shake':
+      // Continuous, not decaying — this is the "handheld camera" feel for
+      // the item's whole on-screen lifespan, distinct from the transition
+      // catalog's 'shake' preset (which only plays briefly at entrance/exit
+      // and decays to nothing).
+      a.offsetXPx += (Math.sin(elapsedSeconds * 9) * 0.5 + Math.sin(elapsedSeconds * 13 + 0.7) * 0.5) * 3 * k;
+      a.offsetYPx += (Math.sin(elapsedSeconds * 11 + 1.1) * 0.5 + Math.sin(elapsedSeconds * 7 + 2.2) * 0.5) * 3 * k;
+      break;
+    case 'spotlight':
+      a.vignetteAlpha = Math.max(a.vignetteAlpha, 0.55 * k);
+      a.spotlightBoost = Math.max(a.spotlightBoost, 0.35 * k);
+      a.vignetteCenterOffsetXPx += Math.sin(elapsedSeconds * 0.6) * canvasWidth * 0.06 * k;
+      a.vignetteCenterOffsetYPx += Math.cos(elapsedSeconds * 0.6) * canvasHeight * 0.06 * k;
+      break;
+    case 'vignette':
+      // A slow "breathing" strength rather than a static filter, so it
+      // still reads as motion, not a one-time style choice.
+      a.vignetteAlpha = Math.max(a.vignetteAlpha, (0.35 + 0.08 * Math.sin(elapsedSeconds * 1.0)) * k);
+      break;
+    case 'flash':
+      // Periodic strobe pulses (sharp, via a high power), distinct from the
+      // transition catalog's one-shot 'flash' preset.
+      a.overlayColor = '#ffffff';
+      a.overlayAlpha = Math.max(a.overlayAlpha, Math.pow(Math.max(0, Math.sin(elapsedSeconds * 2)), 8) * 0.7 * k);
+      break;
+    case 'light-sweep':
+      // One bright band sweeping left-to-right across the item's own width
+      // over its full on-screen duration.
+      a.sweepAlpha = Math.max(a.sweepAlpha, 0.55 * k);
+      a.sweepPositionPercent = p;
+      break;
+    default:
+      break;
+  }
+  a.overlayAlpha = clamp01(a.overlayAlpha);
+  a.vignetteAlpha = clamp01(a.vignetteAlpha);
+  a.spotlightBoost = clamp01(a.spotlightBoost);
+  a.sweepAlpha = clamp01(a.sweepAlpha);
+  return a;
+}
+
+/**
+ * Merges an entrance/exit transition adjustment with a continuous motion
+ * adjustment for the same frame — both can be active simultaneously (e.g. a
+ * photo fading in via `computeEntranceExit` while continuously Ken-Burns
+ * panning via `computeMotionAdjustment`). Multiplicative fields multiply,
+ * additive/offset fields add, "strongest wins" fields (overlay/blur/vignette)
+ * take the max, matching how `computeEntranceExit`'s own presets already
+ * combine sub-effects internally.
+ */
+export function combineAdjustments(transition: AnimatedAdjustment, motion: AnimatedAdjustment): AnimatedAdjustment {
+  return {
+    opacityMul: transition.opacityMul * motion.opacityMul,
+    offsetXPx: transition.offsetXPx + motion.offsetXPx,
+    offsetYPx: transition.offsetYPx + motion.offsetYPx,
+    scaleMul: transition.scaleMul * motion.scaleMul,
+    blurPx: Math.max(transition.blurPx, motion.blurPx),
+    overlayAlpha: Math.max(transition.overlayAlpha, motion.overlayAlpha),
+    overlayColor: transition.overlayAlpha >= motion.overlayAlpha ? transition.overlayColor : motion.overlayColor,
+    skewX: transition.skewX + motion.skewX,
+    scaleXMul: transition.scaleXMul * motion.scaleXMul,
+    scaleYMul: transition.scaleYMul * motion.scaleYMul,
+    rotationDeltaDeg: transition.rotationDeltaDeg + motion.rotationDeltaDeg,
+    hueRotateDeg: transition.hueRotateDeg + motion.hueRotateDeg,
+    vignetteAlpha: Math.max(transition.vignetteAlpha, motion.vignetteAlpha),
+    spotlightBoost: Math.max(transition.spotlightBoost, motion.spotlightBoost),
+    vignetteCenterOffsetXPx: transition.vignetteCenterOffsetXPx + motion.vignetteCenterOffsetXPx,
+    vignetteCenterOffsetYPx: transition.vignetteCenterOffsetYPx + motion.vignetteCenterOffsetYPx,
+    sweepAlpha: Math.max(transition.sweepAlpha, motion.sweepAlpha),
+    sweepPositionPercent: motion.sweepAlpha >= transition.sweepAlpha ? motion.sweepPositionPercent : transition.sweepPositionPercent,
+  };
+}
+
 function applyTransformedDraw(
   ctx: CanvasRenderingContext2D,
   draw: (ctx: CanvasRenderingContext2D) => void,
@@ -423,6 +602,48 @@ function drawAdjustmentOverlay(ctx: CanvasRenderingContext2D, halfWidthPx: numbe
   ctx.restore();
 }
 
+/**
+ * Draws the motion-effect vignette/spotlight (radial gradient, darkened
+ * edges with an optional brighter center) and light-sweep (moving linear
+ * gradient band) overlays — see `computeMotionAdjustment`'s doc comment for
+ * why these need real gradients rather than `drawAdjustmentOverlay`'s flat
+ * single-alpha rect. Same calling convention as `drawAdjustmentOverlay`:
+ * must run from inside the item's own transform context.
+ */
+function drawMotionOverlay(ctx: CanvasRenderingContext2D, halfWidthPx: number, halfHeightPx: number, adjustment: AnimatedAdjustment) {
+  if (adjustment.vignetteAlpha > 0.01) {
+    ctx.save();
+    const cx = adjustment.vignetteCenterOffsetXPx;
+    const cy = adjustment.vignetteCenterOffsetYPx;
+    const outerRadius = Math.max(halfWidthPx, halfHeightPx) * 1.15;
+    const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, outerRadius);
+    if (adjustment.spotlightBoost > 0.01) {
+      gradient.addColorStop(0, `rgba(255,255,255,${clamp01(adjustment.spotlightBoost).toFixed(3)})`);
+      gradient.addColorStop(0.45, 'rgba(0,0,0,0)');
+    } else {
+      gradient.addColorStop(0, 'rgba(0,0,0,0)');
+      gradient.addColorStop(0.55, 'rgba(0,0,0,0)');
+    }
+    gradient.addColorStop(1, `rgba(0,0,0,${clamp01(adjustment.vignetteAlpha).toFixed(3)})`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(-halfWidthPx, -halfHeightPx, halfWidthPx * 2, halfHeightPx * 2);
+    ctx.restore();
+  }
+  if (adjustment.sweepAlpha > 0.01) {
+    ctx.save();
+    const width = halfWidthPx * 2;
+    const bandCenter = -halfWidthPx + adjustment.sweepPositionPercent * width;
+    const bandWidth = Math.max(width * 0.18, 20);
+    const gradient = ctx.createLinearGradient(bandCenter - bandWidth, 0, bandCenter + bandWidth, 0);
+    gradient.addColorStop(0, 'rgba(255,255,255,0)');
+    gradient.addColorStop(0.5, `rgba(255,255,255,${clamp01(adjustment.sweepAlpha).toFixed(3)})`);
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(-halfWidthPx, -halfHeightPx, halfWidthPx * 2, halfHeightPx * 2);
+    ctx.restore();
+  }
+}
+
 /** Shared timing → adjustment helper for the three animatable item types (video/image/text). */
 function animationFor(
   item: {
@@ -446,7 +667,7 @@ function animationFor(
 
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset } },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -456,7 +677,9 @@ function drawVideoItem(
   const centerY = (item.position.y / 100) * canvasHeight;
   const w = canvasWidth * item.scale;
   const h = canvasHeight * item.scale;
-  const adjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
+  const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
+  const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
+  const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
   applyTransformedDraw(
     ctx,
     (c) => {
@@ -466,6 +689,7 @@ function drawVideoItem(
         // Video not yet seekable/decoded to this frame — skip this frame rather than throw.
       }
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
+      drawMotionOverlay(c, w / 2, h / 2, adjustment);
     },
     item,
     centerX,
@@ -501,7 +725,9 @@ function drawImageItem(
   const aspect = img.naturalHeight > 0 && img.naturalWidth > 0 ? img.naturalHeight / img.naturalWidth : 1;
   const w = baseWidth;
   const h = baseWidth * aspect;
-  const adjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
+  const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
+  const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
+  const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
   applyTransformedDraw(
     ctx,
     (c) => {
@@ -514,6 +740,7 @@ function drawImageItem(
         // can never crash the render/animation loop.
       }
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
+      drawMotionOverlay(c, w / 2, h / 2, adjustment);
     },
     item,
     centerX,
