@@ -400,10 +400,12 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   }, []);
 
   const getBoundsForItem = useCallback(
-    (item: TimelineItem): (ItemBoundsPercent & { type: DraggableVisualType; itemId: string; scale: number }) | null => {
+    (
+      item: TimelineItem,
+    ): (ItemBoundsPercent & { type: DraggableVisualType; itemId: string; scale: number; rotation: number }) | null => {
       if (item.type === 'video') {
         const bounds = getItemBoundsPercent(item, 'video', project.canvasWidth, project.canvasHeight);
-        return { ...bounds, type: 'video', itemId: item.id, scale: item.scale };
+        return { ...bounds, type: 'video', itemId: item.id, scale: item.scale, rotation: item.rotation };
       }
       if (item.type === 'image') {
         const asset = project.mediaAssets[item.mediaAssetId];
@@ -415,7 +417,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
               ? asset.height / asset.width
               : 1;
         const bounds = getItemBoundsPercent(item, 'image', project.canvasWidth, project.canvasHeight, { naturalImageAspect: aspect });
-        return { ...bounds, type: 'image', itemId: item.id, scale: item.scale };
+        return { ...bounds, type: 'image', itemId: item.id, scale: item.scale, rotation: item.rotation };
       }
       if (item.type === 'text') {
         // `.scale` used to be a dead field for text items — see the fix in
@@ -423,7 +425,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         // same effective (fontSize * scale) size that now actually renders.
         const { width, height } = measureText(item.text, item.fontSize * item.scale);
         const bounds = getItemBoundsPercent(item, 'text', project.canvasWidth, project.canvasHeight, { textWidthPx: width, textHeightPx: height });
-        return { ...bounds, type: 'text', itemId: item.id, scale: item.scale };
+        return { ...bounds, type: 'text', itemId: item.id, scale: item.scale, rotation: item.rotation };
       }
       return null;
     },
@@ -600,6 +602,16 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
               top: `${selectedBounds.topPercent}%`,
               width: `${selectedBounds.widthPercent}%`,
               height: `${selectedBounds.heightPercent}%`,
+              // Found during the full-app audit: the compositor's own
+              // drawFrame rotates every item about its own center (see
+              // compositor.ts's shared transform-setup helper), but this
+              // selection overlay previously stayed axis-aligned regardless
+              // of the item's Rotation slider — after rotating an item the
+              // green box no longer matched what was actually drawn. Mirror
+              // the same rotation here; CSS's default transform-origin
+              // (50% 50%, i.e. this box's own center) matches the
+              // canvas's center-based rotation.
+              transform: selectedBounds.rotation ? `rotate(${selectedBounds.rotation}deg)` : undefined,
             }}
             title="Drag to move"
           >
