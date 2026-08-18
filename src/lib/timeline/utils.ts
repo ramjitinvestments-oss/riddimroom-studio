@@ -143,6 +143,52 @@ export function addMediaAsset(project: Project, asset: MediaAsset): Project {
 }
 
 // ---------------------------------------------------------------------------
+// Background removal pairing ("final production fix" spec item 4) — links
+// an original image asset to its processed (background-removed) sibling so
+// re-toggling the Original/Background-Removed control never has to
+// reprocess the image, and lets any timeline item already using one of the
+// pair be flipped over to the other in place.
+// ---------------------------------------------------------------------------
+
+/** Records that `removedAssetId` is `originalAssetId`'s background-removed counterpart, both directions. Both must already exist in `project.mediaAssets`. */
+export function linkBackgroundRemovedAsset(project: Project, originalAssetId: string, removedAssetId: string): Project {
+  const original = project.mediaAssets[originalAssetId];
+  const removed = project.mediaAssets[removedAssetId];
+  if (!original || !removed) return project;
+  return {
+    ...project,
+    mediaAssets: {
+      ...project.mediaAssets,
+      [originalAssetId]: { ...original, backgroundRemovedAssetId: removedAssetId },
+      [removedAssetId]: { ...removed, originalAssetId },
+    },
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * Re-points every timeline item currently using `fromAssetId` to
+ * `toAssetId` instead — position/scale/rotation/opacity and every other
+ * per-item field are untouched, only which pixels get drawn changes. This
+ * is what makes the background-removal toggle "in place": a watermark
+ * already placed on the canvas updates immediately rather than the user
+ * having to delete it and re-add the processed version by hand.
+ */
+export function retargetItemsToAsset(project: Project, fromAssetId: string, toAssetId: string): Project {
+  if (fromAssetId === toAssetId) return project;
+  let changed = false;
+  const items = project.items.map((item) => {
+    if ('mediaAssetId' in item && item.mediaAssetId === fromAssetId) {
+      changed = true;
+      return { ...item, mediaAssetId: toAssetId } as TimelineItem;
+    }
+    return item;
+  });
+  if (!changed) return project;
+  return { ...project, items, updatedAt: Date.now() };
+}
+
+// ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
 

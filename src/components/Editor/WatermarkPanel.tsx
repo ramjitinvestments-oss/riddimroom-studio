@@ -20,7 +20,15 @@ export function WatermarkPanel({ uid }: { uid: string }) {
 
   if (!project) return null;
 
-  const imageAssets = Object.values(project.mediaAssets).filter((asset) => asset.kind === 'image');
+  // Same convention as the media library list in EditorShell.tsx: a
+  // background-removed asset is a derivative of its original, not an
+  // independent choice here — without this filter, an asset that has been
+  // through the Original/Background-Removed toggle shows up twice with the
+  // identical (truncated) file name, and there's no way to tell the two
+  // buttons apart. The removed-background variant stays reachable the
+  // normal way (toggle it "on" for an asset, then place it, or toggle an
+  // already-placed watermark).
+  const imageAssets = Object.values(project.mediaAssets).filter((asset) => asset.kind === 'image' && !asset.originalAssetId);
 
   const placeWatermark = (assetId: string) => {
     const asset = project.mediaAssets[assetId];

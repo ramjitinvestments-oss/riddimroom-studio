@@ -150,6 +150,19 @@ export interface MediaAsset {
   width?: number;
   height?: number;
   createdAt: number;
+  /**
+   * Background-removal pairing (image assets only) — "final production
+   * fix" spec item 4's Original/Background-Removed toggle. Set on the
+   * ORIGINAL asset once a processed counterpart exists, so re-toggling
+   * doesn't reprocess the image every time. The processed asset points
+   * back via `originalAssetId` so the toggle also works starting from
+   * the removed-background version. Both are plain MediaAssets in the
+   * same `mediaAssets` pool — this is just a same-pool cross-reference,
+   * not a parallel asset system.
+   */
+  backgroundRemovedAssetId?: string;
+  /** Set on a background-removed asset, pointing back to the original it was derived from. */
+  originalAssetId?: string;
 }
 
 // ---------------------------------------------------------------------------

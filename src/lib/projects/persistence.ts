@@ -54,9 +54,16 @@ export interface ProjectSummary {
  * the roadmap's Step 6 guidance: Capture/Upload/overlay/caption steps
  * should slot items onto existing tracks via the timeline foundation's
  * utils rather than each inventing its own track-creation logic.
+ *
+ * `canvasWidth`/`canvasHeight` default to `createEmptyProject`'s own
+ * 1080x1920 (9:16) default when omitted — callers that don't care about
+ * aspect ratio (tests, older call sites) keep working unchanged. The
+ * "final production" pass's aspect-ratio picker (`Dashboard.tsx`) is the
+ * one real caller that now always passes an explicit size, chosen once at
+ * creation from the 4 marketing-standard ratios.
  */
-export function createDefaultProject(ownerUid: string, name?: string): Project {
-  let project = createEmptyProject({ ownerUid, name });
+export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Project {
+  let project = createEmptyProject({ ownerUid, name, canvasWidth, canvasHeight });
   const trackSpecs: Array<[Project['tracks'][number]['type'], string]> = [
     ['video', 'Main Video'],
     ['image', 'Watermark'],
@@ -70,8 +77,8 @@ export function createDefaultProject(ownerUid: string, name?: string): Project {
   return project;
 }
 
-export async function createProject(ownerUid: string, name?: string): Promise<Project> {
-  const project = createDefaultProject(ownerUid, name);
+export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Promise<Project> {
+  const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight);
   assertValidProject(project);
   await setDoc(doc(db, PROJECTS_COLLECTION, project.id), serializeProject(project));
   return project;

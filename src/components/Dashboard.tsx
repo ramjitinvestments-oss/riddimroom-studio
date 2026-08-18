@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { createProject, listProjects, deleteProject, type ProjectSummary } from '../lib/projects/persistence';
+import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
 
 /**
  * Phase 1 Step 6 — authenticated home screen. Replaces the placeholder
@@ -18,6 +19,13 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  // Aspect ratio is locked in at creation (spec item 1 + item 11's mobile
+  // workflow both assume a project's format never changes mid-edit) — this
+  // just tracks whether the 4-option picker step is open, not any ratio
+  // state itself. The chosen ratio's width/height goes straight into
+  // `createProject` and becomes `Project.canvasWidth/canvasHeight`, the
+  // single source of truth `lib/aspectRatios.ts` documents.
+  const [showRatioPicker, setShowRatioPicker] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!currentUser) return;
@@ -34,19 +42,23 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
     refresh();
   }, [refresh]);
 
-  const handleCreate = useCallback(async () => {
-    if (!currentUser) return;
-    setIsCreating(true);
-    setError(null);
-    try {
-      const project = await createProject(currentUser.uid, 'Untitled Project');
-      onOpenProject(project.id);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to create a new project.');
-    } finally {
-      setIsCreating(false);
-    }
-  }, [currentUser, onOpenProject]);
+  const handleCreate = useCallback(
+    async (ratio: AspectRatioOption) => {
+      if (!currentUser) return;
+      setIsCreating(true);
+      setError(null);
+      try {
+        const project = await createProject(currentUser.uid, 'Untitled Project', ratio.canvasWidth, ratio.canvasHeight);
+        setShowRatioPicker(false);
+        onOpenProject(project.id);
+      } catch (err: any) {
+        setError(err?.message || 'Failed to create a new project.');
+      } finally {
+        setIsCreating(false);
+      }
+    },
+    [currentUser, onOpenProject],
+  );
 
   const handleDelete = useCallback(
     async (projectId: string) => {
@@ -79,7 +91,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-white/60">Your projects</h2>
           <button
-            onClick={handleCreate}
+            onClick={() => setShowRatioPicker(true)}
             disabled={isCreating}
             className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-white"
           >
@@ -107,7 +119,12 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
               >
                 <p className="font-bold truncate">{project.name}</p>
                 <p className="text-xs text-white/40 mt-1">
-                  {project.canvasWidth}×{project.canvasHeight} · updated {new Date(project.updatedAt).toLocaleString()}
+                  {(() => {
+                    const ratio = findAspectRatioOption(project.canvasWidth, project.canvasHeight);
+                    return ratio ? `${ratio.ratioLabel} ${ratio.name}` : `${project.canvasWidth}×${project.canvasHeight}`;
+                  })()}
+                  {' · updated '}
+                  {new Date(project.updatedAt).toLocaleString()}
                 </p>
                 <button
                   onClick={(e) => {
@@ -123,6 +140,69 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
           </ul>
         )}
       </main>
+
+      {showRatioPicker && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => !isCreating && setShowRatioPicker(false)}
+        >
+          <div
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-xl w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-bold uppercase tracking-wide text-white/60 mb-1">Choose a format</h2>
+            <p className="text-xs text-white/40 mb-5">
+              This sets your project's shape for preview, positioning, and export — pick the one that matches where the video is going.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              {ASPECT_RATIO_OPTIONS.map((ratio) => (
+                <button
+                  key={ratio.id}
+                  onClick={() => handleCreate(ratio)}
+                  disabled={isCreating}
+                  className="text-left bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 hover:border-emerald-500/60 rounded-xl p-4 transition flex flex-col items-center gap-3"
+                >
+                  <RatioGlyph ratioW={ratio.canvasWidth} ratioH={ratio.canvasHeight} />
+                  <div className="text-center">
+                    <p className="font-bold">{ratio.name}</p>
+                    <p className="text-xs text-white/40">{ratio.ratioLabel}</p>
+                    <p className="text-[10px] text-white/30 mt-1 leading-snug">{ratio.useCases.join(' · ')}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+            {error && <p className="text-sm text-red-400 mt-4">{error}</p>}
+            <button
+              onClick={() => setShowRatioPicker(false)}
+              disabled={isCreating}
+              className="mt-5 text-xs text-white/40 hover:text-white/70 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Small proportional-rectangle glyph for a ratio card — no icon library needed, just an SVG sized to the actual ratio. */
+function RatioGlyph({ ratioW, ratioH }: { ratioW: number; ratioH: number }) {
+  const maxSide = 40;
+  const scale = maxSide / Math.max(ratioW, ratioH);
+  const w = Math.round(ratioW * scale);
+  const h = Math.round(ratioH * scale);
+  return (
+    <svg width={maxSide + 8} height={maxSide + 8} viewBox={`0 0 ${maxSide + 8} ${maxSide + 8}`} aria-hidden="true">
+      <rect
+        x={(maxSide + 8 - w) / 2}
+        y={(maxSide + 8 - h) / 2}
+        width={w}
+        height={h}
+        rx={2}
+        className="fill-emerald-500/20 stroke-emerald-400"
+        strokeWidth={1.5}
+      />
+    </svg>
   );
 }

@@ -28,8 +28,41 @@ function EditorInner({ uid }: { uid: string }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  // Which variant (original vs background-removed) is currently selected
+  // per ORIGINAL image asset id — owned here (not inside
+  // BackgroundRemovalButton) because the media library row's own
+  // "+ Add to timeline" button needs the same answer: adding should place
+  // whichever variant the user has toggled to, not always the original.
+  const [bgVariantByAssetId, setBgVariantByAssetId] = useState<Record<string, string>>({});
   const projectStateRef = useRef(project);
   projectStateRef.current = project;
+
+  // Re-derive the toggle's highlighted variant from what's actually placed
+  // on the timeline whenever the project (re)loads — `bgVariantByAssetId`
+  // is deliberately local UI state (see its own comment above), so a fresh
+  // page load/reload starts it empty and the Original/Background-Removed
+  // pill would default to "Original" even when a placed watermark item is
+  // correctly still pointing at the background-removed asset (retargeting
+  // itself IS persisted correctly via each item's own `mediaAssetId` —
+  // only this toggle's highlight was out of sync). Only fills in entries
+  // that aren't already set, so it never clobbers a choice made later in
+  // the same session (e.g. right after a fresh removal completes).
+  useEffect(() => {
+    if (!project) return;
+    setBgVariantByAssetId((prev) => {
+      let next: Record<string, string> | null = null;
+      Object.values(project.mediaAssets).forEach((asset) => {
+        if (!asset.backgroundRemovedAssetId) return;
+        if (prev[asset.id] !== undefined) return;
+        const usesRemoved = project.items.some(
+          (item) => item.type === 'image' && item.mediaAssetId === asset.backgroundRemovedAssetId,
+        );
+        if (!next) next = { ...prev };
+        next[asset.id] = usesRemoved ? asset.backgroundRemovedAssetId : asset.id;
+      });
+      return next ?? prev;
+    });
+  }, [project]);
 
   const handleAssetUploaded = useCallback(
     (asset: MediaAsset) => {
@@ -40,9 +73,11 @@ function EditorInner({ uid }: { uid: string }) {
 
   const handleAddExistingAssetToTimeline = useCallback(
     (asset: MediaAsset) => {
-      mutate((p) => appendMediaToTimeline(p, asset, { atTime: currentTime }));
+      const selectedVariantId = bgVariantByAssetId[asset.id];
+      const assetToAdd = (selectedVariantId && project?.mediaAssets[selectedVariantId]) || asset;
+      mutate((p) => appendMediaToTimeline(p, assetToAdd, { atTime: currentTime }));
     },
-    [mutate, currentTime],
+    [mutate, currentTime, bgVariantByAssetId, project],
   );
 
   // Minimal, real keyboard shortcut set (Phase-10 audit item, extended in
@@ -176,20 +211,34 @@ function EditorInner({ uid }: { uid: string }) {
               <p className="text-xs text-white/30">Nothing uploaded yet.</p>
             )}
             <ul className="flex flex-col gap-1">
-              {Object.values(project.mediaAssets).map((asset) => (
-                <li key={asset.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">
-                  <span className="flex-1 truncate">{asset.fileName}</span>
-                  <span className="text-white/30 uppercase text-[10px]">{asset.kind}</span>
-                  <button
-                    onClick={() => handleAddExistingAssetToTimeline(asset)}
-                    className="text-emerald-400 hover:text-emerald-300 font-bold"
-                    title="Add to timeline at playhead"
-                  >
-                    +
-                  </button>
-                  {asset.kind === 'image' && <BackgroundRemovalButton uid={uid} asset={asset} />}
-                </li>
-              ))}
+              {Object.values(project.mediaAssets)
+                // A background-removed asset is a derivative of its
+                // original, reachable via the original's own toggle
+                // (BackgroundRemovalButton) rather than as an independent
+                // library row — keeps the list from growing a confusing
+                // second "-no-bg.png" entry every time someone toggles.
+                .filter((asset) => !asset.originalAssetId)
+                .map((asset) => (
+                  <li key={asset.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">
+                    <span className="flex-1 truncate">{asset.fileName}</span>
+                    <span className="text-white/30 uppercase text-[10px]">{asset.kind}</span>
+                    <button
+                      onClick={() => handleAddExistingAssetToTimeline(asset)}
+                      className="text-emerald-400 hover:text-emerald-300 font-bold min-h-[24px] min-w-[24px]"
+                      title="Add to timeline at playhead"
+                    >
+                      +
+                    </button>
+                    {asset.kind === 'image' && (
+                      <BackgroundRemovalButton
+                        uid={uid}
+                        asset={asset}
+                        isRemovedSelected={!!bgVariantByAssetId[asset.id] && bgVariantByAssetId[asset.id] === asset.backgroundRemovedAssetId}
+                        onSelectVariant={(assetId) => setBgVariantByAssetId((m) => ({ ...m, [asset.id]: assetId }))}
+                      />
+                    )}
+                  </li>
+                ))}
             </ul>
           </section>
         </aside>

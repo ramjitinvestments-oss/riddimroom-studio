@@ -33,6 +33,14 @@ export function MediaImportPanel({ uid, onAssetUploaded }: MediaImportPanelProps
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [showCamera, setShowCamera] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // "Final production fix" spec item 5 — a dedicated, clearly-visible
+  // "Upload Audio" action, distinct from the generic "Upload file" input.
+  // Deliberately a SECOND <input accept="audio/*"> wired to the exact same
+  // `handleFiles`/`startUpload`/`uploadMediaFile`/`appendMediaToTimeline`
+  // pipeline as every other upload, not a parallel audio-upload system —
+  // this only changes discoverability (a user shouldn't have to guess that
+  // the generic file button also accepts audio), not the underlying flow.
+  const audioInputRef = useRef<HTMLInputElement>(null);
   const assetIdByUploadId = useRef<Map<string, string>>(new Map());
 
   const runUpload = useCallback(
@@ -128,10 +136,28 @@ export function MediaImportPanel({ uid, onAssetUploaded }: MediaImportPanelProps
         >
           Use camera
         </button>
+        <button
+          onClick={() => audioInputRef.current?.click()}
+          className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white"
+          title="Add music, voiceover, or sound effects from your device"
+        >
+          Upload audio
+        </button>
         <input
           ref={fileInputRef}
           type="file"
           accept="video/*,image/*,audio/*"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            handleFiles(e.target.files);
+            e.target.value = '';
+          }}
+        />
+        <input
+          ref={audioInputRef}
+          type="file"
+          accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg"
           multiple
           className="hidden"
           onChange={(e) => {
