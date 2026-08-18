@@ -201,8 +201,10 @@ function EditorInner({ uid }: { uid: string }) {
             isPlaying={isPlaying}
             onTimeChange={setCurrentTime}
             onPlayingChange={setIsPlaying}
+            selectedItemId={selectedItemId}
+            onSelectItem={setSelectedItemId}
           />
-          <div className="w-full max-w-2xl">
+          <div className="w-full max-w-3xl">
             <TimelinePanel
               project={project}
               currentTime={currentTime}

@@ -81,6 +81,23 @@ function probeVideo(file: Blob): Promise<Pick<ProbedMedia, 'durationSeconds' | '
       );
     }, PROBE_TIMEOUT_MS);
 
+    // Real bug found via live browser testing (full-app audit): `settle()`
+    // runs `cleanup()` — which calls `video.removeAttribute('src')` +
+    // `video.load()`, resetting the element — BEFORE it invokes the
+    // resolve callback. Every call site here used to read `video.duration`/
+    // `video.videoWidth`/`video.videoHeight` *inside* that resolve
+    // callback, i.e. AFTER the element had already been reset, so those
+    // reads saw the post-reset values (`duration: NaN`, width/height 0)
+    // instead of the real probed ones — not intermittently, but on every
+    // single upload, for both the fast path and the seek-workaround path.
+    // Downstream, `appendMediaToTimeline`'s `asset.durationSeconds ?? 5`
+    // fallback does NOT catch a `NaN` (nullish coalescing only substitutes
+    // for `null`/`undefined`), so this silently produced a `NaN` item
+    // `endTime` — corrupting `getProjectDuration()` for the whole project
+    // (rendered in the UI as "NaNs total") and making every timeline item
+    // invisible (zero/invalid-percent width). Fixed by capturing the
+    // values into local consts BEFORE calling `settle`/`cleanup`, so the
+    // resolved result reflects what the element actually reported.
     const finish = () => {
       // Some real-world MP4s (notably ones re-muxed by phone apps/AI
       // generators) report duration as Infinity/NaN until the browser is
@@ -88,28 +105,26 @@ function probeVideo(file: Blob): Promise<Pick<ProbedMedia, 'durationSeconds' | '
       if (!Number.isFinite(video.duration) || video.duration <= 0) {
         const onSeeked = () => {
           video.removeEventListener('seeked', onSeeked);
-          settle(() =>
-            resolve({
-              durationSeconds: Number.isFinite(video.duration) ? video.duration : undefined,
-              width: video.videoWidth || undefined,
-              height: video.videoHeight || undefined,
-            }),
-          );
+          const durationSeconds = Number.isFinite(video.duration) ? video.duration : undefined;
+          const width = video.videoWidth || undefined;
+          const height = video.videoHeight || undefined;
+          settle(() => resolve({ durationSeconds, width, height }));
         };
         video.addEventListener('seeked', onSeeked);
         try {
           video.currentTime = 1e9;
         } catch {
           video.removeEventListener('seeked', onSeeked);
-          settle(() =>
-            resolve({ durationSeconds: undefined, width: video.videoWidth || undefined, height: video.videoHeight || undefined }),
-          );
+          const width = video.videoWidth || undefined;
+          const height = video.videoHeight || undefined;
+          settle(() => resolve({ durationSeconds: undefined, width, height }));
         }
         return;
       }
-      settle(() =>
-        resolve({ durationSeconds: video.duration, width: video.videoWidth || undefined, height: video.videoHeight || undefined }),
-      );
+      const durationSeconds = video.duration;
+      const width = video.videoWidth || undefined;
+      const height = video.videoHeight || undefined;
+      settle(() => resolve({ durationSeconds, width, height }));
     };
 
     video.onloadedmetadata = finish;
@@ -177,11 +192,15 @@ function probeAudio(file: Blob): Promise<Pick<ProbedMedia, 'durationSeconds'>> {
       settle(() => reject(new Error('Timed out reading this audio file\'s metadata (waited 12s). The file may use an unusual codec/container.')));
     }, PROBE_TIMEOUT_MS);
 
+    // Same fix as probeVideo's `finish` above — capture `audio.duration`
+    // BEFORE `settle()` calls `cleanup()` (which resets the element via
+    // `.load()`), not inside the post-cleanup resolve callback.
     const finish = () => {
       if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
         const onSeeked = () => {
           audio.removeEventListener('seeked', onSeeked);
-          settle(() => resolve({ durationSeconds: Number.isFinite(audio.duration) ? audio.duration : undefined }));
+          const durationSeconds = Number.isFinite(audio.duration) ? audio.duration : undefined;
+          settle(() => resolve({ durationSeconds }));
         };
         audio.addEventListener('seeked', onSeeked);
         try {
@@ -192,7 +211,8 @@ function probeAudio(file: Blob): Promise<Pick<ProbedMedia, 'durationSeconds'>> {
         }
         return;
       }
-      settle(() => resolve({ durationSeconds: audio.duration }));
+      const durationSeconds = audio.duration;
+      settle(() => resolve({ durationSeconds }));
     };
 
     audio.onloadedmetadata = finish;

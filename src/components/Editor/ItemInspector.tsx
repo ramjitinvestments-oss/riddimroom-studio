@@ -1,5 +1,5 @@
 import React from 'react';
-import type { AnimationPreset, CaptionTimelineItem, TimelineItem } from '../../types/timeline';
+import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
 import {
   updateItem,
@@ -11,6 +11,11 @@ import {
   crossDissolveAlreadyApplied,
   applyCrossDissolve,
   addCaptionWord,
+  isVisualItem,
+  bringForward,
+  sendBackward,
+  bringToFront,
+  sendToBack,
 } from '../../lib/timeline/utils';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
 
@@ -160,7 +165,72 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
               onChange={(e) => patch({ opacity: Number(e.target.value) })}
             />
           </label>
+          <label className="flex flex-col gap-1">
+            Rotation ({Math.round((item as any).rotation)}°)
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              step={1}
+              value={(item as any).rotation}
+              onChange={(e) => patch({ rotation: Number(e.target.value) })}
+            />
+          </label>
         </>
+      )}
+
+      {item.type === 'video' && (
+        <div className="flex items-center gap-2 border-t border-white/10 pt-2">
+          <label className="flex flex-col gap-1 flex-1">
+            Volume ({Math.round(item.volume * 100)}%)
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={item.volume}
+              onChange={(e) => patch({ volume: Number(e.target.value) })}
+            />
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={item.muted} onChange={(e) => patch({ muted: e.target.checked })} />
+            Mute
+          </label>
+        </div>
+      )}
+
+      {isVisualItem(item) && (
+        <div className="flex items-center gap-1 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40 mr-1">Layer</span>
+          <button
+            onClick={() => mutate((p) => sendToBack(p, item.id))}
+            title="Send to back"
+            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+          >
+            ⇤ Back
+          </button>
+          <button
+            onClick={() => mutate((p) => sendBackward(p, item.id))}
+            title="Send backward"
+            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+          >
+            ← Back
+          </button>
+          <button
+            onClick={() => mutate((p) => bringForward(p, item.id))}
+            title="Bring forward"
+            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+          >
+            Fwd →
+          </button>
+          <button
+            onClick={() => mutate((p) => bringToFront(p, item.id))}
+            title="Bring to front"
+            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+          >
+            Front ⇥
+          </button>
+        </div>
       )}
 
       {hasAnimation && (
@@ -269,11 +339,70 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
       {item.type !== 'caption' && <p className="text-white/30">Duration: {duration.toFixed(1)}s</p>}
 
       {item.type === 'caption' && <CaptionInspector item={item} />}
+      {item.type === 'audio' && <AudioInspector item={item} />}
 
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={item.visible} onChange={(e) => patch({ visible: e.target.checked })} />
-        Visible
-      </label>
+      {item.type !== 'audio' && (
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={item.visible} onChange={(e) => patch({ visible: e.target.checked })} />
+          Visible
+        </label>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Audio-item-specific controls — before this pass, an imported standalone
+ * audio item (music/voiceover/sfx) had NO dedicated UI at all once placed
+ * on the timeline: no volume, no mute, no fade, and a "Visible" checkbox
+ * that makes no sense for something with no picture. Full-app audit finding
+ * (`AUDIO UX`): the underlying `AudioTimelineItem.volume`/`.muted`/`.fade`
+ * fields already existed and were already correctly respected by the
+ * export renderer (`canvas2dRenderer.ts`) — they just had no inspector
+ * control, so a user had no way to actually adjust them.
+ */
+function AudioInspector({ item }: { item: AudioTimelineItem }) {
+  const { mutate } = useProject();
+  const patch = (fields: Record<string, unknown>) => {
+    mutate((project) => updateItem(project, item.id, fields));
+  };
+  return (
+    <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+      <span className="font-bold uppercase tracking-wide text-white/40">Audio</span>
+      <div className="flex items-center gap-2">
+        <label className="flex flex-col gap-1 flex-1">
+          Volume ({Math.round(item.volume * 100)}%)
+          <input type="range" min={0} max={1} step={0.05} value={item.volume} onChange={(e) => patch({ volume: Number(e.target.value) })} />
+        </label>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={item.muted} onChange={(e) => patch({ muted: e.target.checked })} />
+          Mute
+        </label>
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="flex flex-col gap-1 flex-1">
+          Fade in (s)
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={item.fade.fadeInDuration}
+            onChange={(e) => patch({ fade: { fadeInDuration: Number(e.target.value), fadeOutDuration: item.fade.fadeOutDuration } })}
+            className="bg-white/10 rounded px-2 py-1 text-white"
+          />
+        </label>
+        <label className="flex flex-col gap-1 flex-1">
+          Fade out (s)
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={item.fade.fadeOutDuration}
+            onChange={(e) => patch({ fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: Number(e.target.value) } })}
+            className="bg-white/10 rounded px-2 py-1 text-white"
+          />
+        </label>
+      </div>
     </div>
   );
 }

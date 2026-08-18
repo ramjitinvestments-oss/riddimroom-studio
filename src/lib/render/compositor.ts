@@ -168,8 +168,17 @@ export function computeEntranceExit(
   return a;
 }
 
-/** Linear fade-in/out from `FadeSettings`, independent of `animation` — this is what makes a cross-dissolve between two overlapping adjacent clips possible (see header comment). */
-function computeFadeOpacity(
+/**
+ * Linear fade-in/out from `FadeSettings`, independent of `animation` — this
+ * is what makes a cross-dissolve between two overlapping adjacent clips
+ * possible (see header comment). Exported (full-app audio audit) because
+ * `AudioTimelineItem.fade` needs the identical ramp applied to a Web Audio
+ * gain node rather than canvas opacity — same math, different destination
+ * — in both `PreviewPane.tsx` (live playback) and `canvas2dRenderer.ts`
+ * (export), so an audio item's fade-in/fade-out inspector fields are never
+ * a control that changes project state with no audible effect.
+ */
+export function computeFadeOpacity(
   fade: { fadeInDuration: number; fadeOutDuration: number } | undefined,
   sinceStart: number,
   untilEnd: number,
@@ -319,10 +328,18 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
   const sinceStart = timeSeconds - item.startTime;
   const duration = item.endTime - item.startTime;
   const displayText = kineticRevealText(item.text, item.animation?.entrance, sinceStart, duration);
+  // `item.scale` is part of the shared `Transform` every text item carries
+  // (and was already user-adjustable via the inspector's "Scale" slider),
+  // but was never actually read here — found during the full-app button
+  // audit as a control that updates project state with zero visible effect
+  // ("dead control" per the audit's own definition). Folding it into the
+  // effective font size is what makes that slider (and canvas-drag resize,
+  // see PreviewPane.tsx) do something real.
+  const effectiveFontSize = item.fontSize * (item.scale || 1);
   applyTransformedDraw(
     ctx,
     (c) => {
-      c.font = `${item.fontSize}px Arial, Helvetica, sans-serif`;
+      c.font = `${effectiveFontSize}px Arial, Helvetica, sans-serif`;
       c.fillStyle = item.color;
       c.textAlign = 'center';
       c.textBaseline = 'middle';
@@ -333,6 +350,66 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
     centerY,
     adjustment,
   );
+}
+
+// ---------------------------------------------------------------------------
+// On-canvas selection geometry — full-app audit ("free canvas positioning")
+//
+// The editor preview needs to draw a real selection box + drag/resize
+// handles around whichever video/image/text item is selected, using the
+// EXACT same size/position rules `drawVideoItem`/`drawImageItem`/
+// `drawTextItem` use to actually draw it — otherwise the handles would be a
+// second, hand-kept-in-sync notion of "how big is this item" that drifts
+// from what's really rendered. `getItemBoundsPercent` is that one shared
+// source of truth, expressed as percentages of canvas width/height (not
+// pixels) so the caller (PreviewPane, an HTML overlay on top of the canvas
+// element) can position a CSS box without needing to know the canvas's
+// on-screen pixel size at all.
+// ---------------------------------------------------------------------------
+
+export interface ItemBoundsPercent {
+  /** Left edge, as a percentage (0-100) of canvas width. */
+  leftPercent: number;
+  /** Top edge, as a percentage (0-100) of canvas height. */
+  topPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+}
+
+export function getItemBoundsPercent(
+  item: { position: Transform['position']; scale: number },
+  itemType: 'video' | 'image' | 'text',
+  canvasWidth: number,
+  canvasHeight: number,
+  opts: { naturalImageAspect?: number; textWidthPx?: number; textHeightPx?: number } = {},
+): ItemBoundsPercent {
+  let widthPx: number;
+  let heightPx: number;
+  if (itemType === 'video') {
+    // Mirrors drawVideoItem: fills the canvas at scale 1.
+    widthPx = canvasWidth * item.scale;
+    heightPx = canvasHeight * item.scale;
+  } else if (itemType === 'image') {
+    // Mirrors drawImageItem: 25% of canvas width at scale 1, source aspect preserved.
+    const baseWidth = canvasWidth * 0.25 * item.scale;
+    const aspect = opts.naturalImageAspect ?? 1;
+    widthPx = baseWidth;
+    heightPx = baseWidth * aspect;
+  } else {
+    // text — drawTextItem has no fixed box (it's font-size/measureText
+    // driven), so the caller measures the actual rendered text and passes
+    // the result through rather than this function guessing at a size.
+    widthPx = opts.textWidthPx ?? canvasWidth * 0.3;
+    heightPx = opts.textHeightPx ?? 40;
+  }
+  const widthPercent = (widthPx / canvasWidth) * 100;
+  const heightPercent = (heightPx / canvasHeight) * 100;
+  return {
+    leftPercent: item.position.x - widthPercent / 2,
+    topPercent: item.position.y - heightPercent / 2,
+    widthPercent,
+    heightPercent,
+  };
 }
 
 // ---------------------------------------------------------------------------

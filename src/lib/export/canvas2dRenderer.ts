@@ -24,7 +24,7 @@
 
 import type { Project, TimelineItem } from '../../types/timeline';
 import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
-import { drawFrame } from './../render/compositor';
+import { computeFadeOpacity, drawFrame } from './../render/compositor';
 import type { Renderer, RenderOptions, RenderResult } from './renderer';
 import { RenderAbortedError } from './renderer';
 
@@ -264,7 +264,14 @@ export class Canvas2DRenderer implements Renderer {
             }
             handle.element.play().catch(() => {});
           }
-          handle.gain.gain.value = item.muted ? 0 : item.volume;
+          // Apply the item's own fade-in/fade-out to its gain, not just
+          // mute/volume — `AudioTimelineItem.fade` previously had no effect
+          // anywhere (found during the full-app audio audit alongside
+          // exposing it in the inspector for the first time); reuses the
+          // exact same ramp `drawFrame` applies to visual opacity so an
+          // audio fade and a video/image fade behave identically.
+          const audioFadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+          handle.gain.gain.value = item.muted ? 0 : item.volume * audioFadeMul;
         });
         videoHandles.forEach((h, key) => {
           if (key.startsWith('audio:')) {

@@ -27,6 +27,23 @@ import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracks
 
 const DEFAULT_IMAGE_DURATION_SECONDS = 5;
 
+/**
+ * Safe fallback for a probed media duration: `?? fallback` alone does NOT
+ * catch `NaN` (nullish coalescing only substitutes for `null`/`undefined`,
+ * and `NaN` is a legitimate `number`) — a real bug found during the
+ * full-app audit (fixed at its source in `lib/media/probe.ts`, which was
+ * reading `video.duration`/`audio.duration` after the probing element had
+ * already been reset) let a `NaN` `durationSeconds` slip past every
+ * `?? 5` in this file, producing a `NaN` item `endTime` that corrupted the
+ * whole project's computed duration. This helper is the second, defensive
+ * layer — even if some future probing path (or a genuinely malformed
+ * asset record) produces `NaN` again, an item's placement on the timeline
+ * can no longer inherit it.
+ */
+function safeDuration(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function nextZIndex(project: Project): number {
   return project.items.reduce((max, item) => Math.max(max, item.zIndex), -1) + 1;
 }
@@ -68,7 +85,7 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
   if (asset.kind === 'video') {
     const track = firstTrackOfType(next, 'video');
     const startTime = nextStartTime(next, track.id, options.atTime);
-    const duration = asset.durationSeconds ?? 5;
+    const duration = safeDuration(asset.durationSeconds, 5);
     const item: VideoTimelineItem = {
       id: generateTimelineId('item'),
       type: 'video',
@@ -117,7 +134,7 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
   // audio
   const track = firstTrackOfType(next, 'audio');
   const startTime = nextStartTime(next, track.id, options.atTime);
-  const duration = asset.durationSeconds ?? 5;
+  const duration = safeDuration(asset.durationSeconds, 5);
   const item: AudioTimelineItem = {
     id: generateTimelineId('item'),
     type: 'audio',

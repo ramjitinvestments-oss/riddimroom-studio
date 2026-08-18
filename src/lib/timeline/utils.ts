@@ -408,6 +408,69 @@ export function applyCrossDissolve(project: Project, itemId: string, durationSec
 }
 
 // ---------------------------------------------------------------------------
+// Layer order — z-index reordering for overlay composition
+//
+// `zIndex` has always existed on every item (see `types/timeline.ts`'s
+// `TimelineItemBase`) and the compositor has always drawn back-to-front by
+// it (`getItemsAtTime`'s doc comment) — but until this pass there was no UI
+// path to actually change it, which is exactly the "implemented only in
+// code but not exposed to users" gap the full-app audit asked to close.
+// These four helpers are simple swap/extremize operations on that existing
+// field, not a new stacking model.
+// ---------------------------------------------------------------------------
+
+const VISUAL_ITEM_TYPES = new Set<TimelineItem['type']>(['video', 'image', 'text', 'caption']);
+
+/** True for the item types that actually draw something (and so have a meaningful stacking order) — audio has no visual layer. */
+export function isVisualItem(item: Pick<TimelineItem, 'type'>): boolean {
+  return VISUAL_ITEM_TYPES.has(item.type);
+}
+
+/** Swaps `itemId`'s zIndex with the next-higher visual item's zIndex, moving it one step toward the front. No-op if it's already frontmost or not a visual item. */
+export function bringForward(project: Project, itemId: string): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || !isVisualItem(item)) return project;
+  const above = project.items
+    .filter((i) => i.id !== itemId && isVisualItem(i) && i.zIndex > item.zIndex)
+    .sort((a, b) => a.zIndex - b.zIndex)[0];
+  if (!above) return project;
+  let next = updateItem(project, item.id, { zIndex: above.zIndex });
+  next = updateItem(next, above.id, { zIndex: item.zIndex });
+  return next;
+}
+
+/** Swaps `itemId`'s zIndex with the next-lower visual item's zIndex, moving it one step toward the back. No-op if it's already backmost or not a visual item. */
+export function sendBackward(project: Project, itemId: string): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || !isVisualItem(item)) return project;
+  const below = project.items
+    .filter((i) => i.id !== itemId && isVisualItem(i) && i.zIndex < item.zIndex)
+    .sort((a, b) => b.zIndex - a.zIndex)[0];
+  if (!below) return project;
+  let next = updateItem(project, item.id, { zIndex: below.zIndex });
+  next = updateItem(next, below.id, { zIndex: item.zIndex });
+  return next;
+}
+
+/** Sets `itemId`'s zIndex above every other visual item's. No-op if not a visual item. */
+export function bringToFront(project: Project, itemId: string): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || !isVisualItem(item)) return project;
+  const maxZ = project.items.filter(isVisualItem).reduce((max, i) => Math.max(max, i.zIndex), item.zIndex);
+  if (maxZ === item.zIndex) return project;
+  return updateItem(project, itemId, { zIndex: maxZ + 1 });
+}
+
+/** Sets `itemId`'s zIndex below every other visual item's. No-op if not a visual item. */
+export function sendToBack(project: Project, itemId: string): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || !isVisualItem(item)) return project;
+  const minZ = project.items.filter(isVisualItem).reduce((min, i) => Math.min(min, i.zIndex), item.zIndex);
+  if (minZ === item.zIndex) return project;
+  return updateItem(project, itemId, { zIndex: minZ - 1 });
+}
+
+// ---------------------------------------------------------------------------
 // Caption word editing — "Add word"
 // ---------------------------------------------------------------------------
 
