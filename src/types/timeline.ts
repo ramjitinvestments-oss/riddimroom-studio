@@ -101,11 +101,27 @@ export type AnimationPreset =
   | 'none' | 'fade' | 'slide-up' | 'slide-down' | 'slide-left' | 'slide-right'
   | 'typewriter' | 'pop' | 'bounce' | 'word-by-word' | 'karaoke' | 'zoom'
   | 'shake' | 'fadeup' | 'smoke' | 'glitch' | 'skew' | 'elastic' | 'flip'
-  | 'fire' | 'spin' | 'slideSplit' | 'rainbow' | 'heartbeat';
+  | 'fire' | 'spin' | 'slideSplit' | 'rainbow' | 'heartbeat'
+  // "Final production fix" spec item 7 — added to reach the required
+  // 25-30 premium transitions across 4 named categories (see
+  // `lib/transitions.ts` for the category catalog); every one of these
+  // (plus every preset above) has bespoke, distinct math in
+  // `computeEntranceExit`, not a shared fallback.
+  | 'dip-to-black' | 'dip-to-white' | 'light-leak' | 'film-dissolve'
+  | 'lens-blur' | 'whip-pan' | 'snap-zoom' | 'flash';
 
 export interface AnimationSettings {
   entrance?: AnimationPreset;
   exit?: AnimationPreset;
+  /**
+   * "Final production fix" spec item 7 — transitions need "adjustable
+   * intensity", not just an on/off preset choice. A multiplier applied to
+   * every preset's displacement/scale/blur amounts in
+   * `computeEntranceExit` (1 = the preset's normal look; e.g. 0.5 = a
+   * subtler version of the same motion, 2 = a much more aggressive one).
+   * Undefined behaves exactly like 1 (existing projects need no migration).
+   */
+  intensity?: number;
 }
 
 export interface TrimSettings {

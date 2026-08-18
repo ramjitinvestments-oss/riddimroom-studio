@@ -256,7 +256,24 @@ function buildProject(): Project {
 // identity adjustment during its entrance/exit window.
 // ---------------------------------------------------------------------------
 {
-  const IDENTITY = { opacityMul: 1, offsetXPx: 0, offsetYPx: 0, scaleMul: 1, blurPx: 0 };
+  // "Final production fix" Phase 2a added several more optional fields to
+  // AnimatedAdjustment (overlay wash, skew, per-axis scale, rotation delta,
+  // hue-rotate) to back the expanded transitions catalog — see
+  // lib/render/compositor.ts's IDENTITY_ADJUSTMENT and lib/transitions.ts.
+  const IDENTITY = {
+    opacityMul: 1,
+    offsetXPx: 0,
+    offsetYPx: 0,
+    scaleMul: 1,
+    blurPx: 0,
+    overlayAlpha: 0,
+    overlayColor: '#000000',
+    skewX: 0,
+    scaleXMul: 1,
+    scaleYMul: 1,
+    rotationDeltaDeg: 0,
+    hueRotateDeg: 0,
+  };
   check(
     "computeEntranceExit('none') is the identity adjustment (no motion)",
     JSON.stringify(computeEntranceExit('none', 0, 5, 5, 1080, 1920)) === JSON.stringify(IDENTITY),
@@ -283,7 +300,16 @@ function buildProject(): Project {
   const popIn = computeEntranceExit('pop', 0.05, 5, 5, 1080, 1920);
   check('computeEntranceExit("pop") produces a non-identity scale near the very start (overshoot punch-in)', popIn.scaleMul !== 1);
 
-  const unimplementedPreset = computeEntranceExit('shake' as any, 0, 5, 5, 1080, 1920);
+  // "final production fix" Phase 2a gave every catalog preset (including
+  // 'shake', which this test used to use as its "unimplemented" example)
+  // bespoke motion — see test-transitions-catalog.mts for full per-preset
+  // coverage. What's left to verify here is the `default:` branch itself:
+  // an `AnimationPreset` value that reaches computeEntranceExit but has no
+  // case of its own (e.g. a caption-only kinetic-reveal preset like
+  // 'karaoke' used on a non-caption item, or any future type-only addition
+  // that hasn't been given bespoke math yet) must still get a real fade,
+  // never a silent no-op.
+  const unimplementedPreset = computeEntranceExit('karaoke' as any, 0, 5, 5, 1080, 1920);
   check(
     'computeEntranceExit falls back to a real fade (not a silent no-op) for a preset without bespoke motion',
     unimplementedPreset.opacityMul < 1,

@@ -38,6 +38,7 @@
 import type { AnimationPreset, CaptionTimelineItem, ImageTimelineItem, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { getItemsAtTime } from '../timeline/utils';
 import { getCaptionStyle } from '../captions/styles';
+import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
 
 export interface FrameAssets {
   /** Loaded <img> elements keyed by MediaAsset id, for `image` timeline items. */
@@ -50,8 +51,8 @@ export interface FrameAssets {
 // Entrance/exit animation + fade — the "premium transitions" engine
 // ---------------------------------------------------------------------------
 
-/** Default entrance/exit duration for an animated item, capped to half the item's own on-screen duration so a very short clip doesn't animate through its entire lifespan. */
-const ANIMATION_DURATION_SECONDS = 0.45;
+/** Fallback entrance/exit duration for a preset with no catalog entry (see lib/transitions.ts), capped to half the item's own on-screen duration so a very short clip doesn't animate through its entire lifespan. */
+const FALLBACK_ANIMATION_DURATION_SECONDS = 0.45;
 
 function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
@@ -69,15 +70,54 @@ function easeOutBack(t: number): number {
   return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
 }
 
+/** Damped oscillation, e.g. `dampedSine(t, 3)` rings 3 times while decaying to 0 — used for bounce/elastic/heartbeat's "settles after overshooting" feel. Deterministic (pure function of t), never Math.random(), so preview and export always agree frame-for-frame. */
+function dampedSine(t: number, cycles: number): number {
+  const x = clamp01(t);
+  return Math.sin(x * Math.PI * cycles) * (1 - x);
+}
+
 export interface AnimatedAdjustment {
   opacityMul: number;
   offsetXPx: number;
   offsetYPx: number;
   scaleMul: number;
   blurPx: number;
+  /**
+   * "Final production fix" spec item 7 additions — a handful of presets
+   * (dip-to-black/white, light-leak, flash, spin, flip, skew, glitch,
+   * rainbow) need more than uniform opacity/offset/scale/blur to look
+   * distinct rather than like a re-skinned fade. Every field here defaults
+   * to a no-op value and is additive/multiplicative on top of the item's
+   * own static Transform, exactly like the fields above.
+   */
+  /** 0-1 straight overlay-color wash drawn over the item's own bounds (dip-to-black/white, light-leak, flash). */
+  overlayAlpha: number;
+  overlayColor: string;
+  /** Radians — canvas horizontal shear, applied before scale (skew). */
+  skewX: number;
+  /** Independent per-axis scale multipliers, layered on top of `scaleMul` (flip's "thin sliver" horizontal collapse, slideSplit's squeeze). */
+  scaleXMul: number;
+  scaleYMul: number;
+  /** Degrees, added to the item's own static rotation (spin). */
+  rotationDeltaDeg: number;
+  /** CSS `hue-rotate()` degrees, combined into the same canvas filter as blur (rainbow). */
+  hueRotateDeg: number;
 }
 
-const IDENTITY_ADJUSTMENT: AnimatedAdjustment = { opacityMul: 1, offsetXPx: 0, offsetYPx: 0, scaleMul: 1, blurPx: 0 };
+const IDENTITY_ADJUSTMENT: AnimatedAdjustment = {
+  opacityMul: 1,
+  offsetXPx: 0,
+  offsetYPx: 0,
+  scaleMul: 1,
+  blurPx: 0,
+  overlayAlpha: 0,
+  overlayColor: '#000000',
+  skewX: 0,
+  scaleXMul: 1,
+  scaleYMul: 1,
+  rotationDeltaDeg: 0,
+  hueRotateDeg: 0,
+};
 
 /**
  * Computes the entrance/exit adjustment for a frame `sinceStart` seconds
@@ -96,6 +136,8 @@ export function computeEntranceExit(
   itemDurationSeconds: number,
   canvasWidth: number,
   canvasHeight: number,
+  /** "Final production fix" spec item 7 — multiplies every preset's displacement/scale-delta/blur amount; 1 = the preset's normal look. Clamped to the catalog's supported range so a corrupt/out-of-range saved value can't produce an unusable (e.g. inverted or absurdly huge) transition. */
+  intensity: number = 1,
 ): AnimatedAdjustment {
   // Callers (`animationFor`) mutate the returned object in place
   // (`a.opacityMul *= computeFadeOpacity(...)`), so every early return here
@@ -109,13 +151,17 @@ export function computeEntranceExit(
   // video item and a kinetic text item both progressively faded to fully
   // transparent a few seconds into playback with no console error.
   if (!preset || preset === 'none') return { ...IDENTITY_ADJUSTMENT };
-  const dur = Math.min(ANIMATION_DURATION_SECONDS, Math.max(0.05, itemDurationSeconds / 2));
+  const k = Math.max(TRANSITION_INTENSITY_MIN, Math.min(TRANSITION_INTENSITY_MAX, intensity || 1));
+  const catalogDuration = findTransitionPreset(preset)?.defaultDurationSeconds ?? FALLBACK_ANIMATION_DURATION_SECONDS;
+  const dur = Math.min(catalogDuration, Math.max(0.05, itemDurationSeconds / 2));
   const inEnter = sinceStart < dur;
   const inExit = untilEnd < dur;
   if (!inEnter && !inExit) return { ...IDENTITY_ADJUSTMENT };
 
   const enterP = easeOutCubic(clamp01(sinceStart / dur));
   const exitP = easeOutCubic(clamp01(untilEnd / dur));
+  const enterLinear = clamp01(sinceStart / dur);
+  const exitLinear = clamp01(untilEnd / dur);
   const a: AnimatedAdjustment = { ...IDENTITY_ADJUSTMENT };
 
   const applyEnterExitOpacity = () => {
@@ -124,47 +170,187 @@ export function computeEntranceExit(
   };
 
   switch (preset) {
+    // --- Clean / Professional ---------------------------------------
     case 'fade':
       applyEnterExitOpacity();
-      if (inEnter) a.blurPx = Math.max(a.blurPx, (1 - enterP) * 8);
-      if (inExit) a.blurPx = Math.max(a.blurPx, (1 - exitP) * 8);
+      if (inEnter) a.blurPx = Math.max(a.blurPx, (1 - enterP) * 8 * k);
+      if (inExit) a.blurPx = Math.max(a.blurPx, (1 - exitP) * 8 * k);
       break;
     case 'slide-up':
       applyEnterExitOpacity();
-      if (inEnter) a.offsetYPx += (1 - enterP) * canvasHeight * 0.18;
-      if (inExit) a.offsetYPx -= (1 - exitP) * canvasHeight * 0.18;
+      if (inEnter) a.offsetYPx += (1 - enterP) * canvasHeight * 0.18 * k;
+      if (inExit) a.offsetYPx -= (1 - exitP) * canvasHeight * 0.18 * k;
       break;
     case 'slide-down':
       applyEnterExitOpacity();
-      if (inEnter) a.offsetYPx -= (1 - enterP) * canvasHeight * 0.18;
-      if (inExit) a.offsetYPx += (1 - exitP) * canvasHeight * 0.18;
+      if (inEnter) a.offsetYPx -= (1 - enterP) * canvasHeight * 0.18 * k;
+      if (inExit) a.offsetYPx += (1 - exitP) * canvasHeight * 0.18 * k;
       break;
     case 'slide-left':
       applyEnterExitOpacity();
-      if (inEnter) a.offsetXPx += (1 - enterP) * canvasWidth * 0.22;
-      if (inExit) a.offsetXPx -= (1 - exitP) * canvasWidth * 0.22;
+      if (inEnter) a.offsetXPx += (1 - enterP) * canvasWidth * 0.22 * k;
+      if (inExit) a.offsetXPx -= (1 - exitP) * canvasWidth * 0.22 * k;
       break;
     case 'slide-right':
       applyEnterExitOpacity();
-      if (inEnter) a.offsetXPx -= (1 - enterP) * canvasWidth * 0.22;
-      if (inExit) a.offsetXPx += (1 - exitP) * canvasWidth * 0.22;
+      if (inEnter) a.offsetXPx -= (1 - enterP) * canvasWidth * 0.22 * k;
+      if (inExit) a.offsetXPx += (1 - exitP) * canvasWidth * 0.22 * k;
+      break;
+    case 'dip-to-black':
+    case 'dip-to-white': {
+      // The item itself stays fully opaque and un-transformed — the "dip"
+      // is entirely the overlay wash covering it, ramping from opaque
+      // color (hiding the item at the very edge of the window) to
+      // transparent (revealing it), and back on exit. A real cut-through-
+      // color, not a disguised fade.
+      a.overlayColor = preset === 'dip-to-black' ? '#000000' : '#ffffff';
+      if (inEnter) a.overlayAlpha = Math.max(a.overlayAlpha, 1 - enterLinear);
+      if (inExit) a.overlayAlpha = Math.max(a.overlayAlpha, 1 - exitLinear);
+      break;
+    }
+
+    // --- Modern / Social ----------------------------------------------
+    case 'pop':
+      applyEnterExitOpacity();
+      if (inEnter) a.scaleMul *= Math.max(0, 1 + (easeOutBack(enterLinear) - 1) * k);
+      if (inExit) a.scaleMul *= 1 - (1 - exitP) * 0.4 * k;
       break;
     case 'zoom':
       applyEnterExitOpacity();
-      if (inEnter) { a.scaleMul *= 0.55 + 0.45 * enterP; a.blurPx = Math.max(a.blurPx, (1 - enterP) * 6); }
-      if (inExit) a.scaleMul *= 1 + (1 - exitP) * 0.35;
+      if (inEnter) { a.scaleMul *= 1 - (1 - enterP) * 0.45 * k; a.blurPx = Math.max(a.blurPx, (1 - enterP) * 6 * k); }
+      if (inExit) a.scaleMul *= 1 + (1 - exitP) * 0.35 * k;
       break;
-    case 'pop':
+    case 'bounce':
       applyEnterExitOpacity();
-      if (inEnter) a.scaleMul *= Math.max(0, easeOutBack(clamp01(sinceStart / dur)));
-      if (inExit) a.scaleMul *= 0.6 + 0.4 * exitP;
+      if (inEnter) a.offsetYPx += -dampedSine(enterLinear, 2.5) * canvasHeight * 0.12 * k + (1 - enterP) * canvasHeight * 0.05 * k;
+      if (inExit) a.offsetYPx += (1 - exitP) * canvasHeight * 0.1 * k;
       break;
+    case 'shake':
+      // Deterministic high-frequency jitter (sum of two sines at
+      // incommensurate frequencies), decaying to 0 — never Math.random(),
+      // so the exact same frame renders identically in preview and export.
+      if (inEnter) {
+        const decay = 1 - enterLinear;
+        a.offsetXPx += (Math.sin(enterLinear * 55) * 0.6 + Math.sin(enterLinear * 37 + 1.3) * 0.4) * decay * 14 * k;
+      }
+      if (inExit) {
+        const decay = 1 - exitLinear;
+        a.offsetXPx += (Math.sin(exitLinear * 55) * 0.6 + Math.sin(exitLinear * 37 + 1.3) * 0.4) * decay * 14 * k;
+      }
+      applyEnterExitOpacity();
+      break;
+    case 'glitch':
+      // Stepped (not smooth) horizontal jitter + a blur flicker — reads as
+      // "digital glitch" rather than a smooth shake.
+      if (inEnter) {
+        const step = Math.floor(enterLinear * 10) / 10;
+        a.offsetXPx += (Math.sin(step * 97) > 0 ? 1 : -1) * (1 - enterLinear) * 18 * k;
+        a.blurPx = Math.max(a.blurPx, (Math.sin(step * 53) > 0.3 ? 4 : 0) * k);
+      }
+      if (inExit) {
+        const step = Math.floor(exitLinear * 10) / 10;
+        a.offsetXPx += (Math.sin(step * 97) > 0 ? 1 : -1) * (1 - exitLinear) * 18 * k;
+      }
+      applyEnterExitOpacity();
+      break;
+    case 'skew':
+      applyEnterExitOpacity();
+      if (inEnter) a.skewX += (1 - enterP) * 0.35 * k;
+      if (inExit) a.skewX -= (1 - exitP) * 0.35 * k;
+      break;
+    case 'flip':
+      // scaleXMul sweeps through 0 (edge-on, a real "card flip" moment)
+      // rather than just easing 0→1 like a normal scale-in.
+      applyEnterExitOpacity();
+      if (inEnter) a.scaleXMul *= Math.cos((1 - enterP) * (Math.PI / 2) * Math.min(1, k));
+      if (inExit) a.scaleXMul *= Math.cos((1 - exitP) * (Math.PI / 2) * Math.min(1, k));
+      break;
+
+    // --- Premium / Cinematic -------------------------------------------
+    case 'smoke':
+      applyEnterExitOpacity();
+      if (inEnter) a.blurPx = Math.max(a.blurPx, (1 - enterP) * 22 * k);
+      if (inExit) a.blurPx = Math.max(a.blurPx, (1 - exitP) * 22 * k);
+      break;
+    case 'elastic':
+      applyEnterExitOpacity();
+      if (inEnter) a.scaleMul *= 1 + dampedSine(enterLinear, 2) * 0.35 * k;
+      if (inExit) a.scaleMul *= 1 + dampedSine(exitLinear, 2) * 0.25 * k;
+      break;
+    case 'light-leak':
+      a.overlayColor = '#fff2c2';
+      if (inEnter) { a.overlayAlpha = Math.max(a.overlayAlpha, Math.sin(enterLinear * Math.PI) * 0.7 * k); a.blurPx = Math.max(a.blurPx, (1 - enterP) * 5 * k); }
+      if (inExit) a.overlayAlpha = Math.max(a.overlayAlpha, Math.sin(exitLinear * Math.PI) * 0.7 * k);
+      applyEnterExitOpacity();
+      break;
+    case 'film-dissolve':
+      applyEnterExitOpacity();
+      if (inEnter) { a.blurPx = Math.max(a.blurPx, (1 - enterP) * 14 * k); a.scaleMul *= 1 + (1 - enterP) * 0.05 * k; }
+      if (inExit) a.blurPx = Math.max(a.blurPx, (1 - exitP) * 14 * k);
+      break;
+    case 'lens-blur':
+      applyEnterExitOpacity();
+      if (inEnter) a.blurPx = Math.max(a.blurPx, (1 - enterP) * 16 * k);
+      if (inExit) a.blurPx = Math.max(a.blurPx, (1 - exitP) * 16 * k);
+      break;
+    case 'whip-pan':
+      applyEnterExitOpacity();
+      if (inEnter) { a.offsetXPx += (1 - enterLinear) * canvasWidth * 0.6 * k; a.blurPx = Math.max(a.blurPx, (1 - enterP) * 18 * k); }
+      if (inExit) { a.offsetXPx -= (1 - exitLinear) * canvasWidth * 0.6 * k; a.blurPx = Math.max(a.blurPx, (1 - exitP) * 18 * k); }
+      break;
+    case 'spin':
+      applyEnterExitOpacity();
+      if (inEnter) { a.rotationDeltaDeg += (1 - enterP) * 360 * k; a.scaleMul *= 0.7 + 0.3 * enterP; }
+      if (inExit) a.rotationDeltaDeg -= (1 - exitP) * 360 * k;
+      break;
+
+    // --- Marketing / Advertising ----------------------------------------
+    case 'fire':
+      applyEnterExitOpacity();
+      a.overlayColor = '#ff6a1a';
+      if (inEnter) { a.overlayAlpha = Math.max(a.overlayAlpha, (Math.sin(enterLinear * 26) * 0.5 + 0.5) * (1 - enterLinear) * 0.35 * k); a.scaleMul *= 1 + (1 - enterP) * 0.15 * k; }
+      if (inExit) a.overlayAlpha = Math.max(a.overlayAlpha, (Math.sin(exitLinear * 26) * 0.5 + 0.5) * (1 - exitLinear) * 0.35 * k);
+      break;
+    case 'rainbow':
+      applyEnterExitOpacity();
+      if (inEnter) a.hueRotateDeg += (1 - enterLinear) * 360 * k;
+      if (inExit) a.hueRotateDeg += (1 - exitLinear) * 360 * k;
+      break;
+    case 'heartbeat':
+      applyEnterExitOpacity();
+      if (inEnter) a.scaleMul *= 1 + (Math.max(0, Math.sin(enterLinear * Math.PI * 4)) * 0.18) * (1 - enterLinear) * k;
+      if (inExit) a.scaleMul *= 1 + (Math.max(0, Math.sin(exitLinear * Math.PI * 4)) * 0.18) * (1 - exitLinear) * k;
+      break;
+    case 'slideSplit':
+      applyEnterExitOpacity();
+      if (inEnter) { a.offsetXPx += (1 - enterP) * canvasWidth * 0.16 * k; a.scaleXMul *= 1 - (1 - enterP) * 0.3 * k; }
+      if (inExit) { a.offsetXPx -= (1 - exitP) * canvasWidth * 0.16 * k; a.scaleXMul *= 1 - (1 - exitP) * 0.3 * k; }
+      break;
+    case 'fadeup':
+      applyEnterExitOpacity();
+      if (inEnter) a.offsetYPx += (1 - enterP) * canvasHeight * 0.06 * k;
+      if (inExit) a.offsetYPx -= (1 - exitP) * canvasHeight * 0.06 * k;
+      break;
+    case 'snap-zoom':
+      applyEnterExitOpacity();
+      if (inEnter) { a.scaleMul *= Math.max(0.1, easeOutBack(enterLinear) * Math.min(1, k) + (1 - Math.min(1, k))); a.blurPx = Math.max(a.blurPx, (1 - enterP) * 10 * k); }
+      if (inExit) a.scaleMul *= Math.max(0.1, 1 + (1 - exitP) * 0.5 * k);
+      break;
+    case 'flash':
+      applyEnterExitOpacity();
+      a.overlayColor = '#ffffff';
+      if (inEnter) a.overlayAlpha = Math.max(a.overlayAlpha, Math.pow(1 - enterLinear, 3) * k);
+      if (inExit) a.overlayAlpha = Math.max(a.overlayAlpha, Math.pow(1 - exitLinear, 3) * k);
+      break;
+
     default:
-      // Not yet given bespoke motion — a real (if simple) fade beats a
-      // silent no-op for a preset the UI lets the user pick.
+      // Not yet given bespoke motion (e.g. a text-only kinetic-reveal
+      // preset used on a non-text item) — a real fade beats a silent
+      // no-op for any preset value the UI could ever hand in here.
       applyEnterExitOpacity();
       break;
   }
+  a.overlayAlpha = clamp01(a.overlayAlpha);
   return a;
 }
 
@@ -204,17 +390,47 @@ function applyTransformedDraw(
 ) {
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity * adjustment.opacityMul));
-  if (adjustment.blurPx > 0.05) ctx.filter = `blur(${adjustment.blurPx.toFixed(2)}px)`;
+  const filters: string[] = [];
+  if (adjustment.blurPx > 0.05) filters.push(`blur(${adjustment.blurPx.toFixed(2)}px)`);
+  if (Math.abs(adjustment.hueRotateDeg) > 0.5) filters.push(`hue-rotate(${adjustment.hueRotateDeg.toFixed(1)}deg)`);
+  if (filters.length > 0) ctx.filter = filters.join(' ');
   ctx.translate(centerXPx + adjustment.offsetXPx, centerYPx + adjustment.offsetYPx);
-  if (transform.rotation) ctx.rotate((transform.rotation * Math.PI) / 180);
-  if (adjustment.scaleMul !== 1) ctx.scale(adjustment.scaleMul, adjustment.scaleMul);
+  const totalRotationDeg = (transform.rotation || 0) + adjustment.rotationDeltaDeg;
+  if (totalRotationDeg) ctx.rotate((totalRotationDeg * Math.PI) / 180);
+  if (Math.abs(adjustment.skewX) > 0.001) ctx.transform(1, 0, Math.tan(adjustment.skewX), 1, 0, 0);
+  const scaleX = adjustment.scaleMul * adjustment.scaleXMul;
+  const scaleY = adjustment.scaleMul * adjustment.scaleYMul;
+  if (scaleX !== 1 || scaleY !== 1) ctx.scale(scaleX, scaleY);
   draw(ctx);
+  ctx.restore();
+}
+
+/**
+ * Draws the dip-to-black/white, light-leak, flash, and fire-pulse overlay
+ * wash (see `computeEntranceExit`) centered on the origin of whatever
+ * transform `draw`'s caller already set up — must be called from *inside*
+ * that caller's `draw` closure (same translate/rotate/scale context the
+ * item's own content just drew in), not after `applyTransformedDraw`
+ * returns, so the overlay tracks the item's position/rotation/scale
+ * exactly rather than being a canvas-axis-aligned rectangle.
+ */
+function drawAdjustmentOverlay(ctx: CanvasRenderingContext2D, halfWidthPx: number, halfHeightPx: number, adjustment: AnimatedAdjustment) {
+  if (adjustment.overlayAlpha <= 0.01) return;
+  ctx.save();
+  ctx.globalAlpha = clamp01(adjustment.overlayAlpha);
+  ctx.fillStyle = adjustment.overlayColor;
+  ctx.fillRect(-halfWidthPx, -halfHeightPx, halfWidthPx * 2, halfHeightPx * 2);
   ctx.restore();
 }
 
 /** Shared timing → adjustment helper for the three animatable item types (video/image/text). */
 function animationFor(
-  item: { startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset } },
+  item: {
+    startTime: number;
+    endTime: number;
+    fade?: { fadeInDuration: number; fadeOutDuration: number };
+    animation?: { entrance?: AnimationPreset; exit?: AnimationPreset; intensity?: number };
+  },
   timeSeconds: number,
   canvasWidth: number,
   canvasHeight: number,
@@ -223,7 +439,7 @@ function animationFor(
   const untilEnd = item.endTime - timeSeconds;
   const duration = item.endTime - item.startTime;
   const preset = sinceStart <= duration / 2 ? item.animation?.entrance : item.animation?.exit;
-  const a = computeEntranceExit(preset, sinceStart, untilEnd, duration, canvasWidth, canvasHeight);
+  const a = computeEntranceExit(preset, sinceStart, untilEnd, duration, canvasWidth, canvasHeight, item.animation?.intensity);
   a.opacityMul *= computeFadeOpacity(item.fade, sinceStart, untilEnd);
   return a;
 }
@@ -249,6 +465,7 @@ function drawVideoItem(
       } catch {
         // Video not yet seekable/decoded to this frame — skip this frame rather than throw.
       }
+      drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
     },
     item,
     centerX,
@@ -296,6 +513,7 @@ function drawImageItem(
         // existing try/catch so a race between the check and the draw call
         // can never crash the render/animation loop.
       }
+      drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
     },
     item,
     centerX,
@@ -344,6 +562,12 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
       c.textAlign = 'center';
       c.textBaseline = 'middle';
       c.fillText(displayText, 0, 0);
+      // Text has no fixed draw box (see getItemBoundsPercent's own note),
+      // so the overlay-based presets (dip/light-leak/flash/fire) measure a
+      // padded box around the text actually drawn this frame rather than
+      // skipping overlay support for this item type.
+      const textWidth = c.measureText(displayText || ' ').width;
+      drawAdjustmentOverlay(c, textWidth / 2 + effectiveFontSize * 0.3, effectiveFontSize * 0.7, adjustment);
     },
     item,
     centerX,

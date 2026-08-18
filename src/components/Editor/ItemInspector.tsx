@@ -18,6 +18,13 @@ import {
   sendToBack,
 } from '../../lib/timeline/utils';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
+import {
+  TRANSITION_CATEGORIES,
+  TRANSITION_INTENSITY_DEFAULT,
+  TRANSITION_INTENSITY_MAX,
+  TRANSITION_INTENSITY_MIN,
+  transitionPresetsByCategory,
+} from '../../lib/transitions';
 
 const CROSS_DISSOLVE_DURATION_SECONDS = 0.6;
 
@@ -39,17 +46,11 @@ const CROSS_DISSOLVE_DURATION_SECONDS = 0.6;
  * of the source video actually played).
  */
 
-const ANIMATION_OPTIONS: { value: AnimationPreset; label: string }[] = [
-  { value: 'none', label: 'None' },
-  { value: 'fade', label: 'Fade' },
-  { value: 'slide-up', label: 'Slide up' },
-  { value: 'slide-down', label: 'Slide down' },
-  { value: 'slide-left', label: 'Slide left' },
-  { value: 'slide-right', label: 'Slide right' },
-  { value: 'zoom', label: 'Zoom' },
-  { value: 'pop', label: 'Pop' },
-];
-
+// "Final production fix" spec item 7 — the full categorized Clean/Modern/
+// Cinematic/Marketing preset catalog now lives in lib/transitions.ts and is
+// rendered as <optgroup>s directly below; this file only keeps the small
+// text-exclusive kinetic-reveal list (a different mechanism — see
+// transitions.ts's own header comment on why they're not in that catalog).
 const TEXT_ONLY_ANIMATION_OPTIONS: { value: AnimationPreset; label: string }[] = [
   { value: 'typewriter', label: 'Typewriter' },
   { value: 'word-by-word', label: 'Word by word' },
@@ -73,9 +74,8 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
 
   const duration = getItemDuration(item);
   const hasAnimation = item.type === 'video' || item.type === 'image' || item.type === 'text';
-  const animation = hasAnimation ? (item as any).animation as { entrance?: AnimationPreset; exit?: AnimationPreset } | undefined : undefined;
+  const animation = hasAnimation ? (item as any).animation as { entrance?: AnimationPreset; exit?: AnimationPreset; intensity?: number } | undefined : undefined;
   const fade = hasAnimation ? (item as any).fade as { fadeInDuration: number; fadeOutDuration: number } | undefined : undefined;
-  const animationOptions = item.type === 'text' ? [...ANIMATION_OPTIONS, ...TEXT_ONLY_ANIMATION_OPTIONS] : ANIMATION_OPTIONS;
 
   // Cross Dissolve — only offered when there's an actual adjacent same-
   // track item to dissolve into/from (see `findAdjacentNextItem`'s doc
@@ -244,11 +244,25 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                 onChange={(e) => patch({ animation: { ...animation, entrance: e.target.value as AnimationPreset } })}
                 className="bg-white/10 rounded px-2 py-1 text-white"
               >
-                {animationOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
+                <option value="none">None</option>
+                {TRANSITION_CATEGORIES.map((cat) => (
+                  <optgroup key={cat.id} label={cat.label}>
+                    {transitionPresetsByCategory(cat.id).map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
+                {item.type === 'text' && (
+                  <optgroup label="Kinetic text (entrance only)">
+                    {TEXT_ONLY_ANIMATION_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </label>
             <label className="flex flex-col gap-1 flex-1">
@@ -258,14 +272,33 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                 onChange={(e) => patch({ animation: { ...animation, exit: e.target.value as AnimationPreset } })}
                 className="bg-white/10 rounded px-2 py-1 text-white"
               >
-                {animationOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
+                <option value="none">None</option>
+                {TRANSITION_CATEGORIES.map((cat) => (
+                  <optgroup key={cat.id} label={cat.label}>
+                    {transitionPresetsByCategory(cat.id).map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </label>
           </div>
+          <label className="flex flex-col gap-1">
+            <span className="flex items-center justify-between">
+              <span>Transition intensity</span>
+              <span className="text-white/40">{(animation?.intensity ?? TRANSITION_INTENSITY_DEFAULT).toFixed(1)}x</span>
+            </span>
+            <input
+              type="range"
+              min={TRANSITION_INTENSITY_MIN}
+              max={TRANSITION_INTENSITY_MAX}
+              step={0.1}
+              value={animation?.intensity ?? TRANSITION_INTENSITY_DEFAULT}
+              onChange={(e) => patch({ animation: { ...animation, intensity: Number(e.target.value) } })}
+            />
+          </label>
           <div className="flex items-center gap-2">
             <label className="flex flex-col gap-1 flex-1">
               Fade in (s)
