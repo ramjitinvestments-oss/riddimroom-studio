@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -10,6 +10,9 @@ import {
   canCrossDissolve,
   crossDissolveAlreadyApplied,
   applyCrossDissolve,
+  canApplyTransition,
+  transitionAlreadyApplied,
+  applyTransition,
   addCaptionWord,
   isVisualItem,
   bringForward,
@@ -23,6 +26,7 @@ import {
   TRANSITION_INTENSITY_DEFAULT,
   TRANSITION_INTENSITY_MAX,
   TRANSITION_INTENSITY_MIN,
+  findTransitionPreset,
   transitionPresetsByCategory,
 } from '../../lib/transitions';
 
@@ -83,6 +87,19 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
   // button with nothing real to do.
   const dissolveAvailable = hasAnimation && !!project && canCrossDissolve(project, item.id);
   const dissolveApplied = dissolveAvailable && !!project && crossDissolveAlreadyApplied(project, item.id, CROSS_DISSOLVE_DURATION_SECONDS);
+
+  // "Final production fix" spec item 7's "real overlap-based transitions"
+  // (push/wipe/slide-between-clips, not just a plain dissolve) — same
+  // adjacency gate as Cross Dissolve above, but lets the user pick ANY
+  // preset from the full categorized catalog rather than always a plain
+  // fade. `transitionPresetForBoundary` is local UI state (which preset is
+  // currently selected in the picker for THIS boundary), not project
+  // state — applying it is the actual project mutation.
+  const transitionAvailable = hasAnimation && !!project && canApplyTransition(project, item.id);
+  const [transitionPresetForBoundary, setTransitionPresetForBoundary] = useState<AnimationPreset>('fade');
+  const transitionBoundaryDuration = findTransitionPreset(transitionPresetForBoundary)?.defaultDurationSeconds ?? 0.6;
+  const transitionApplied =
+    transitionAvailable && !!project && transitionAlreadyApplied(project, item.id, transitionBoundaryDuration);
 
   return (
     <div className="flex flex-col gap-3 bg-white/5 rounded-lg p-3 text-xs">
@@ -339,6 +356,38 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
               >
                 {dissolveApplied ? 'Cross Dissolve Applied' : 'Cross Dissolve →'}
               </button>
+            </div>
+          )}
+          {transitionAvailable && (
+            <div className="flex flex-col gap-1.5 pt-1 border-t border-white/10">
+              <span className="font-bold uppercase tracking-wide text-white/40 text-[10px]">Transition to next clip</span>
+              <div className="flex items-center gap-2">
+                <select
+                  value={transitionPresetForBoundary}
+                  onChange={(e) => setTransitionPresetForBoundary(e.target.value as AnimationPreset)}
+                  className="bg-white/10 rounded px-2 py-1 text-white flex-1"
+                >
+                  {TRANSITION_CATEGORIES.map((cat) => (
+                    <optgroup key={cat.id} label={cat.label}>
+                      {transitionPresetsByCategory(cat.id).map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <button
+                  onClick={() => mutate((p) => applyTransition(p, item.id, transitionPresetForBoundary, transitionBoundaryDuration))}
+                  disabled={transitionApplied}
+                  className={`px-2 py-1 rounded uppercase tracking-wide font-bold text-[11px] shrink-0 ${
+                    transitionApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  }`}
+                  title="Overlap this clip with the next one on this track and play this transition between them — both clips draw simultaneously during the overlap, real WYSIWYG in preview and export"
+                >
+                  {transitionApplied ? 'Applied' : 'Apply →'}
+                </button>
+              </div>
             </div>
           )}
         </div>

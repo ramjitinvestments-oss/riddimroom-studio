@@ -96,6 +96,15 @@ export function TimelinePanel({ project, currentTime, onSeek, selectedItemId, on
         if (!s) return;
         const deltaPx = ev.clientX - s.startClientX;
         if (Math.abs(deltaPx) > 2) s.moved = true;
+        // Below the dead-zone this is still just a click (or, on a clip whose
+        // neighbor it legitimately overlaps for a transition, sub-pixel
+        // pointer jitter that a real mouse click almost always produces) —
+        // do NOT mutate on it. Previously any mousemove at all, even 0-2px,
+        // called moveItem with its default preventOverlap:true, which
+        // silently clamped the item back against its sibling and destroyed
+        // an already-applied overlap-based transition just from selecting
+        // (clicking) one of the two clips involved.
+        if (!s.moved) return;
         const deltaSeconds = (deltaPx / s.rowWidthPx) * s.pxToSecondsDuration;
         if (s.mode === 'move') {
           mutate((p) => moveItem(p, s.itemId, s.originalStartTime + deltaSeconds));

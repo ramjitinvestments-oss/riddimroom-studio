@@ -8,6 +8,8 @@
  */
 
 import type {
+  AnimationPreset,
+  AnimationSettings,
   CaptionTimelineItem,
   FadeSettings,
   Project,
@@ -17,6 +19,7 @@ import type {
   MediaAsset,
 } from '../../types/timeline';
 import { ITEM_TYPE_TO_TRACK_TYPE, TIMELINE_SCHEMA_VERSION } from '../../types/timeline';
+import { findTransitionPreset } from '../transitions';
 
 // ---------------------------------------------------------------------------
 // ID generation
@@ -450,6 +453,71 @@ export function applyCrossDissolve(project: Project, itemId: string, durationSec
   const nextFade = (next as { fade?: FadeSettings }).fade;
   next_ = updateItem(next_, item.id, { fade: { fadeInDuration: itemFade?.fadeInDuration ?? 0, fadeOutDuration: dur } });
   next_ = updateItem(next_, next.id, { fade: { fadeInDuration: dur, fadeOutDuration: nextFade?.fadeOutDuration ?? 0 } });
+  return next_;
+}
+
+// ---------------------------------------------------------------------------
+// Real overlap-based transitions — "final production fix" spec item 7's
+// "transitions that visually need two clips at once" requirement, and spec
+// item 13/14's overlay/transition test matrix. Generalizes the
+// cross-dissolve mechanism directly above (same overlap-by-shifting-the-
+// next-clip-earlier approach) to ANY preset in the transitions catalog
+// (lib/transitions.ts), not just a plain opacity dissolve.
+// ---------------------------------------------------------------------------
+
+/** True for the item types that carry an `animation` field (video/image/text) — a transition preset has nothing to animate on a caption or audio item. */
+function hasAnimationField(item: TimelineItem): item is Extract<TimelineItem, { animation?: AnimationSettings }> {
+  return item.type === 'video' || item.type === 'image' || item.type === 'text';
+}
+
+/** True if `itemId` and its adjacent next item (see `findAdjacentNextItem`) both support `animation`, i.e. a transition-at-this-boundary control has something real to offer. */
+export function canApplyTransition(project: Project, itemId: string): boolean {
+  const item = project.items.find((i) => i.id === itemId);
+  const next = findAdjacentNextItem(project, itemId);
+  return !!item && !!next && hasAnimationField(item) && hasAnimationField(next);
+}
+
+/** True if `itemId` and its adjacent next item already overlap by roughly `durationSeconds` — mirrors `crossDissolveAlreadyApplied` so a transition-picker UI doesn't let a repeated click cumulatively re-shift the same boundary. */
+export function transitionAlreadyApplied(project: Project, itemId: string, durationSeconds = 0.6): boolean {
+  const item = project.items.find((i) => i.id === itemId);
+  const next = findAdjacentNextItem(project, itemId);
+  if (!item || !next) return false;
+  const overlap = item.endTime - next.startTime;
+  return overlap >= durationSeconds - 0.05;
+}
+
+/**
+ * Applies `preset` (any id from the transitions catalog, lib/transitions.ts
+ * — Fade, Slide Left, Dip to Black, Spin, whatever the user picked at a
+ * clip boundary) as a real, overlap-based transition between `itemId` and
+ * its adjacent next item on the same track: shifts the next item earlier
+ * so it overlaps `itemId`'s tail by `durationSeconds` (falling back to the
+ * preset's own catalog default), then sets `itemId`'s own exit animation
+ * AND the next item's entrance animation to that SAME preset. Because
+ * `drawFrame` already composites every active item every frame regardless
+ * of overlap (see compositor.ts — there is no "only one clip active at a
+ * time" assumption anywhere in the render path), a matching exit/entrance
+ * pair during a real time overlap reads as one transition between the two
+ * clips — e.g. "Slide Left" makes A visibly slide out to the left while B
+ * simultaneously slides in from the right — rather than two coincidentally
+ * overlapping single-clip animations. No-op if there's no adjacent next
+ * item or either item lacks an `animation` field (e.g. captions/audio).
+ */
+export function applyTransition(project: Project, itemId: string, preset: AnimationPreset, durationSeconds?: number): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item) return project;
+  const next = findAdjacentNextItem(project, itemId);
+  if (!next || !hasAnimationField(item) || !hasAnimationField(next)) return project;
+
+  const catalogDuration = findTransitionPreset(preset)?.defaultDurationSeconds ?? 0.6;
+  const dur = Math.max(0.1, Math.min(durationSeconds ?? catalogDuration, getItemDuration(item), getItemDuration(next)));
+  // Same rationale as applyCrossDissolve above: this overlap is
+  // intentional, so preventOverlap is explicitly off.
+  let next_ = moveItem(project, next.id, item.endTime - dur, { preventOverlap: false });
+  const itemAnimation = (item as { animation?: AnimationSettings }).animation;
+  const nextAnimation = (next as { animation?: AnimationSettings }).animation;
+  next_ = updateItem(next_, item.id, { animation: { ...itemAnimation, exit: preset } });
+  next_ = updateItem(next_, next.id, { animation: { ...nextAnimation, entrance: preset } });
   return next_;
 }
 
