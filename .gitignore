@@ -5,3 +5,4 @@ dist
 *.log
 .DS_Store
 test-export-browser/harness.bundle.js
+_to_delete/
