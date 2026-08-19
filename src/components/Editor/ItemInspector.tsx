@@ -120,13 +120,17 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
     <div className="flex flex-col gap-3 bg-white/5 rounded-lg p-3 text-xs">
       <div className="flex items-center justify-between">
         <span className="font-bold uppercase tracking-wide text-white/60">{item.type} item</span>
-        <button onClick={handleDelete} className="text-red-400 hover:text-red-300 font-bold">
+        <button
+          onClick={handleDelete}
+          className="min-h-11 px-2 flex items-center text-red-400 hover:text-red-300 font-bold"
+        >
           Delete
         </button>
       </div>
 
       {item.type === 'text' && (
-        <>
+        <div className="flex flex-col gap-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Text</span>
           <label className="flex flex-col gap-1">
             Text
             <textarea
@@ -150,11 +154,12 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
             Color
             <input type="color" value={item.color} onChange={(e) => patch({ color: e.target.value })} />
           </label>
-        </>
+        </div>
       )}
 
       {(item.type === 'image' || item.type === 'video' || item.type === 'text') && 'position' in item && (
-        <>
+        <div className="flex flex-col gap-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Transform</span>
           <label className="flex flex-col gap-1">
             Position X ({(item as any).position.x.toFixed(0)}%)
             <input
@@ -208,11 +213,13 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
               onChange={(e) => patch({ rotation: Number(e.target.value) })}
             />
           </label>
-        </>
+        </div>
       )}
 
       {item.type === 'video' && (
-        <div className="flex items-center gap-2 border-t border-white/10 pt-2">
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Audio</span>
+          <div className="flex items-center gap-2">
           <label className="flex flex-col gap-1 flex-1">
             Volume ({Math.round(item.volume * 100)}%)
             <input
@@ -228,6 +235,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
             <input type="checkbox" checked={item.muted} onChange={(e) => patch({ muted: e.target.checked })} />
             Mute
           </label>
+          </div>
         </div>
       )}
 
@@ -237,28 +245,28 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
           <button
             onClick={() => mutate((p) => sendToBack(p, item.id))}
             title="Send to back"
-            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
             ⇤ Back
           </button>
           <button
             onClick={() => mutate((p) => sendBackward(p, item.id))}
             title="Send backward"
-            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
             ← Back
           </button>
           <button
             onClick={() => mutate((p) => bringForward(p, item.id))}
             title="Bring forward"
-            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
             Fwd →
           </button>
           <button
             onClick={() => mutate((p) => bringToFront(p, item.id))}
             title="Bring to front"
-            className="px-1.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
             Front ⇥
           </button>
@@ -420,7 +428,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
               <button
                 onClick={() => mutate((p) => applyCrossDissolve(p, item.id, CROSS_DISSOLVE_DURATION_SECONDS))}
                 disabled={dissolveApplied}
-                className={`px-2 py-1 rounded uppercase tracking-wide font-bold text-[11px] ${
+                className={`min-h-11 px-2 rounded uppercase tracking-wide font-bold text-[11px] ${
                   dissolveApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
                 }`}
                 title="Overlap this clip with the next one on this track and cross-fade between them"
@@ -436,7 +444,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                 <select
                   value={transitionPresetForBoundary}
                   onChange={(e) => setTransitionPresetForBoundary(e.target.value as AnimationPreset)}
-                  className="bg-white/10 rounded px-2 py-1 text-white flex-1"
+                  className="min-h-11 bg-white/10 rounded px-2 py-1 text-white flex-1"
                 >
                   {TRANSITION_CATEGORIES.map((cat) => (
                     <optgroup key={cat.id} label={cat.label}>
@@ -451,7 +459,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                 <button
                   onClick={() => mutate((p) => applyTransition(p, item.id, transitionPresetForBoundary, transitionBoundaryDuration))}
                   disabled={transitionApplied}
-                  className={`px-2 py-1 rounded uppercase tracking-wide font-bold text-[11px] shrink-0 ${
+                  className={`min-h-11 px-2 rounded uppercase tracking-wide font-bold text-[11px] shrink-0 ${
                     transitionApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
                   }`}
                   title="Overlap this clip with the next one on this track and play this transition between them — both clips draw simultaneously during the overlap, real WYSIWYG in preview and export"
@@ -465,7 +473,9 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
       )}
 
       {item.type !== 'caption' && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Timing</span>
+          <div className="flex items-center gap-2">
           <label className="flex flex-col gap-1 flex-1">
             Start (s)
             <input
@@ -487,6 +497,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
               className="bg-white/10 rounded px-2 py-1 text-white"
             />
           </label>
+          </div>
         </div>
       )}
       {item.type !== 'caption' && <p className="text-white/30">Duration: {duration.toFixed(1)}s</p>}
@@ -640,7 +651,16 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
               title="Word end (s, relative to caption start)"
               className="bg-white/10 rounded px-1 py-1 text-white w-14"
             />
-            <button onClick={() => deleteWord(index)} className="text-red-400 hover:text-red-300 font-bold px-1">
+            {/* Deliberately NOT bumped to the 44px touch minimum like other buttons in
+                this panel: it lives inside a dense 4-control word row (text + start +
+                end + delete) where a 44px-tall delete control would roughly double
+                every row's height and push most of a multi-word caption off-screen on
+                mobile. Widened modestly instead so it's still easier to hit than a
+                bare 1-char tap target. */}
+            <button
+              onClick={() => deleteWord(index)}
+              className="min-h-9 min-w-9 flex items-center justify-center text-red-400 hover:text-red-300 font-bold"
+            >
               ✕
             </button>
           </div>
@@ -648,7 +668,7 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
       </div>
       <button
         onClick={addWord}
-        className="self-start px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white uppercase tracking-wide font-bold text-[11px]"
+        className="self-start min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-white uppercase tracking-wide font-bold text-[11px]"
       >
         + Add word
       </button>

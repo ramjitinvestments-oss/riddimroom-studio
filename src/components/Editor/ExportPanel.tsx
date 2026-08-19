@@ -3,26 +3,34 @@ import { useProject } from '../../context/ProjectContext';
 import { Canvas2DRenderer } from '../../lib/export/canvas2dRenderer';
 import { validateRenderResult } from '../../lib/export/validate';
 import type { RenderProgress } from '../../lib/export/renderer';
+import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
 
 /**
- * Phase 1 Step 12 (Export engine). Drives the `Renderer` abstraction
- * (currently `Canvas2DRenderer`) end to end: action -> progress -> either
- * a downloadable, validated output or a surfaced error. Never reports
- * success without `validateRenderResult` passing.
+ * Phase 1 Step 12 (Export engine), extended for genuine MP4 output. Drives
+ * the `Renderer` abstraction (currently `Canvas2DRenderer`) end to end
+ * exactly as before — action -> progress -> a validated WebM recording —
+ * then feeds that finished, validated WebM blob into `transcodeWebmToMp4`
+ * (ffmpeg.wasm) to produce a real MP4 container. The rendering stage itself
+ * is untouched; only a conversion stage was added after it. Never reports
+ * success without both `validateRenderResult` and the MP4 conversion
+ * itself succeeding.
  */
 export function ExportPanel() {
   const { project } = useProject();
-  const [status, setStatus] = useState<'idle' | 'rendering' | 'done' | 'error'>('idle');
+  const [status, setStatus] = useState<'idle' | 'rendering' | 'converting' | 'done' | 'error'>('idle');
   const [progress, setProgress] = useState<RenderProgress | null>(null);
+  const [convertRatio, setConvertRatio] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const busy = status === 'rendering' || status === 'converting';
 
   const handleExport = useCallback(async () => {
-    if (!project) return;
+    if (!project || busy) return; // guards against duplicate/overlapping exports
     setStatus('rendering');
     setError(null);
     setProgress(null);
+    setConvertRatio(0);
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     setDownloadUrl(null);
 
@@ -41,7 +49,18 @@ export function ExportPanel() {
         setStatus('error');
         return;
       }
-      setDownloadUrl(URL.createObjectURL(result.blob));
+
+      setStatus('converting');
+      let mp4Blob: Blob;
+      try {
+        mp4Blob = await transcodeWebmToMp4(result.blob, project.frameRate, ({ ratio }) => setConvertRatio(ratio));
+      } catch (convertErr: any) {
+        setError(convertErr?.message || 'Could not convert the export to MP4.');
+        setStatus('error');
+        return;
+      }
+
+      setDownloadUrl(URL.createObjectURL(mp4Blob));
       setStatus('done');
     } catch (err: any) {
       if (err?.name === 'RenderAbortedError') {
@@ -53,7 +72,7 @@ export function ExportPanel() {
     } finally {
       abortRef.current = null;
     }
-  }, [project, downloadUrl]);
+  }, [project, downloadUrl, busy]);
 
   const handleCancel = () => {
     abortRef.current?.abort();
@@ -64,12 +83,13 @@ export function ExportPanel() {
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Export</h3>
-      {status !== 'rendering' && (
+      {!busy && (
         <button
           onClick={handleExport}
-          className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white self-start"
+          disabled={busy}
+          className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white self-start disabled:opacity-50"
         >
-          Export video
+          Export video (MP4)
         </button>
       )}
       {status === 'rendering' && (
@@ -78,21 +98,29 @@ export function ExportPanel() {
             <div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round((progress?.fraction ?? 0) * 100)}%` }} />
           </div>
           <p className="text-[10px] text-white/40">
-            {progress ? `${progress.renderedSeconds.toFixed(1)}s / ${progress.totalSeconds.toFixed(1)}s` : 'Starting…'}
+            {progress ? `Rendering… ${progress.renderedSeconds.toFixed(1)}s / ${progress.totalSeconds.toFixed(1)}s` : 'Starting…'}
           </p>
-          <button onClick={handleCancel} className="text-[10px] text-white/40 hover:text-white/70 underline self-start">
+          <button onClick={handleCancel} className="min-h-11 text-[10px] text-white/40 hover:text-white/70 underline self-start">
             Cancel
           </button>
+        </div>
+      )}
+      {status === 'converting' && (
+        <div className="flex flex-col gap-2">
+          <div className="w-full h-2 bg-white/10 rounded overflow-hidden">
+            <div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round(convertRatio * 100)}%` }} />
+          </div>
+          <p className="text-[10px] text-white/40">Preparing MP4… {Math.round(convertRatio * 100)}%</p>
         </div>
       )}
       {status === 'error' && error && <p className="text-xs text-red-400">{error}</p>}
       {status === 'done' && downloadUrl && (
         <a
           href={downloadUrl}
-          download={`${project.name.replace(/[^a-z0-9-_]+/gi, '_') || 'export'}.webm`}
-          className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white self-start"
+          download={`${project.name.replace(/[^a-z0-9-_]+/gi, '_') || 'export'}.mp4`}
+          className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white self-start flex items-center"
         >
-          Download export
+          Download MP4
         </a>
       )}
     </div>

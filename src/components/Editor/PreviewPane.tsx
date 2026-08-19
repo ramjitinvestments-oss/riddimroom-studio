@@ -442,72 +442,98 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project, currentTime, selectedItemId, getBoundsForItem]);
 
+  // "Final production fix" spec item 3b (mobile touch interaction) — every
+  // drag here is driven purely by (clientX, clientY) + a window-level
+  // move/up listener pair, so the exact same core logic works for mouse AND
+  // touch: mouse call sites pass a `React.MouseEvent` and listen for
+  // mousemove/mouseup, touch call sites pass a `React.TouchEvent` (reading
+  // `touches[0]`) and listen for touchmove/touchend. No parallel
+  // touch-specific drag implementation to keep in sync with the mouse one.
   const beginMoveDrag = useCallback(
-    (e: React.MouseEvent, itemId: string, originalX: number, originalY: number) => {
-      e.preventDefault();
-      dragStateRef.current = { mode: 'move', itemId, startClientX: e.clientX, startClientY: e.clientY, originalX, originalY };
-      const handleMove = (ev: MouseEvent) => {
+    (clientX: number, clientY: number, itemId: string, originalX: number, originalY: number, pointerEvents: { move: string; up: string }) => {
+      dragStateRef.current = { mode: 'move', itemId, startClientX: clientX, startClientY: clientY, originalX, originalY };
+      const getPoint = (ev: MouseEvent | TouchEvent): { x: number; y: number } | null => {
+        if ('touches' in ev) {
+          const t = ev.touches[0] ?? ev.changedTouches[0];
+          return t ? { x: t.clientX, y: t.clientY } : null;
+        }
+        return { x: ev.clientX, y: ev.clientY };
+      };
+      const handleMove = (ev: MouseEvent | TouchEvent) => {
         const s = dragStateRef.current;
         const el = containerRef.current;
-        if (!s || s.mode !== 'move' || !el) return;
+        const point = getPoint(ev);
+        if (!s || s.mode !== 'move' || !el || !point) return;
+        if ('touches' in ev) ev.preventDefault(); // stop the page from scrolling while dragging an item on touch
         const rect = el.getBoundingClientRect();
-        const dxPercent = ((ev.clientX - s.startClientX) / rect.width) * 100;
-        const dyPercent = ((ev.clientY - s.startClientY) / rect.height) * 100;
+        const dxPercent = ((point.x - s.startClientX) / rect.width) * 100;
+        const dyPercent = ((point.y - s.startClientY) / rect.height) * 100;
         const newX = Math.max(0, Math.min(100, s.originalX + dxPercent));
         const newY = Math.max(0, Math.min(100, s.originalY + dyPercent));
         mutate((p) => updateItem(p, s.itemId, { position: { x: newX, y: newY } }));
       };
       const handleUp = () => {
         dragStateRef.current = null;
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
+        window.removeEventListener(pointerEvents.move, handleMove as EventListener);
+        window.removeEventListener(pointerEvents.up, handleUp);
       };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
+      window.addEventListener(pointerEvents.move, handleMove as EventListener, { passive: false });
+      window.addEventListener(pointerEvents.up, handleUp);
     },
     [mutate],
   );
 
   const beginResizeDrag = useCallback(
-    (e: React.MouseEvent, itemId: string, centerXPercent: number, originalScale: number, originalWidthPercent: number) => {
-      e.preventDefault();
-      e.stopPropagation();
-      dragStateRef.current = { mode: 'resize', itemId, startClientX: e.clientX, centerXPercent, originalScale };
-      const handleMove = (ev: MouseEvent) => {
+    (
+      clientX: number,
+      itemId: string,
+      centerXPercent: number,
+      originalScale: number,
+      originalWidthPercent: number,
+      pointerEvents: { move: string; up: string },
+    ) => {
+      dragStateRef.current = { mode: 'resize', itemId, startClientX: clientX, centerXPercent, originalScale };
+      const getX = (ev: MouseEvent | TouchEvent): number | null => {
+        if ('touches' in ev) {
+          const t = ev.touches[0] ?? ev.changedTouches[0];
+          return t ? t.clientX : null;
+        }
+        return ev.clientX;
+      };
+      const handleMove = (ev: MouseEvent | TouchEvent) => {
         const el = containerRef.current;
         const s = dragStateRef.current;
-        if (!s || s.mode !== 'resize' || !el) return;
+        const x = getX(ev);
+        if (!s || s.mode !== 'resize' || !el || x === null) return;
+        if ('touches' in ev) ev.preventDefault();
         const rect = el.getBoundingClientRect();
-        const mouseXPercent = ((ev.clientX - rect.left) / rect.width) * 100;
+        const mouseXPercent = ((x - rect.left) / rect.width) * 100;
         const newWidthPercent = Math.abs(mouseXPercent - s.centerXPercent) * 2;
         const newScale = Math.max(0.05, Math.min(5, s.originalScale * (newWidthPercent / Math.max(0.5, originalWidthPercent))));
         mutate((p) => updateItem(p, s.itemId, { scale: newScale }));
       };
       const handleUp = () => {
         dragStateRef.current = null;
-        window.removeEventListener('mousemove', handleMove);
-        window.removeEventListener('mouseup', handleUp);
+        window.removeEventListener(pointerEvents.move, handleMove as EventListener);
+        window.removeEventListener(pointerEvents.up, handleUp);
       };
-      window.addEventListener('mousemove', handleMove);
-      window.addEventListener('mouseup', handleUp);
+      window.addEventListener(pointerEvents.move, handleMove as EventListener, { passive: false });
+      window.addEventListener(pointerEvents.up, handleUp);
     },
     [mutate],
   );
 
-  const handleCanvasMouseDown = useCallback(
-    (e: React.MouseEvent) => {
+  const hitTestCanvas = useCallback(
+    (clientX: number, clientY: number): { item: TimelineItem; bounds: NonNullable<ReturnType<typeof getBoundsForItem>> } | null => {
       const el = containerRef.current;
-      if (!el) return;
+      if (!el) return null;
       const rect = el.getBoundingClientRect();
-      const xPercent = ((e.clientX - rect.left) / rect.width) * 100;
-      const yPercent = ((e.clientY - rect.top) / rect.height) * 100;
-
+      const xPercent = ((clientX - rect.left) / rect.width) * 100;
+      const yPercent = ((clientY - rect.top) / rect.height) * 100;
       const activeVisual = getItemsAtTime(projectRef.current, currentTimeRef.current).filter(
         (i) => i.type === 'video' || i.type === 'image' || i.type === 'text',
       );
       const sorted = [...activeVisual].sort((a, b) => b.zIndex - a.zIndex); // topmost (highest zIndex) first
-      let hit: TimelineItem | null = null;
-      let hitBounds: ReturnType<typeof getBoundsForItem> = null;
       for (const item of sorted) {
         const bounds = getBoundsForItem(item);
         if (!bounds) continue;
@@ -517,21 +543,47 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           yPercent >= bounds.topPercent &&
           yPercent <= bounds.topPercent + bounds.heightPercent
         ) {
-          hit = item;
-          hitBounds = bounds;
-          break;
+          return { item, bounds };
         }
       }
+      return null;
+    },
+    [getBoundsForItem],
+  );
+
+  const handleCanvasMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      const hit = hitTestCanvas(e.clientX, e.clientY);
       // Clicking empty canvas leaves the current selection alone — the app
       // has no explicit "deselect" action anywhere (only Delete clears
       // selection, as a side effect of removing the item), so this matches
       // that existing convention rather than inventing a new one.
-      if (hit && hitBounds && 'position' in hit) {
-        onSelectItem(hit.id);
-        beginMoveDrag(e, hit.id, (hit as { position: { x: number; y: number } }).position.x, (hit as { position: { x: number; y: number } }).position.y);
+      if (hit && 'position' in hit.item) {
+        e.preventDefault();
+        onSelectItem(hit.item.id);
+        const pos = (hit.item as { position: { x: number; y: number } }).position;
+        beginMoveDrag(e.clientX, e.clientY, hit.item.id, pos.x, pos.y, { move: 'mousemove', up: 'mouseup' });
       }
     },
-    [getBoundsForItem, onSelectItem, beginMoveDrag],
+    [hitTestCanvas, onSelectItem, beginMoveDrag],
+  );
+
+  const handleCanvasTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      const touch = e.touches[0];
+      if (!touch) return;
+      const hit = hitTestCanvas(touch.clientX, touch.clientY);
+      if (hit && 'position' in hit.item) {
+        // Only claim the gesture (and block page scroll) once it's actually
+        // on a draggable item — an empty-canvas touch must still be free to
+        // scroll the page on a small viewport.
+        e.preventDefault();
+        onSelectItem(hit.item.id);
+        const pos = (hit.item as { position: { x: number; y: number } }).position;
+        beginMoveDrag(touch.clientX, touch.clientY, hit.item.id, pos.x, pos.y, { move: 'touchmove', up: 'touchend' });
+      }
+    },
+    [hitTestCanvas, onSelectItem, beginMoveDrag],
   );
 
   const aspect = project.canvasWidth / project.canvasHeight;
@@ -574,7 +626,8 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       <div
         ref={containerRef}
         onMouseDown={handleCanvasMouseDown}
-        className="relative"
+        onTouchStart={handleCanvasTouchStart}
+        className="relative touch-none"
         style={{
           // Computed explicitly in pixels (`previewBoxSize`, see the
           // ResizeObserver effect above) rather than left to pure CSS
@@ -615,27 +668,50 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
             }}
             title="Drag to move"
           >
+            {/* Visible handle stays a small 14px dot (matches the selection
+                box's own scale), but its actual hit area is the full 44px
+                touch-target minimum (spec item 3b) via this larger
+                invisible wrapper — centered on the same corner point. */}
             <div
-              onMouseDown={(e) =>
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
                 beginResizeDrag(
-                  e,
+                  e.clientX,
                   selectedBounds.itemId,
                   selectedBounds.leftPercent + selectedBounds.widthPercent / 2,
                   selectedBounds.scale,
                   selectedBounds.widthPercent,
-                )
-              }
+                  { move: 'mousemove', up: 'mouseup' },
+                );
+              }}
+              onTouchStart={(e) => {
+                const touch = e.touches[0];
+                if (!touch) return;
+                e.preventDefault();
+                e.stopPropagation();
+                beginResizeDrag(
+                  touch.clientX,
+                  selectedBounds.itemId,
+                  selectedBounds.leftPercent + selectedBounds.widthPercent / 2,
+                  selectedBounds.scale,
+                  selectedBounds.widthPercent,
+                  { move: 'touchmove', up: 'touchend' },
+                );
+              }}
               title="Drag to resize"
-              className="absolute w-3.5 h-3.5 bg-emerald-400 rounded-sm cursor-nwse-resize"
-              style={{ right: -7, bottom: -7 }}
-            />
+              className="absolute flex items-center justify-center w-11 h-11 cursor-nwse-resize touch-none"
+              style={{ right: -22, bottom: -22 }}
+            >
+              <div className="w-3.5 h-3.5 bg-emerald-400 rounded-sm pointer-events-none" />
+            </div>
           </div>
         )}
       </div>
       <div className="flex items-center gap-2">
         <button
           onClick={() => onPlayingChange(!isPlaying)}
-          className="px-4 py-1.5 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white"
+          className="min-h-11 px-4 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white"
         >
           {isPlaying ? 'Pause' : 'Play'}
         </button>
