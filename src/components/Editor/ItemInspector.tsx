@@ -30,6 +30,7 @@ import {
   transitionPresetsByCategory,
 } from '../../lib/transitions';
 import { MOTION_DIRECTIONS, MOTION_EFFECTS, MOTION_INTENSITY_DEFAULT, MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN, findMotionEffect } from '../../lib/motionEffects';
+import { MAX_FADE_SECONDS, MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 
 const CROSS_DISSOLVE_DURATION_SECONDS = 0.6;
 
@@ -397,27 +398,39 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
           </label>
           <div className="flex items-center gap-2">
             <label className="flex flex-col gap-1 flex-1">
-              Fade in (s)
+              Fade in (s, max {Math.min(MAX_FADE_SECONDS, duration).toFixed(1)})
               <input
                 type="number"
                 min={0}
+                max={Math.min(MAX_FADE_SECONDS, duration)}
                 step={0.1}
                 value={fade?.fadeInDuration ?? 0}
                 onChange={(e) =>
-                  patch({ fade: { fadeInDuration: Number(e.target.value), fadeOutDuration: fade?.fadeOutDuration ?? 0 } })
+                  patch({
+                    fade: {
+                      fadeInDuration: Math.max(0, Math.min(Number(e.target.value), MAX_FADE_SECONDS, duration)),
+                      fadeOutDuration: fade?.fadeOutDuration ?? 0,
+                    },
+                  })
                 }
                 className="bg-white/10 rounded px-2 py-1 text-white"
               />
             </label>
             <label className="flex flex-col gap-1 flex-1">
-              Fade out (s)
+              Fade out (s, max {Math.min(MAX_FADE_SECONDS, duration).toFixed(1)})
               <input
                 type="number"
                 min={0}
+                max={Math.min(MAX_FADE_SECONDS, duration)}
                 step={0.1}
                 value={fade?.fadeOutDuration ?? 0}
                 onChange={(e) =>
-                  patch({ fade: { fadeInDuration: fade?.fadeInDuration ?? 0, fadeOutDuration: Number(e.target.value) } })
+                  patch({
+                    fade: {
+                      fadeInDuration: fade?.fadeInDuration ?? 0,
+                      fadeOutDuration: Math.max(0, Math.min(Number(e.target.value), MAX_FADE_SECONDS, duration)),
+                    },
+                  })
                 }
                 className="bg-white/10 rounded px-2 py-1 text-white"
               />
@@ -487,11 +500,12 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
             />
           </label>
           <label className="flex flex-col gap-1 flex-1">
-            Duration (s)
+            Duration (s, max {MAX_MEDIA_SECONDS})
             <input
               type="number"
               step={0.1}
               min={0.1}
+              max={MAX_MEDIA_SECONDS}
               value={duration}
               onChange={(e) => mutate((project) => setItemDuration(project, item.id, Number(e.target.value)))}
               className="bg-white/10 rounded px-2 py-1 text-white"
@@ -530,6 +544,12 @@ function AudioInspector({ item }: { item: AudioTimelineItem }) {
   const patch = (fields: Record<string, unknown>) => {
     mutate((project) => updateItem(project, item.id, fields));
   };
+  // "Universal 30-second media standard" spec item 12 — fade duration must
+  // be clamped to `min(3s, available media duration)`. `getItemDuration` is
+  // avoided here purely to keep this small component's imports minimal;
+  // `item.endTime - item.startTime` is the identical calculation.
+  const clipDuration = item.endTime - item.startTime;
+  const maxFade = Math.min(MAX_FADE_SECONDS, clipDuration);
   return (
     <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
       <span className="font-bold uppercase tracking-wide text-white/40">Audio</span>
@@ -545,24 +565,30 @@ function AudioInspector({ item }: { item: AudioTimelineItem }) {
       </div>
       <div className="flex items-center gap-2">
         <label className="flex flex-col gap-1 flex-1">
-          Fade in (s)
+          Fade in (s, max {maxFade.toFixed(1)})
           <input
             type="number"
             min={0}
+            max={maxFade}
             step={0.1}
             value={item.fade.fadeInDuration}
-            onChange={(e) => patch({ fade: { fadeInDuration: Number(e.target.value), fadeOutDuration: item.fade.fadeOutDuration } })}
+            onChange={(e) =>
+              patch({ fade: { fadeInDuration: Math.max(0, Math.min(Number(e.target.value), maxFade)), fadeOutDuration: item.fade.fadeOutDuration } })
+            }
             className="bg-white/10 rounded px-2 py-1 text-white"
           />
         </label>
         <label className="flex flex-col gap-1 flex-1">
-          Fade out (s)
+          Fade out (s, max {maxFade.toFixed(1)})
           <input
             type="number"
             min={0}
+            max={maxFade}
             step={0.1}
             value={item.fade.fadeOutDuration}
-            onChange={(e) => patch({ fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: Number(e.target.value) } })}
+            onChange={(e) =>
+              patch({ fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: Math.max(0, Math.min(Number(e.target.value), maxFade)) } })
+            }
             className="bg-white/10 rounded px-2 py-1 text-white"
           />
         </label>

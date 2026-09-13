@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 
 /**
  * Live camera capture (photo + short video), front/back toggle.
@@ -10,6 +11,16 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
  * underlying browser APIs and control flow (request stream -> attach to
  * <video> -> snapshot via <canvas> for photo, MediaRecorder for video) are
  * the same proven approach.
+ *
+ * "Universal 30-second media standard" pass: recording now (1) negotiates
+ * an actual resolution instead of leaving every `getUserMedia` constraint
+ * unset (which silently produced a 640x480 default on real hardware — found
+ * via live testing), targeting the SELECTED PROJECT's aspect ratio at
+ * roughly 1080p-class quality with graceful fallback via `ideal` (not
+ * `exact`/`min`) constraints, so a device that can't do 1080p just
+ * negotiates its own best match rather than failing; (2) auto-stops at
+ * `MAX_MEDIA_SECONDS` with a visible "REC 0:07 / 0:30" countdown instead of
+ * recording indefinitely until the user manually stops.
  */
 
 export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blob: Blob };
@@ -17,9 +28,36 @@ export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blo
 interface CameraCaptureProps {
   onCapture: (result: CaptureResult) => void;
   onClose: () => void;
+  /** The project's own canvas dimensions — used to negotiate a matching, non-distorted recording aspect ratio (16:9 / 9:16 / 1:1 / 4:5, whatever the project actually is), and to size the live preview box to match. */
+  canvasWidth: number;
+  canvasHeight: number;
 }
 
-export function CameraCapture({ onCapture, onClose }: CameraCaptureProps) {
+function formatClock(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+/**
+ * Roughly "1080p-class" ideal recording dimensions for a given project
+ * aspect ratio: the SHORTER side is targeted at 1080px, the longer side
+ * derived from the ratio — e.g. 16:9 -> 1920x1080, 9:16 -> 1080x1920, 1:1 ->
+ * 1080x1080, 4:5 -> 1080x1350. Passed to `getUserMedia` as `ideal` (never
+ * `exact`/`min`) constraints, so a camera that can't reach this just
+ * negotiates its own best available match instead of failing outright —
+ * "graceful fallback", per the spec.
+ */
+function idealRecordingDimensions(canvasWidth: number, canvasHeight: number): { width: number; height: number; ratio: number } {
+  const ratio = canvasWidth > 0 && canvasHeight > 0 ? canvasWidth / canvasHeight : 9 / 16;
+  if (ratio >= 1) {
+    return { width: Math.round(1080 * ratio), height: 1080, ratio };
+  }
+  return { width: 1080, height: Math.round(1080 / ratio), ratio };
+}
+
+export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -30,6 +68,9 @@ export function CameraCapture({ onCapture, onClose }: CameraCaptureProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [isReady, setIsReady] = useState(false);
+
+  const ideal = useMemo(() => idealRecordingDimensions(canvasWidth, canvasHeight), [canvasWidth, canvasHeight]);
+  const previewAspectRatio = canvasWidth > 0 && canvasHeight > 0 ? `${canvasWidth} / ${canvasHeight}` : '9 / 16';
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -46,7 +87,19 @@ export function CameraCapture({ onCapture, onClose }: CameraCaptureProps) {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode },
+        video: {
+          facingMode,
+          // "ideal", not "exact"/"min" — a device that can't hit 1080p-class
+          // or this exact aspect ratio negotiates its own closest match
+          // instead of getUserMedia rejecting the request outright. This is
+          // what replaces the previous no-constraints-at-all call that
+          // silently produced a fixed 640x480 recording regardless of the
+          // project's actual format.
+          width: { ideal: ideal.width },
+          height: { ideal: ideal.height },
+          aspectRatio: { ideal: ideal.ratio },
+          frameRate: { ideal: 30 },
+        },
         audio: true,
       });
       streamRef.current = stream;
@@ -62,13 +115,13 @@ export function CameraCapture({ onCapture, onClose }: CameraCaptureProps) {
           : `Could not start the camera: ${err?.message || err}`,
       );
     }
-  }, [facingMode, stopStream]);
+  }, [facingMode, ideal, stopStream]);
 
   useEffect(() => {
     startStream();
     return () => stopStream();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [facingMode]);
+  }, [facingMode, ideal.width, ideal.height]);
 
   useEffect(() => () => stopStream(), [stopStream]);
 
@@ -122,25 +175,56 @@ export function CameraCapture({ onCapture, onClose }: CameraCaptureProps) {
     setRecordSeconds(0);
   }, [isReady, onCapture]);
 
-  useEffect(() => {
-    if (!isRecording) return;
-    const interval = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
     recorderRef.current = null;
     setIsRecording(false);
   }, []);
 
+  useEffect(() => {
+    if (!isRecording) return;
+    const interval = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [isRecording]);
+
+  // "Universal 30-second media standard" — automatic stop at the limit,
+  // rather than relying on the user to notice the timer and click Stop
+  // themselves. Fires as soon as `recordSeconds` reaches the cap.
+  useEffect(() => {
+    if (isRecording && recordSeconds >= MAX_MEDIA_SECONDS) {
+      stopRecording();
+    }
+  }, [isRecording, recordSeconds, stopRecording]);
+
+  const nearLimit = recordSeconds >= MAX_MEDIA_SECONDS - 5;
+
   return (
     <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center gap-4 p-6">
-      <div className="relative w-full max-w-md aspect-[9/16] bg-black rounded-xl overflow-hidden border border-white/10">
+      <div
+        className="relative w-full max-w-md bg-black rounded-xl overflow-hidden border border-white/10"
+        style={{ aspectRatio: previewAspectRatio }}
+      >
         <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
         {isRecording && (
-          <div className="absolute top-3 left-3 flex items-center gap-2 bg-red-600/90 text-white text-xs font-bold px-2 py-1 rounded">
-            <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> REC {recordSeconds}s
+          <>
+            <div
+              className={`absolute top-3 left-3 flex items-center gap-2 text-white text-xs font-bold px-2 py-1 rounded ${
+                nearLimit ? 'bg-amber-600/90' : 'bg-red-600/90'
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> REC {formatClock(recordSeconds)} / {formatClock(MAX_MEDIA_SECONDS)}
+            </div>
+            <div className="absolute top-0 left-0 right-0 h-1 bg-white/10">
+              <div
+                className={`h-full transition-all ${nearLimit ? 'bg-amber-500' : 'bg-red-500'}`}
+                style={{ width: `${Math.min(100, (recordSeconds / MAX_MEDIA_SECONDS) * 100)}%` }}
+              />
+            </div>
+          </>
+        )}
+        {!isRecording && isReady && (
+          <div className="absolute bottom-3 left-3 right-3 text-center text-[10px] text-white/50 bg-black/40 rounded px-2 py-1">
+            Records up to {formatClock(MAX_MEDIA_SECONDS)}
           </div>
         )}
         {error && (

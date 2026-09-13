@@ -24,8 +24,23 @@ import type { MediaAsset } from '../../types/timeline';
  */
 
 function EditorInner({ uid }: { uid: string }) {
-  const { project, isLoading, loadError, isSaving, saveError, isDirty, lastSavedAt, mutate, save, undo, redo, canUndo, canRedo } =
-    useProject();
+  const {
+    project,
+    isLoading,
+    loadError,
+    isSaving,
+    saveError,
+    isDirty,
+    lastSavedAt,
+    mutate,
+    save,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    projectLimitWarning,
+    dismissProjectLimitWarning,
+  } = useProject();
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -73,8 +88,8 @@ function EditorInner({ uid }: { uid: string }) {
   }, [project]);
 
   const handleAssetUploaded = useCallback(
-    (asset: MediaAsset) => {
-      mutate((p) => appendMediaToTimeline(p, asset));
+    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number }) => {
+      mutate((p) => appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd }));
     },
     [mutate],
   );
@@ -168,7 +183,12 @@ function EditorInner({ uid }: { uid: string }) {
     <>
       <section className="flex flex-col gap-2">
         <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Import media</h3>
-        <MediaImportPanel uid={uid} onAssetUploaded={handleAssetUploaded} />
+        <MediaImportPanel
+          uid={uid}
+          canvasWidth={project.canvasWidth}
+          canvasHeight={project.canvasHeight}
+          onAssetUploaded={handleAssetUploaded}
+        />
       </section>
 
       <section className="flex flex-col gap-2">
@@ -299,6 +319,21 @@ function EditorInner({ uid }: { uid: string }) {
           </button>
         </div>
       </header>
+
+      {/* "Universal 30-second media standard" spec item 4 — the project-
+          level guard's user-visible surface. `ProjectContext.mutate` blocks
+          an edit that would grow the project past the limit and sets this
+          message rather than letting it happen silently; shown here as a
+          dismissible banner so the user sees WHY immediately, not just at
+          export time. */}
+      {projectLimitWarning && (
+        <div className="mx-3 sm:mx-4 mt-2 flex items-center justify-between gap-3 rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-xs text-amber-200">
+          <span>{projectLimitWarning}</span>
+          <button onClick={dismissProjectLimitWarning} className="text-amber-200/60 hover:text-amber-100 shrink-0 min-h-8 min-w-8 flex items-center justify-center">
+            ×
+          </button>
+        </div>
+      )}
 
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
         <aside className="hidden lg:flex flex-col gap-4">{libraryPanel}</aside>

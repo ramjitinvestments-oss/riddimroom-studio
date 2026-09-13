@@ -40,6 +40,7 @@ import { getItemsAtTime } from '../timeline/utils';
 import { getCaptionStyle } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
 import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
+import { MAX_FADE_SECONDS } from '../media/constants';
 
 export interface FrameAssets {
   /** Loaded <img> elements keyed by MediaAsset id, for `image` timeline items. */
@@ -396,12 +397,26 @@ export function computeFadeOpacity(
   untilEnd: number,
 ): number {
   if (!fade) return 1;
+  // "Universal 30-second media standard" spec item 12 — a fade duration
+  // must never exceed `min(MAX_FADE_SECONDS, clip duration)`. Clamped HERE
+  // (not just in the inspector UI that sets `fade.fadeInDuration`/
+  // `fadeOutDuration`) so it's a correctness guarantee regardless of how a
+  // bad value got into project data — old saved projects, a future caller
+  // that forgets to clamp, whatever. `sinceStart + untilEnd` is exactly this
+  // item's own duration at any point in its playback (it's `(t - startTime)
+  // + (endTime - t)` = `endTime - startTime`), so no separate duration
+  // parameter is needed. Previously an unclamped fade longer than the clip
+  // meant the ramp never reached full opacity/volume even at the clip's
+  // midpoint — a real, audible/visible bug, not just a UI nicety.
+  const itemDuration = Math.max(0, sinceStart + untilEnd);
+  const fadeInDuration = Math.max(0, Math.min(fade.fadeInDuration, MAX_FADE_SECONDS, itemDuration));
+  const fadeOutDuration = Math.max(0, Math.min(fade.fadeOutDuration, MAX_FADE_SECONDS, itemDuration));
   let opacity = 1;
-  if (fade.fadeInDuration > 0 && sinceStart < fade.fadeInDuration) {
-    opacity = Math.min(opacity, clamp01(sinceStart / fade.fadeInDuration));
+  if (fadeInDuration > 0 && sinceStart < fadeInDuration) {
+    opacity = Math.min(opacity, clamp01(sinceStart / fadeInDuration));
   }
-  if (fade.fadeOutDuration > 0 && untilEnd < fade.fadeOutDuration) {
-    opacity = Math.min(opacity, clamp01(untilEnd / fade.fadeOutDuration));
+  if (fadeOutDuration > 0 && untilEnd < fadeOutDuration) {
+    opacity = Math.min(opacity, clamp01(untilEnd / fadeOutDuration));
   }
   return opacity;
 }

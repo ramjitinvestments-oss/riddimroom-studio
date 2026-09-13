@@ -2,6 +2,8 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import type { Project } from '../types/timeline';
 import { loadProject, saveProject } from '../lib/projects/persistence';
 import { emptyHistory, pushHistory, undoHistory, redoHistory, shouldCoalesce, type History } from '../lib/history';
+import { getProjectDuration, projectDurationExceedsLimit } from '../lib/timeline/utils';
+import { MAX_MEDIA_SECONDS } from '../lib/media/constants';
 
 /**
  * Phase 1 Step 6 (Shared editor shell) — holds the single `Project` the
@@ -45,6 +47,17 @@ interface ProjectContextValue {
   redo: () => void;
   canUndo: boolean;
   canRedo: boolean;
+  /**
+   * "Universal 30-second media standard" spec item 4 — set by `mutate`
+   * whenever an edit was BLOCKED because it would have pushed the project's
+   * total duration past `MAX_MEDIA_SECONDS` (e.g. arranging several
+   * already-in-limit clips so they'd sum to more than the cap). Null when
+   * there's nothing to show. This is how "the user should understand WHY an
+   * operation cannot exceed the limit" surfaces in the editor — see the
+   * banner in `EditorShell`.
+   */
+  projectLimitWarning: string | null;
+  dismissProjectLimitWarning: () => void;
 }
 
 const ProjectContext = createContext<ProjectContextValue | undefined>(undefined);
@@ -69,6 +82,7 @@ export function ProjectProvider({
   const historyRef = useRef<History<Project>>(emptyHistory());
   const lastEditAtRef = useRef<number>(0);
   const [historyVersion, setHistoryVersion] = useState(0);
+  const [projectLimitWarning, setProjectLimitWarning] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -103,8 +117,29 @@ export function ProjectProvider({
   }, [load]);
 
   const mutate = useCallback((updater: (project: Project) => Project) => {
+    // "Universal 30-second media standard" spec item 4 — the PROJECT-level
+    // duration guard. This is the single choke point every editor mutation
+    // already flows through (every panel calls `mutate`, per this file's
+    // header comment), so it's the one place to enforce "never silently
+    // create a project longer than 30 seconds" without touching every
+    // individual call site. An edit is blocked only if it would push the
+    // total duration past the limit AND make it longer than it already was
+    // — a project that's already over the limit (e.g. legacy data from
+    // before this guard existed) can still be freely edited/shortened, just
+    // never pushed further out. `blocked` is read after `setProject`
+    // resolves; the updater callback itself must stay pure (it may run
+    // twice under React StrictMode), which is why the side effect is just
+    // recording a boolean rather than mutating anything external.
+    let blocked = false;
     setProject((current) => {
       if (!current) return current;
+      const next = updater(current);
+      const nextDuration = getProjectDuration(next);
+      const currentDuration = getProjectDuration(current);
+      if (projectDurationExceedsLimit(next) && nextDuration > currentDuration + 0.05) {
+        blocked = true;
+        return current;
+      }
       const now = Date.now();
       // Coalesce a burst of rapid edits (one continuous clip drag firing
       // `mutate` on every mousemove, or one continuous typing burst firing
@@ -113,13 +148,21 @@ export function ProjectProvider({
       const coalesce = shouldCoalesce(now - lastEditAtRef.current);
       historyRef.current = pushHistory(historyRef.current, current, { coalesce });
       lastEditAtRef.current = now;
-      const next = updater(current);
       projectRef.current = next;
       return next;
     });
+    if (blocked) {
+      setProjectLimitWarning(
+        `That would make this project longer than the ${MAX_MEDIA_SECONDS}-second limit. Trim, shorten, or remove a clip first.`,
+      );
+      return;
+    }
+    setProjectLimitWarning(null);
     setIsDirty(true);
     setHistoryVersion((v) => v + 1);
   }, []);
+
+  const dismissProjectLimitWarning = useCallback(() => setProjectLimitWarning(null), []);
 
   const undo = useCallback(() => {
     setProject((current) => {
@@ -194,6 +237,8 @@ export function ProjectProvider({
         redo,
         canUndo,
         canRedo,
+        projectLimitWarning,
+        dismissProjectLimitWarning,
       }}
     >
       {children}

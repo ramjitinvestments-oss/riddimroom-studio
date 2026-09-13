@@ -20,6 +20,7 @@ import type {
 } from '../../types/timeline';
 import { ITEM_TYPE_TO_TRACK_TYPE, TIMELINE_SCHEMA_VERSION } from '../../types/timeline';
 import { findTransitionPreset } from '../transitions';
+import { DURATION_LIMIT_EPSILON_SECONDS, MAX_MEDIA_SECONDS } from '../media/constants';
 
 // ---------------------------------------------------------------------------
 // ID generation
@@ -211,6 +212,21 @@ export function getProjectDuration(project: Project): number {
   return Math.max(...project.items.map((item) => item.endTime));
 }
 
+/**
+ * "Universal 30-second media standard" — the PROJECT-level guard, distinct
+ * from the per-item cap enforced in `trimItemEnd`/`setItemDuration`/
+ * `appendMediaToTimeline` below. Three in-limit clips placed back to back
+ * (e.g. 10s + 10s + 10s = 30s) are each individually fine but can still
+ * assemble into a project that's too long — this is what catches that case.
+ * `ProjectContext`'s `mutate` calls this after every edit and blocks (rather
+ * than silently applying) any mutation that would push the total duration
+ * past the limit, so the problem surfaces immediately in the editor instead
+ * of only at export time.
+ */
+export function projectDurationExceedsLimit(project: Project, maxSeconds: number = MAX_MEDIA_SECONDS): boolean {
+  return getProjectDuration(project) > maxSeconds + DURATION_LIMIT_EPSILON_SECONDS;
+}
+
 /** True if two items' [startTime, endTime) ranges overlap. Half-open so back-to-back items don't count. */
 export function itemsOverlapInTime(a: TimelineItem, b: TimelineItem): boolean {
   return a.startTime < b.endTime && b.startTime < a.endTime;
@@ -304,11 +320,20 @@ export function trimItemStart(project: Project, itemId: string, newStartTime: nu
  * Moves an item's end edge (a right-side trim drag / the inspector's
  * duration field). For video/audio this also moves `trimEnd` by the same
  * source-time delta. `startTime` is never touched.
+ *
+ * "Universal 30-second media standard" — this is the one choke point every
+ * duration-extending edit (drag-resize, the inspector's Duration field,
+ * `setItemDuration`) ultimately goes through, so the per-item cap is
+ * enforced here rather than re-implemented at each call site: `newEndTime`
+ * is clamped so the item's resulting duration never exceeds
+ * `MAX_MEDIA_SECONDS`, regardless of item type (this is what stops, e.g., an
+ * image's on-screen duration from being dragged out past 30s).
  */
 export function trimItemEnd(project: Project, itemId: string, newEndTime: number): Project {
   const item = project.items.find((i) => i.id === itemId);
   if (!item) return project;
-  const clampedEnd = Math.max(item.startTime + 0.1, newEndTime);
+  const maxEnd = item.startTime + MAX_MEDIA_SECONDS;
+  const clampedEnd = Math.max(item.startTime + 0.1, Math.min(newEndTime, maxEnd));
 
   if (isTrimmable(item)) {
     const speed = item.type === 'video' ? item.speed : 1;
@@ -319,11 +344,11 @@ export function trimItemEnd(project: Project, itemId: string, newEndTime: number
   return updateItem(project, itemId, { endTime: clampedEnd });
 }
 
-/** Sets an item's duration directly (used by the inspector's "Duration" field) by moving its end edge — see `trimItemEnd`. */
+/** Sets an item's duration directly (used by the inspector's "Duration" field) by moving its end edge — see `trimItemEnd`, which is where the 30-second per-item cap is actually enforced (this clamp here is just belt-and-suspenders so the value passed onward is never negative/zero). */
 export function setItemDuration(project: Project, itemId: string, newDurationSeconds: number): Project {
   const item = project.items.find((i) => i.id === itemId);
   if (!item) return project;
-  const duration = Math.max(0.1, newDurationSeconds);
+  const duration = Math.min(Math.max(0.1, newDurationSeconds), MAX_MEDIA_SECONDS);
   return trimItemEnd(project, itemId, item.startTime + duration);
 }
 

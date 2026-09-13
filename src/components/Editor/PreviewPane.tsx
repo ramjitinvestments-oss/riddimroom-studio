@@ -209,7 +209,16 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // fields were already correctly respected by the real export
           // renderer, `canvas2dRenderer.ts`).
           videoEl.muted = active.muted;
-          videoEl.volume = Math.max(0, Math.min(1, active.volume));
+          // "Universal 30-second media standard" spec item 6 — a video's
+          // OWN embedded audio must respect its own `fade` field too, not
+          // just the standalone AudioTimelineItem branch below (which
+          // already applied `computeFadeOpacity`). Found during this pass:
+          // this line previously read only `active.volume`, so a video
+          // clip's fade-in/fade-out (set via the shared Timing/fade block
+          // in ItemInspector) visibly faded its picture but silently had NO
+          // effect on its own audio in the live preview.
+          const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, active.endTime - t);
+          videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul));
 
           if (isPlayingRef.current) {
             if (videoEl.paused) videoEl.play().catch(() => {});

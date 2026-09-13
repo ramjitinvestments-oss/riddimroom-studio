@@ -24,6 +24,7 @@ import type {
   VideoTimelineItem,
 } from '../../types/timeline';
 import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracksByType } from './utils';
+import { MAX_MEDIA_SECONDS } from '../media/constants';
 
 const DEFAULT_IMAGE_DURATION_SECONDS = 5;
 
@@ -42,6 +43,28 @@ const DEFAULT_IMAGE_DURATION_SECONDS = 5;
  */
 function safeDuration(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+/**
+ * "Universal 30-second media standard" — resolves the actual `[trimStart,
+ * trimEnd)` source window a new video/audio item should use. When the
+ * caller (the pre-import trim/select modal, or a camera-capture clamp)
+ * supplied an explicit window via `AppendMediaOptions.trimStart`/`trimEnd`,
+ * that's honored (clamped to the asset's real bounds). Otherwise this
+ * behaves exactly as before — the item spans the asset's whole probed
+ * duration — except the result is now ALSO defensively capped at
+ * `MAX_MEDIA_SECONDS`: nothing upstream should ever hand this an
+ * over-length asset with no trim window, but if it does, the item placed on
+ * the timeline still can't exceed the product's hard limit.
+ */
+function resolveTrimWindow(
+  fullDuration: number,
+  options: Pick<AppendMediaOptions, 'trimStart' | 'trimEnd'>,
+): { trimStart: number; trimEnd: number; duration: number } {
+  const trimStart = options.trimStart !== undefined ? Math.max(0, Math.min(options.trimStart, fullDuration)) : 0;
+  const rawTrimEnd = options.trimEnd !== undefined ? Math.max(trimStart + 0.1, Math.min(options.trimEnd, fullDuration)) : fullDuration;
+  const duration = Math.min(rawTrimEnd - trimStart, MAX_MEDIA_SECONDS);
+  return { trimStart, trimEnd: trimStart + duration, duration };
 }
 
 function nextZIndex(project: Project): number {
@@ -70,6 +93,17 @@ export interface AppendMediaOptions {
   /** For image assets only — how long the image stays on screen. Defaults to 5s. */
   imageDurationSeconds?: number;
   role?: ImageTimelineItem['role'] | AudioTimelineItem['role'];
+  /**
+   * Video/audio only — "universal 30-second media standard". Restricts the
+   * placed item to this source-time window instead of the asset's full
+   * duration: either the window the user picked in the pre-import
+   * trim/select modal (an upload longer than `MAX_MEDIA_SECONDS`), or the
+   * point a camera recording was auto-stopped/clamped at. When omitted, the
+   * item uses the asset's whole probed duration exactly as before (still
+   * capped defensively at `MAX_MEDIA_SECONDS`, see below).
+   */
+  trimStart?: number;
+  trimEnd?: number;
 }
 
 /**
@@ -85,7 +119,8 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
   if (asset.kind === 'video') {
     const track = firstTrackOfType(next, 'video');
     const startTime = nextStartTime(next, track.id, options.atTime);
-    const duration = safeDuration(asset.durationSeconds, 5);
+    const fullDuration = safeDuration(asset.durationSeconds, 5);
+    const { trimStart, trimEnd, duration } = resolveTrimWindow(fullDuration, options);
     const item: VideoTimelineItem = {
       id: generateTimelineId('item'),
       type: 'video',
@@ -99,8 +134,8 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
       scale: 1,
       rotation: 0,
       opacity: 1,
-      trimStart: 0,
-      trimEnd: duration,
+      trimStart,
+      trimEnd,
       speed: 1,
       reverse: false,
       volume: 1,
@@ -134,7 +169,8 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
   // audio
   const track = firstTrackOfType(next, 'audio');
   const startTime = nextStartTime(next, track.id, options.atTime);
-  const duration = safeDuration(asset.durationSeconds, 5);
+  const fullDuration = safeDuration(asset.durationSeconds, 5);
+  const { trimStart, trimEnd, duration } = resolveTrimWindow(fullDuration, options);
   const item: AudioTimelineItem = {
     id: generateTimelineId('item'),
     type: 'audio',
@@ -147,8 +183,8 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
     role: (options.role as AudioTimelineItem['role']) ?? 'original',
     volume: 1,
     muted: false,
-    trimStart: 0,
-    trimEnd: duration,
+    trimStart,
+    trimEnd,
     fade: { fadeInDuration: 0, fadeOutDuration: 0 },
   };
   return addItem(next, item);

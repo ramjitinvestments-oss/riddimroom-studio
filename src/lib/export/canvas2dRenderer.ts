@@ -235,7 +235,16 @@ export class Canvas2DRenderer implements Renderer {
               lastActiveVideoId = activeVideo.id;
             }
             handle.element.play().catch(() => {});
-            handle.gain.gain.value = activeVideo.muted ? 0 : activeVideo.volume;
+            // "Universal 30-second media standard" spec item 6 — same fix
+            // as PreviewPane.tsx's live-playback branch: a video's own
+            // embedded-audio gain must apply its own `fade` field, mirroring
+            // the standalone AudioTimelineItem branch below (which already
+            // did this). Previously this line ignored fade entirely, so a
+            // video clip's audio fade-in/fade-out had no effect in the
+            // actual exported MP4 even though the visual fade rendered
+            // correctly.
+            const videoFadeMul = computeFadeOpacity(activeVideo.fade, t - activeVideo.startTime, activeVideo.endTime - t);
+            handle.gain.gain.value = activeVideo.muted ? 0 : activeVideo.volume * videoFadeMul;
             frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
           }
         } else {
