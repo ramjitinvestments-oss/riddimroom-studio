@@ -1,6 +1,9 @@
-[
+﻿[
   {
-    "origin": ["http://localhost:3000"],
+    "origin": [
+      "http://localhost:3000",
+      "https://riddimroom-studio-955040929390.us-central1.run.app"
+    ],
     "method": ["GET", "HEAD", "OPTIONS"],
     "maxAgeSeconds": 3600,
     "responseHeader": ["Content-Type", "Authorization"]
