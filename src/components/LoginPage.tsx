@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Mail, Lock, User, ArrowRight, KeyRound, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import BrandLogo from './BrandLogo';
 
 /**
  * Source: riddimroom-caption's src/components/LoginPage.tsx (mode-switching
@@ -85,7 +86,7 @@ export function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-[#070707] text-white px-6">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-1">
-          <h1 className="text-xl font-black uppercase tracking-tight">RiddimRoom Studio</h1>
+          <BrandLogo size="lg" />
           <p className="text-xs text-white/40 uppercase tracking-widest">
             {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
           </p>
