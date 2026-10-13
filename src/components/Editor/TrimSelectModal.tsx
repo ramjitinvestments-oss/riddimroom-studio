@@ -102,9 +102,9 @@ export function TrimSelectModal({ file, kind, durationSeconds, onConfirm, onCanc
     <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4">
       <div className="bg-[#111] border border-white/10 rounded-xl p-5 w-full max-w-md flex flex-col gap-4">
         <div>
-          <h3 className="text-sm font-bold text-white uppercase tracking-wide">Select a {MAX_MEDIA_SECONDS}-second clip</h3>
+          <h3 className="text-sm font-bold text-white uppercase tracking-wide">Select a clip (up to 10 min)</h3>
           <p className="text-xs text-white/40 mt-1">
-            This {kind} is {formatClock(safeDuration)} long. RiddimRoom Studio clips are limited to {MAX_MEDIA_SECONDS} seconds — scrub to
+            This {kind} is {formatClock(safeDuration)} long. RiddimRoom Studio clips are limited to {formatClock(MAX_MEDIA_SECONDS)} — scrub to
             choose the portion you want to use, then confirm.
           </p>
         </div>
