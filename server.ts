@@ -100,8 +100,30 @@ async function verifyFirebaseToken(req: AuthedRequest, res: Response, next: Next
 }
 
 const DEFAULT_DAILY_QUOTA = 2;
+const LIFETIME_DAILY_QUOTA = 10;
 
-function toClientUser(data: UserProfile) {
+async function getLicenseTier(uid: string): Promise<'free' | 'lifetime'> {
+  try {
+    const doc = await db.collection('licenses').doc(uid).get();
+    if (!doc.exists) return 'free';
+    const data = doc.data() as { tier?: string; active?: boolean };
+    if (data.tier === 'lifetime' && data.active !== false) return 'lifetime';
+    return 'free';
+  } catch {
+    return 'free';
+  }
+}
+
+async function isGlobalDisabled(): Promise<boolean> {
+  try {
+    const doc = await db.collection('config').doc('global').get();
+    return doc.exists && (doc.data() as { disabled?: boolean }).disabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function toClientUser(data: UserProfile, licenseTier: 'free' | 'lifetime' = 'free') {
   // Server is the single source of truth for role/status/quota — the
   // client never sets these directly (see firestore.rules: users/{uid}
   // is write: if false for clients; all writes go through this backend).
@@ -114,19 +136,39 @@ function toClientUser(data: UserProfile) {
     role: data.role,
     status: data.status,
     dailyCount: data.dailyCount,
-    maxFree: DEFAULT_DAILY_QUOTA,
+    maxFree: licenseTier === 'lifetime' ? LIFETIME_DAILY_QUOTA : DEFAULT_DAILY_QUOTA,
     totalTranscribes: data.totalTranscribes,
     captureCount: data.captureCount,
     photoCount: data.photoCount,
     videoCount: data.videoCount,
     subscription: data.subscription,
     plan: data.plan,
+    licenseTier,
   };
 }
 
 async function createServer() {
   const app = express();
-  app.use(cors());
+  // v1 hardening: CORS allowlist from env (APP_URL + localhost), not open cors().
+  const allowedOrigins = new Set(
+    (process.env.APP_URL ? [process.env.APP_URL] : [])
+      .concat(['http://localhost:5173', 'http://localhost:3000', 'https://studio.riddimroom.com', 'https://riddimroom.com']),
+  );
+  app.use(cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // same-origin / curl / server-to-server
+      if (allowedOrigins.has(origin)) return cb(null, true);
+      return cb(new Error(`Origin not allowed: ${origin}`));
+    },
+  }));
+  // Security headers (lightweight, no extra dependency).
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self)');
+    next();
+  });
   app.use(express.json({ limit: '10mb' }));
 
   app.get('/api/health', (_req, res) => {
@@ -134,12 +176,9 @@ async function createServer() {
   });
 
   // Session check + unified user document upsert.
-  // Source: riddimroom-caption's GET /api/user/status (server.ts ~line 487),
-  // which creates the user doc on first sign-in and updates lastLogin on
-  // every subsequent call. Ported with the merged schema (adds
-  // status/captureCount/photoCount/videoCount from EventCam) and routed
-  // through the shared verifyFirebaseToken middleware instead of an
-  // inline token check.
+  // v1: global kill-switch — if config/global.disabled is true, non-admin
+  // users get 403 here (EventCam's expiry/disabled was dead code; here it
+  // is enforced on the server, not the client).
   app.get('/api/user/status', verifyFirebaseToken, async (req: AuthedRequest, res: Response): Promise<any> => {
     const decoded = req.decodedToken!;
     const uid = decoded.uid;
@@ -161,6 +200,12 @@ async function createServer() {
     // succeeding with fake data) is the safer behavior for a production
     // app with real user accounts.
     try {
+      // Kill-switch check before any profile work.
+      const disabled = await isGlobalDisabled();
+      const isAdmin = (await db.collection('admins').doc(uid).get()).exists;
+      if (disabled && !isAdmin) {
+        return res.status(403).json({ success: false, error: 'RiddimRoom Studio is temporarily unavailable.' });
+      }
       const userRef = db.collection('users').doc(uid);
       const userDoc = await userRef.get();
 
@@ -188,7 +233,7 @@ async function createServer() {
           plan: 'free',
         };
         await userRef.set(newUser);
-        return res.json({ success: true, user: toClientUser(newUser) });
+        return res.json({ success: true, user: toClientUser(newUser, 'free') });
       }
 
       const data = userDoc.data() as UserProfile;
@@ -211,11 +256,52 @@ async function createServer() {
         return res.status(403).json({ success: false, error: 'Account access restricted' });
       }
 
-      return res.json({ success: true, user: toClientUser({ ...data, dailyCount }) });
+      const licenseTier = await getLicenseTier(uid);
+      return res.json({ success: true, user: toClientUser({ ...data, dailyCount }, licenseTier) });
     } catch (err: any) {
       console.error('[user/status] Firestore operation failed:', err.code || err.message);
       return res.status(500).json({ success: false, error: 'Failed to load user profile' });
     }
+  });
+
+  // v1 Licensing: GET /api/license — tier + whether checkout is configured.
+  app.get('/api/license', verifyFirebaseToken, async (req: AuthedRequest, res: Response): Promise<any> => {
+    const uid = req.decodedToken!.uid;
+    const tier = await getLicenseTier(uid);
+    return res.json({
+      tier,
+      watermarkEnabled: tier !== 'lifetime',
+      checkoutAvailable: !!(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID_LIFETIME),
+    });
+  });
+
+  // v1 Licensing: POST /api/checkout — Stripe Checkout stub.
+  // TODO (Stripe): when STRIPE_SECRET_KEY + STRIPE_PRICE_ID_LIFETIME are
+  // set, create a real Checkout Session here (mode: 'payment',
+  // success_url/cancel_url -> APP_URL) and return { checkoutUrl }.
+  // Until then: 503 with a clear message — never invent keys or charge.
+  app.post('/api/checkout', verifyFirebaseToken, async (req: AuthedRequest, res: Response): Promise<any> => {
+    const uid = req.decodedToken!.uid;
+    const tier = await getLicenseTier(uid);
+    if (tier === 'lifetime') return res.json({ success: true, tier, message: 'Already lifetime.' });
+    if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_PRICE_ID_LIFETIME) {
+      return res.status(503).json({ success: false, error: 'Checkout is not configured yet (missing STRIPE_SECRET_KEY / STRIPE_PRICE_ID_LIFETIME).' });
+    }
+    // Stripe keys ARE set but the real Checkout call is not wired yet —
+    // return 503 rather than pretending. Wire `stripe` SDK here next.
+    return res.status(503).json({ success: false, error: 'Stripe Checkout wiring is pending — keys are set but the session creation is not yet implemented. See server.ts TODO.' });
+  });
+
+  // v1 Licensing: POST /api/webhook/stripe — Stripe webhook stub.
+  // TODO (Stripe): verify signature with STRIPE_WEBHOOK_SECRET (raw body
+  // required — use express.raw for this route), handle
+  // checkout.session.completed -> write licenses/{uid} = { tier: 'lifetime', active: true, ... }.
+  // Until then: 400 with a clear message.
+  app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async (_req: Request, res: Response): Promise<any> => {
+    if (!process.env.STRIPE_WEBHOOK_SECRET) {
+      return res.status(400).json({ success: false, error: 'Stripe webhook not configured (missing STRIPE_WEBHOOK_SECRET).' });
+    }
+    return res.status(501).json({ success: false, error: 'Stripe webhook verification not yet implemented. See server.ts TODO.' });
   });
 
   // AI transcription (Phase 1 Step 10) + server-side quota enforcement
@@ -258,13 +344,16 @@ async function createServer() {
       }
       const data = userDoc.data() as UserProfile;
       const dailyCount = data.lastTranscribeDate === todayStr ? data.dailyCount || 0 : 0;
+      // v1: quota by license tier (free 2/day, lifetime 10/day).
+      const licenseTier = await getLicenseTier(uid);
+      const maxDaily = licenseTier === 'lifetime' ? LIFETIME_DAILY_QUOTA : DEFAULT_DAILY_QUOTA;
 
-      if (dailyCount >= DEFAULT_DAILY_QUOTA) {
+      if (dailyCount >= maxDaily) {
         return res.status(429).json({
           success: false,
-          error: `Daily transcription quota (${DEFAULT_DAILY_QUOTA}) reached. Try again tomorrow.`,
+          error: `Daily transcription quota (${maxDaily}) reached. Try again tomorrow.`,
           dailyCount,
-          maxFree: DEFAULT_DAILY_QUOTA,
+          maxFree: maxDaily,
         });
       }
 
@@ -300,7 +389,7 @@ async function createServer() {
         lastUpdated: FieldValue.serverTimestamp(),
       });
 
-      return res.json({ success: true, words: result.words, provider: result.provider, dailyCount: newDailyCount, maxFree: DEFAULT_DAILY_QUOTA });
+      return res.json({ success: true, words: result.words, provider: result.provider, dailyCount: newDailyCount, maxFree: maxDaily });
     } catch (err: any) {
       console.error('[transcribe] failed:', err?.message || err);
       return res.status(500).json({ success: false, error: err?.message || 'Transcription failed.' });
