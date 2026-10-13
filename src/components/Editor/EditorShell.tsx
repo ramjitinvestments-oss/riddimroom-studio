@@ -11,6 +11,10 @@ import { TranscribePanel } from './TranscribePanel';
 import { ExportPanel } from './ExportPanel';
 import { BackgroundRemovalButton } from './BackgroundRemovalButton';
 import { BottomSheet } from './BottomSheet';
+import { PipPanel } from './PipPanel';
+import { TemplatesPanel } from './TemplatesPanel';
+import { LicensingPanel } from './LicensingPanel';
+import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import type { MediaAsset } from '../../types/timeline';
@@ -44,6 +48,9 @@ function EditorInner({ uid }: { uid: string }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  // v1 3-step flow: 1 Capture/Upload → 2 Edit+Captions → 3 Export.
+  // One clear action per screen; panels are grouped by step, no parallel state.
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   // Which variant (original vs background-removed) is currently selected
   // per ORIGINAL image asset id — owned here (not inside
   // BackgroundRemovalButton) because the media library row's own
@@ -247,11 +254,33 @@ function EditorInner({ uid }: { uid: string }) {
       )}
 
       <section>
+        <PipPanel />
+      </section>
+
+      <section>
         <TranscribePanel uid={uid} />
       </section>
 
       <section>
+        <CaptionsExportPanel />
+      </section>
+    </>
+  );
+
+  const exportPanel = (
+    <>
+      <section>
+        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50 mb-2">Export</h3>
         <ExportPanel />
+      </section>
+      <section>
+        <LicensingPanel />
+      </section>
+      <section className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
+        <h3 className="font-bold text-white text-sm">Project summary</h3>
+        <p>Duration: {getProjectDuration(project).toFixed(1)}s</p>
+        <p>Items: {project.items.length} · Media: {Object.keys(project.mediaAssets).length}</p>
+        <p>Watermark: {project.watermarkEnabled !== false ? 'On (free)' : 'Off (lifetime)'}</p>
       </section>
     </>
   );
@@ -335,38 +364,98 @@ function EditorInner({ uid }: { uid: string }) {
         </div>
       )}
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
-        <aside className="hidden lg:flex flex-col gap-4">{libraryPanel}</aside>
+      {/* v1 3-step stepper — one clear action per screen */}
+      <nav className="flex items-center gap-2 px-3 sm:px-4 py-2 border-b border-white/10 shrink-0" aria-label="Editor steps">
+        {([
+          { n: 1 as const, label: 'Capture / Upload' },
+          { n: 2 as const, label: 'Edit + Captions' },
+          { n: 3 as const, label: 'Export' },
+        ]).map((s, idx) => (
+          <React.Fragment key={s.n}>
+            {idx > 0 && <span className="text-white/20">→</span>}
+            <button
+              onClick={() => setStep(s.n)}
+              aria-current={step === s.n ? 'step' : undefined}
+              className={`min-h-11 px-3 rounded-lg text-xs font-bold ${step === s.n ? 'bg-white text-black' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+            >
+              {s.n}. {s.label}
+            </button>
+          </React.Fragment>
+        ))}
+        <span className="ml-auto hidden sm:inline text-[11px] text-white/30">
+          {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, add captions, PiP, text' : 'Choose format, export, done'}
+        </span>
+      </nav>
 
-        <main className="flex flex-col gap-4 items-center min-w-0">
-          <PreviewPane
-            project={project}
-            currentTime={currentTime}
-            isPlaying={isPlaying}
-            onTimeChange={setCurrentTime}
-            onPlayingChange={setIsPlaying}
-            selectedItemId={selectedItemId}
-            onSelectItem={setSelectedItemId}
-          />
-          <div className="w-full max-w-3xl">
-            <TimelinePanel
+      {step === 1 && (
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+          <div className="flex flex-col gap-4">{libraryPanel}</div>
+          <aside className="flex flex-col gap-4">
+            <TemplatesPanel />
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
+              <p className="font-bold text-white text-sm">How it works</p>
+              <p>1. Upload or record your clip.</p>
+              <p>2. Edit + add captions.</p>
+              <p>3. Export MP4 (or SRT/VTT).</p>
+            </div>
+            <button onClick={() => setStep(2)} className="min-h-11 px-4 font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm">Continue to Edit →</button>
+          </aside>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+          <main className="flex flex-col gap-4 items-center min-w-0">
+            <PreviewPane
               project={project}
               currentTime={currentTime}
-              onSeek={setCurrentTime}
+              isPlaying={isPlaying}
+              onTimeChange={setCurrentTime}
+              onPlayingChange={setIsPlaying}
               selectedItemId={selectedItemId}
               onSelectItem={setSelectedItemId}
             />
-          </div>
-        </main>
+            <div className="w-full max-w-3xl">
+              <TimelinePanel
+                project={project}
+                currentTime={currentTime}
+                onSeek={setCurrentTime}
+                selectedItemId={selectedItemId}
+                onSelectItem={setSelectedItemId}
+              />
+            </div>
+            <div className="w-full max-w-3xl flex gap-2">
+              <button onClick={() => setStep(1)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold">← Back</button>
+              <button onClick={() => setStep(3)} className="min-h-11 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-bold">Continue to Export →</button>
+            </div>
+          </main>
+          <aside className="flex flex-col gap-4">{sidePanel}</aside>
+        </div>
+      )}
 
-        <aside className="hidden lg:flex flex-col gap-4">{sidePanel}</aside>
-      </div>
+      {step === 3 && (
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+          <main className="flex flex-col gap-4 items-center min-w-0">
+            <PreviewPane
+              project={project}
+              currentTime={currentTime}
+              isPlaying={isPlaying}
+              onTimeChange={setCurrentTime}
+              onPlayingChange={setIsPlaying}
+              selectedItemId={selectedItemId}
+              onSelectItem={setSelectedItemId}
+            />
+            <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold">← Back to Edit</button>
+          </main>
+          <aside className="flex flex-col gap-4">{exportPanel}</aside>
+        </div>
+      )}
 
       <BottomSheet open={mobileSheet === 'library'} onClose={() => setMobileSheet(null)} title="Media Library">
-        {libraryPanel}
+        {step === 1 ? libraryPanel : sidePanel}
       </BottomSheet>
       <BottomSheet open={mobileSheet === 'panel'} onClose={() => setMobileSheet(null)} title={selectedItem ? 'Selected Item' : 'Add / Export'}>
-        {sidePanel}
+        {step === 3 ? exportPanel : sidePanel}
       </BottomSheet>
     </div>
   );
