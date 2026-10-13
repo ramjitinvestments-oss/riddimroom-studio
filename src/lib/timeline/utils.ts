@@ -383,9 +383,7 @@ export function splitItemAtTime(project: Project, itemId: string, atTime: number
     let next = updateItem(project, itemId, { words: firstWords, endTime: atTime });
     next = addItem(next, newItem);
     return next;
-  }
-
-  const newItemId = generateTimelineId('item');
+  }  const newItemId = generateTimelineId('item');
   let firstPatch: Record<string, unknown> = { endTime: atTime };
   let secondExtra: Record<string, unknown> = {};
 
@@ -417,6 +415,24 @@ export function splitItemAtTime(project: Project, itemId: string, atTime: number
 
 function hasFadeField(item: TimelineItem): item is Extract<TimelineItem, { fade?: FadeSettings } | { fade: FadeSettings }> {
   return item.type === 'video' || item.type === 'image' || item.type === 'text' || item.type === 'audio';
+}
+
+/**
+ * v1 caption merge: merges two caption items into the first (words
+ * re-based to the first item's timeline, second item removed).
+ * No-op if either item is missing, not a caption, or the same item.
+ */
+export function mergeCaptionItems(project: Project, firstId: string, secondId: string): Project {
+  if (firstId === secondId) return project;
+  const first = project.items.find((i) => i.id === firstId);
+  const second = project.items.find((i) => i.id === secondId);
+  if (!first || !second || first.type !== 'caption' || second.type !== 'caption') return project;
+  const offset = second.startTime - first.startTime;
+  const mergedWords = [...first.words, ...second.words.map((w) => ({ text: w.text, start: w.start + offset, end: w.end + offset }))].sort((a, b) => a.start - b.start);
+  const newEnd = Math.max(first.endTime, second.endTime);
+  let next = updateItem(project, firstId, { words: mergedWords, endTime: newEnd });
+  next = { ...next, items: next.items.filter((i) => i.id !== secondId) };
+  return next;
 }
 
 /**
