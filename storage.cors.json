@@ -1,11 +1,1 @@
-﻿[
-  {
-    "origin": [
-      "http://localhost:3000",
-      "https://riddimroom-studio-955040929390.us-central1.run.app"
-    ],
-    "method": ["GET", "HEAD", "OPTIONS"],
-    "maxAgeSeconds": 3600,
-    "responseHeader": ["Content-Type", "Authorization"]
-  }
-]
+[{"maxAgeSeconds":3600,"method":["GET","HEAD","OPTIONS"],"origin":["http://localhost:5173","http://localhost:3000","https://studio.riddimroom.com","https://riddimroom.com","https://riddimroom-studio-955040929390.us-central1.run.app"],"responseHeader":["Content-Type","Authorization"]}]
