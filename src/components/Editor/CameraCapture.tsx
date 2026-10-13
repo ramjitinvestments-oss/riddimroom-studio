@@ -12,14 +12,14 @@ import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
  * <video> -> snapshot via <canvas> for photo, MediaRecorder for video) are
  * the same proven approach.
  *
- * "Universal 30-second media standard" pass: recording now (1) negotiates
- * an actual resolution instead of leaving every `getUserMedia` constraint
- * unset (which silently produced a 640x480 default on real hardware — found
- * via live testing), targeting the SELECTED PROJECT's aspect ratio at
- * roughly 1080p-class quality with graceful fallback via `ideal` (not
+ * V1 (replaces the old 30s standard): recording (1) negotiates an actual
+ * resolution instead of leaving every `getUserMedia` constraint unset
+ * (which silently produced a 640x480 default on real hardware — found via
+ * live testing), targeting the SELECTED PROJECT's aspect ratio at roughly
+ * 1080p-class quality with graceful fallback via `ideal` (not
  * `exact`/`min`) constraints, so a device that can't do 1080p just
  * negotiates its own best match rather than failing; (2) auto-stops at
- * `MAX_MEDIA_SECONDS` with a visible "REC 0:07 / 0:30" countdown instead of
+ * `MAX_MEDIA_SECONDS` (10 min) with a visible REC countdown instead of
  * recording indefinitely until the user manually stops.
  */
 
