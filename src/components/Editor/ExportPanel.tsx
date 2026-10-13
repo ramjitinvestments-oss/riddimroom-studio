@@ -1,9 +1,11 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useProject } from '../../context/ProjectContext';
+import { useAuth } from '../../context/AuthContext';
 import { Canvas2DRenderer } from '../../lib/export/canvas2dRenderer';
 import { validateRenderResult } from '../../lib/export/validate';
 import type { RenderProgress } from '../../lib/export/renderer';
 import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
+import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
 
 /**
  * Phase 1 Step 12 (Export engine), extended for genuine MP4 output. Drives
@@ -17,6 +19,7 @@ import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
  */
 export function ExportPanel() {
   const { project } = useProject();
+  const { currentUser: user, userProfile } = useAuth();
   const [status, setStatus] = useState<'idle' | 'rendering' | 'converting' | 'done' | 'error'>('idle');
   const [progress, setProgress] = useState<RenderProgress | null>(null);
   const [convertRatio, setConvertRatio] = useState(0);
@@ -24,9 +27,17 @@ export function ExportPanel() {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const busy = status === 'rendering' || status === 'converting';
+  const tier = userProfile?.licenseTier ?? 'free';
+  const remaining = user ? exportsRemainingToday(user.uid, tier) : 0;
+  const canExport = user ? canExportToday(user.uid, tier) : false;
 
   const handleExport = useCallback(async () => {
     if (!project || busy) return; // guards against duplicate/overlapping exports
+    if (user && !canExportToday(user.uid, tier)) {
+      setError(`Daily export limit reached (${tier === 'lifetime' ? 'lifetime' : 'free'} plan). Upgrade to Lifetime for more exports.`);
+      setStatus('error');
+      return;
+    }
     setStatus('rendering');
     setError(null);
     setProgress(null);
@@ -62,6 +73,7 @@ export function ExportPanel() {
 
       setDownloadUrl(URL.createObjectURL(mp4Blob));
       setStatus('done');
+      if (user) recordExport(user.uid);
     } catch (err: any) {
       if (err?.name === 'RenderAbortedError') {
         setStatus('idle');
@@ -72,7 +84,7 @@ export function ExportPanel() {
     } finally {
       abortRef.current = null;
     }
-  }, [project, downloadUrl, busy]);
+  }, [project, downloadUrl, busy, user, tier]);
 
   const handleCancel = () => {
     abortRef.current?.abort();
@@ -83,10 +95,14 @@ export function ExportPanel() {
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Export</h3>
+      <p className="text-[11px] text-white/40">
+        {user ? `${remaining} export${remaining === 1 ? '' : 's'} left today (${tier === 'lifetime' ? 'Lifetime' : 'Free'})` : 'Sign in to export.'}
+        {project.watermarkEnabled !== false ? ' · Watermark on (free).' : ' · No watermark.'}
+      </p>
       {!busy && (
         <button
           onClick={handleExport}
-          disabled={busy}
+          disabled={busy || !canExport}
           className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white self-start disabled:opacity-50"
         >
           Export video (MP4)
