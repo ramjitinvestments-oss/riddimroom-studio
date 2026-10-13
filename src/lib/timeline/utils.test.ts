@@ -14,11 +14,10 @@ import { MAX_MEDIA_SECONDS } from '../media/constants';
 import type { ImageTimelineItem, Project } from '../../types/timeline';
 
 /**
- * "Universal 30-second media standard" focused tests — item 9 of the
- * September 2026 spec ("Add focused tests for: ... project duration
- * limit"). `image` items are used as the fixture type throughout because
- * their duration is freely adjustable (no source-media trim window to also
- * account for), which isolates exactly the per-item cap being tested.
+ * v1 cap tests — MAX_MEDIA_SECONDS (600s / 10 min) replaces the old
+ * 30-second standard. `image` items are used as fixtures because their
+ * duration is freely adjustable (no source-media trim window), which
+ * isolates exactly the per-item cap being tested.
  */
 
 function makeItem(overrides: Partial<ImageTimelineItem> & { trackId: string }): ImageTimelineItem {
@@ -48,10 +47,10 @@ function projectWithImageItem(durationSeconds: number): { project: Project; item
   return { project, itemId: item.id };
 }
 
-describe('per-item 30-second cap (trimItemEnd / setItemDuration)', () => {
+describe('per-item cap (trimItemEnd / setItemDuration)', () => {
   it('trimItemEnd never lets an item exceed MAX_MEDIA_SECONDS, however far the new end time is dragged', () => {
     const { project, itemId } = projectWithImageItem(5);
-    const next = trimItemEnd(project, itemId, 500);
+    const next = trimItemEnd(project, itemId, MAX_MEDIA_SECONDS + 500);
     const updated = next.items.find((i) => i.id === itemId)!;
     expect(updated.endTime - updated.startTime).toBeCloseTo(MAX_MEDIA_SECONDS, 5);
   });
@@ -81,23 +80,23 @@ describe('per-item 30-second cap (trimItemEnd / setItemDuration)', () => {
   });
 });
 
-describe('project-level 30-second guard (projectDurationExceedsLimit)', () => {
+describe('project-level guard (projectDurationExceedsLimit)', () => {
   it('flags a project whose total duration exceeds the limit', () => {
-    const { project } = projectWithImageItem(31);
+    const { project } = projectWithImageItem(MAX_MEDIA_SECONDS + 1);
     expect(projectDurationExceedsLimit(project)).toBe(true);
   });
 
   it('does not flag a project within the limit', () => {
-    const { project } = projectWithImageItem(29);
+    const { project } = projectWithImageItem(MAX_MEDIA_SECONDS - 1);
     expect(projectDurationExceedsLimit(project)).toBe(false);
   });
 
   it('does not flag a project exactly at the limit', () => {
-    const { project } = projectWithImageItem(30);
+    const { project } = projectWithImageItem(MAX_MEDIA_SECONDS);
     expect(projectDurationExceedsLimit(project)).toBe(false);
   });
 
-  it('three 10-second clips placed back to back sum to exactly 30s and are allowed (spec example)', () => {
+  it('three 10-second clips placed back to back sum to 30s and are allowed', () => {
     let project = createEmptyProject({ ownerUid: 'test-uid' });
     const track = createTrack('image', 'Image', 0);
     project = addTrack(project, track);
@@ -108,14 +107,14 @@ describe('project-level 30-second guard (projectDurationExceedsLimit)', () => {
     expect(projectDurationExceedsLimit(project)).toBe(false);
   });
 
-  it('four 10-second clips placed back to back sum to 40s and ARE flagged', () => {
+  it('clips summing past the limit ARE flagged', () => {
     let project = createEmptyProject({ ownerUid: 'test-uid' });
     const track = createTrack('image', 'Image', 0);
     project = addTrack(project, track);
-    for (let i = 0; i < 4; i++) {
-      project = addItem(project, makeItem({ trackId: track.id, startTime: i * 10, endTime: i * 10 + 10, zIndex: i }));
-    }
-    expect(getProjectDuration(project)).toBeCloseTo(40, 5);
+    // Two clips: one MAX_MEDIA_SECONDS, one 10s after it -> total exceeds limit.
+    project = addItem(project, makeItem({ trackId: track.id, startTime: 0, endTime: MAX_MEDIA_SECONDS, zIndex: 0 }));
+    project = addItem(project, makeItem({ trackId: track.id, startTime: MAX_MEDIA_SECONDS, endTime: MAX_MEDIA_SECONDS + 10, zIndex: 1 }));
+    expect(getProjectDuration(project)).toBeCloseTo(MAX_MEDIA_SECONDS + 10, 5);
     expect(projectDurationExceedsLimit(project)).toBe(true);
   });
 });
