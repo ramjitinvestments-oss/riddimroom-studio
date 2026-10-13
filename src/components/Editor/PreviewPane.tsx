@@ -327,6 +327,43 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
 
       canvas.width = proj.canvasWidth;
       canvas.height = proj.canvasHeight;
+      // v1 PiP: sync EVERY active video item (main + overlays), not just
+      // the first. The clock is still driven by the first (main) video
+      // above; PiP elements are synced to their own trim window each
+      // frame so they stay in sync even when they start mid-timeline.
+      {
+        const videos = new Map<string, HTMLVideoElement>();
+        const activeVideoItems = getItemsByTrackType(proj, 'video').filter(
+          (i) => i.type === 'video' && t >= i.startTime && t < i.endTime,
+        );
+        for (const item of activeVideoItems) {
+          if (item.type !== 'video') continue;
+          const asset = proj.mediaAssets[item.mediaAssetId];
+          if (!asset) continue;
+          const el = getVideoEl(asset.id, asset.storageUrl);
+          videos.set(asset.id, el);
+          const target = item.trimStart + Math.max(0, t - item.startTime);
+          if (isPlayingRef.current) {
+            if (Math.abs(el.currentTime - target) > 0.35) {
+              try { el.currentTime = target; } catch { /* not seekable yet */ }
+            }
+            if (el.paused) el.play().catch(() => {});
+          } else {
+            el.pause();
+            if (Math.abs(el.currentTime - target) > 0.05) {
+              try { el.currentTime = target; } catch { /* ignore */ }
+            }
+          }
+          const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+          el.muted = item.muted;
+          el.volume = Math.max(0, Math.min(1, item.volume * fadeMul));
+        }
+        // Pause video elements whose items are no longer active.
+        videoElsRef.current.forEach((el, assetId) => {
+          if (!videos.has(assetId) && !el.paused) el.pause();
+        });
+        frameAssets = { ...frameAssets, videos };
+      }
       drawFrame(ctx, proj, t, frameAssets);
 
       rafRef.current = requestAnimationFrame(tick);
