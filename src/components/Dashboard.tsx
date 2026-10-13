@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { createProject, listProjects, deleteProject, type ProjectSummary } from '../lib/projects/persistence';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
+import BrandLogo from './BrandLogo';
 
 /**
  * Phase 1 Step 6 — authenticated home screen. Replaces the placeholder
@@ -75,7 +76,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
   return (
     <div className="min-h-screen bg-[#070707] text-white">
       <header className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-        <h1 className="text-lg font-black uppercase tracking-tight">RiddimRoom Studio</h1>
+        <BrandLogo size="sm" />
         <div className="flex items-center gap-3 text-xs text-white/50">
           <span>{userProfile?.email || currentUser?.email}</span>
           <span className="text-emerald-400">
@@ -88,6 +89,18 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
       </header>
 
       <main className="max-w-3xl mx-auto px-6 py-8">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <span className="px-3 py-1.5 rounded-full bg-white/10 border border-white/10 text-xs font-bold">
+            Plan: {userProfile?.licenseTier === 'lifetime' ? 'Lifetime' : 'Free'}
+          </span>
+          <span className="text-xs text-white/40">Free: 30s projects · 3 exports/day · watermark · Lifetime: up to 10 min · no watermark · all templates</span>
+        </div>
+        <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6 text-xs text-white/60 space-y-1">
+          <p className="font-bold text-white text-sm">How it works</p>
+          <p><span className="font-bold text-white">1. Capture / Upload</span> — record, upload, or pick a template.</p>
+          <p><span className="font-bold text-white">2. Edit + Captions</span> — trim, add captions, PiP overlay, text.</p>
+          <p><span className="font-bold text-white">3. Export</span> — MP4 (H.264 + AAC) or SRT/VTT captions.</p>
+        </div>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-white/60">Your projects</h2>
           <button
