@@ -48,7 +48,7 @@ function audioAsset(durationSeconds: number): MediaAsset {
   };
 }
 
-describe('appendMediaToTimeline — 30-second media acceptance', () => {
+describe('appendMediaToTimeline — media acceptance (v1: 600s cap)', () => {
   it('places a within-limit video at its full duration when no trim window is supplied', () => {
     const project = projectWithVideoAndAudioTracks();
     const next = appendMediaToTimeline(project, videoAsset(12));
@@ -68,10 +68,10 @@ describe('appendMediaToTimeline — 30-second media acceptance', () => {
   });
 });
 
-describe('appendMediaToTimeline — 30-second media detection / enforcement', () => {
+describe('appendMediaToTimeline — media detection / enforcement (v1: 600s cap)', () => {
   it('defensively caps an over-length asset at MAX_MEDIA_SECONDS even with no explicit trim window', () => {
     const project = projectWithVideoAndAudioTracks();
-    const next = appendMediaToTimeline(project, videoAsset(180)); // a real-world 3-minute upload, no trim options passed
+    const next = appendMediaToTimeline(project, videoAsset(900)); // a real-world 15-minute upload, no trim options passed
     const item = next.items[0];
     if (item.type !== 'video') throw new Error('expected a video item');
     expect(item.endTime - item.startTime).toBeCloseTo(MAX_MEDIA_SECONDS, 5);
@@ -88,9 +88,9 @@ describe('appendMediaToTimeline — 30-second media detection / enforcement', ()
     expect(item.endTime - item.startTime).toBeCloseTo(24, 5);
   });
 
-  it('clamps a supplied trim window that itself exceeds 30 seconds (defense in depth against a modal bug)', () => {
+  it('clamps a supplied trim window that itself exceeds the cap (defense in depth against a modal bug)', () => {
     const project = projectWithVideoAndAudioTracks();
-    const next = appendMediaToTimeline(project, videoAsset(200), { trimStart: 0, trimEnd: 50 });
+    const next = appendMediaToTimeline(project, videoAsset(900), { trimStart: 0, trimEnd: 700 });
     const item = next.items[0];
     if (item.type !== 'video') throw new Error('expected a video item');
     expect(item.endTime - item.startTime).toBeCloseTo(MAX_MEDIA_SECONDS, 5);
@@ -98,7 +98,7 @@ describe('appendMediaToTimeline — 30-second media detection / enforcement', ()
 
   it('clamps a camera-capture-style trim window the same way for audio', () => {
     const project = projectWithVideoAndAudioTracks();
-    const next = appendMediaToTimeline(project, audioAsset(31), { trimStart: 0, trimEnd: 31 });
+    const next = appendMediaToTimeline(project, audioAsset(900), { trimStart: 0, trimEnd: 700 });
     const item = next.items[0];
     if (item.type !== 'audio') throw new Error('expected an audio item');
     expect(item.endTime - item.startTime).toBeLessThanOrEqual(MAX_MEDIA_SECONDS + 0.001);
