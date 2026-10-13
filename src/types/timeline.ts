@@ -245,6 +245,20 @@ interface TimelineItemBase {
   locked?: boolean;
 }
 
+export type PipShape = 'circle' | 'rounded' | 'square';
+
+export interface PipSettings {
+  /** PiP shape. 'circle' = talking-head bubble, 'rounded' = rounded rect, 'square' = plain rect. */
+  shape: PipShape;
+  /** Border width in px (canvas space). 0 = no border. */
+  borderWidth: number;
+  borderColor: string;
+  /** Soft drop shadow. */
+  shadow: boolean;
+  /** True when this video item is a PiP overlay (drawn on top of the main video). */
+  isPip: boolean;
+}
+
 export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSettings {
   type: 'video';
   mediaAssetId: string;
@@ -257,6 +271,8 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
   crop?: CropSettings;
   colorGrade?: ColorGradeSettings;
   fade?: FadeSettings;
+  /** PiP overlay settings. Absent = normal full-frame video. */
+  pip?: PipSettings;
   animation?: AnimationSettings;
   /** "Final production fix" spec item 8 — see `MotionSettings`'s doc comment. Video's own motion (e.g. a subtle Ken Burns treatment layered on top of the clip's normal playback). */
   motion?: MotionSettings;
@@ -365,4 +381,10 @@ export interface Project {
   /** Epoch milliseconds. */
   createdAt: number;
   updatedAt: number;
+  /**
+   * v1 licensing: when true, the compositor draws a small "RiddimRoom Studio"
+   * watermark (free tier). Paid lifetime projects set this false.
+   * Defaults to true for backwards compat with pre-v1 projects (which have no field).
+   */
+  watermarkEnabled?: boolean;
 }
