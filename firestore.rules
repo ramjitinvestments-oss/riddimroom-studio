@@ -33,15 +33,41 @@ service cloud.firestore {
     }
 
     // Admin trust-root — console/backend managed only (ported from
-    // EventCam's /admins/{uid} model). Not used by anything in Phase 1 yet.
+    // EventCam's /admins/{uid} model). v1 hardening: owner-only read
+    // (was: any signed-in user could read any admin doc).
     match /admins/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if false;
+    }
+
+    // v1 licensing — written ONLY by the Stripe webhook handler in
+    // server.ts (Admin SDK bypasses rules). Clients read only their own.
+    match /licenses/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if false;
+    }
+
+    // v1 global config (kill-switch) — read by any signed-in user so the
+    // client can show "temporarily unavailable"; writes are console/backend only.
+    // The server enforces disabled=true in /api/user/status (rules alone
+    // cannot enforce a kill-switch, since the server bypasses rules).
+    match /config/global {
       allow read: if isSignedIn();
       allow write: if false;
     }
 
     match /projects/{projectId} {
-      allow read, write: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
-      allow create: if isSignedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow read: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
+      // v1: field validation on create/update — ownerUid immutable, name is a string.
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.name is string
+        && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isSignedIn()
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.name is string;
+      allow delete: if isSignedIn() && resource.data.ownerUid == request.auth.uid;
     }
   }
 }
