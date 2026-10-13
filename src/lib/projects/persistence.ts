@@ -64,6 +64,8 @@ export interface ProjectSummary {
  */
 export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Project {
   let project = createEmptyProject({ ownerUid, name, canvasWidth, canvasHeight });
+  // v1 free default: watermark on. Lifetime users can toggle it off per project.
+  project = { ...project, watermarkEnabled: true };
   const trackSpecs: Array<[Project['tracks'][number]['type'], string]> = [
     ['video', 'Main Video'],
     ['image', 'Watermark'],
