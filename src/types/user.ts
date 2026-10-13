@@ -76,4 +76,6 @@ export interface ClientUserProfile {
   videoCount: number;
   subscription: string;
   plan: string;
+  /** v1 licensing tier (free | lifetime). Defaults to 'free' when absent (pre-v1 profiles). */
+  licenseTier?: 'free' | 'lifetime';
 }
