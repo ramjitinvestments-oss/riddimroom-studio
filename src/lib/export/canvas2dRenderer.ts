@@ -216,46 +216,38 @@ export class Canvas2DRenderer implements Renderer {
 
         const activeItems: TimelineItem[] = getItemsAtTime(project, t);
 
-        const activeVideo = activeItems.find((i) => i.type === 'video');
+        // v1 PiP: sync EVERY active video item (main + overlays), not just
+        // the first. Each handle gets its own trim-window seek + gain.
+        // PiP items are muted by default (gain 0), so they never fight the
+        // main video's audio unless the user explicitly unmutes them.
+        const activeVideoAssetIds = new Set<string>();
+        const videosMap = new Map<string, HTMLVideoElement>();
         let frameActiveVideo: { assetId: string; element: HTMLVideoElement } | undefined;
-        if (activeVideo && activeVideo.type === 'video') {
-          const asset = project.mediaAssets[activeVideo.mediaAssetId];
-          if (asset) {
-            const handle = getVideoHandle(asset.id, asset.storageUrl);
-            if (lastActiveVideoId !== activeVideo.id) {
-              videoHandles.forEach((h, key) => {
-                if (!key.startsWith('audio:')) h.gain.gain.value = 0;
-              });
-              const targetTime = activeVideo.trimStart + Math.max(0, t - activeVideo.startTime);
-              try {
-                (handle.element as HTMLVideoElement).currentTime = targetTime;
-              } catch {
-                /* not seekable yet */
-              }
-              lastActiveVideoId = activeVideo.id;
-            }
-            handle.element.play().catch(() => {});
-            // "Universal 30-second media standard" spec item 6 — same fix
-            // as PreviewPane.tsx's live-playback branch: a video's own
-            // embedded-audio gain must apply its own `fade` field, mirroring
-            // the standalone AudioTimelineItem branch below (which already
-            // did this). Previously this line ignored fade entirely, so a
-            // video clip's audio fade-in/fade-out had no effect in the
-            // actual exported MP4 even though the visual fade rendered
-            // correctly.
-            const videoFadeMul = computeFadeOpacity(activeVideo.fade, t - activeVideo.startTime, activeVideo.endTime - t);
-            handle.gain.gain.value = activeVideo.muted ? 0 : activeVideo.volume * videoFadeMul;
-            frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
+        for (const item of activeItems) {
+          if (item.type !== 'video') continue;
+          const asset = project.mediaAssets[item.mediaAssetId];
+          if (!asset) continue;
+          activeVideoAssetIds.add(asset.id);
+          const handle = getVideoHandle(asset.id, asset.storageUrl);
+          const targetTime = item.trimStart + Math.max(0, t - item.startTime);
+          if (Math.abs((handle.element as HTMLVideoElement).currentTime - targetTime) > 0.35) {
+            try { (handle.element as HTMLVideoElement).currentTime = targetTime; } catch { /* not seekable yet */ }
           }
-        } else {
-          videoHandles.forEach((h, key) => {
-            if (!key.startsWith('audio:')) {
-              h.element.pause();
-              h.gain.gain.value = 0;
-            }
-          });
-          lastActiveVideoId = null;
+          handle.element.play().catch(() => {});
+          const videoFadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+          handle.gain.gain.value = item.muted ? 0 : item.volume * videoFadeMul;
+          videosMap.set(asset.id, handle.element as HTMLVideoElement);
+          if (!frameActiveVideo) frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
         }
+        // Pause video handles whose items are no longer active.
+        videoHandles.forEach((h, key) => {
+          if (!key.startsWith('audio:') && !activeVideoAssetIds.has(key)) {
+            h.element.pause();
+            h.gain.gain.value = 0;
+          }
+        });
+        void lastActiveVideoId;
+        lastActiveVideoId = activeItems.find((i) => i.type === 'video')?.id ?? null;
 
         const activeAudioIds = new Set<string>();
         activeItems.forEach((item) => {
@@ -292,7 +284,7 @@ export class Canvas2DRenderer implements Renderer {
           }
         });
 
-        drawFrame(ctx, project, t, { images: imageEls, activeVideo: frameActiveVideo });
+        drawFrame(ctx, project, t, { images: imageEls, activeVideo: frameActiveVideo, videos: videosMap });
 
         options.onProgress?.({ fraction: Math.min(1, t / totalSeconds), renderedSeconds: t, totalSeconds });
 
