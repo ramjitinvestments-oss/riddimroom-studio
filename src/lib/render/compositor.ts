@@ -47,6 +47,8 @@ export interface FrameAssets {
   images: Map<string, HTMLImageElement>;
   /** The currently-playing <video> element and which mediaAssetId it corresponds to, if any video item is active. */
   activeVideo?: { assetId: string; element: HTMLVideoElement } | null;
+  /** v1 PiP: all decoded <video> elements keyed by MediaAsset id. When present, drawFrame prefers this map so main + PiP videos can draw in the same frame. */
+  videos?: Map<string, HTMLVideoElement>;
 }
 
 // ---------------------------------------------------------------------------
@@ -682,7 +684,7 @@ function animationFor(
 
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -695,13 +697,61 @@ function drawVideoItem(
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
+  const isPip = !!item.pip?.isPip;
   applyTransformedDraw(
     ctx,
     (c) => {
+      // PiP clipping: circle / rounded-rect clip + optional border + shadow.
+      // Runs inside the item's own transform context, so it tracks position/rotation/scale.
+      const pip = isPip ? item.pip! : null;
+      if (pip) {
+        c.save();
+        if (pip.shadow) { c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 18; c.shadowOffsetY = 6; }
+        c.beginPath();
+        if (pip.shape === 'circle') {
+          // Circle inscribed in the video rect (uses min side so it stays round even for 16:9 sources).
+          const r = Math.min(w, h) / 2;
+          c.arc(0, 0, r, 0, Math.PI * 2);
+        } else if (pip.shape === 'rounded') {
+          const rad = Math.min(28, Math.min(w, h) * 0.12);
+          c.roundRect(-w / 2, -h / 2, w, h, rad);
+        } else {
+          c.rect(-w / 2, -h / 2, w, h);
+        }
+        c.clip();
+      }
       try {
-        c.drawImage(videoEl, -w / 2, -h / 2, w, h);
+        if (pip?.shape === 'circle') {
+          // Cover-fit inside the circle: draw so the circle is fully filled (no letterbox).
+          const r = Math.min(w, h) / 2;
+          const size = r * 2;
+          c.drawImage(videoEl, -size / 2, -size / 2, size, size);
+        } else {
+          c.drawImage(videoEl, -w / 2, -h / 2, w, h);
+        }
       } catch {
         // Video not yet seekable/decoded to this frame — skip this frame rather than throw.
+      }
+      if (pip) {
+        c.restore();
+        // Border drawn after restore (outside clip) so it is not clipped away.
+        if (pip.borderWidth > 0) {
+          c.save();
+          c.lineWidth = pip.borderWidth;
+          c.strokeStyle = pip.borderColor;
+          c.beginPath();
+          if (pip.shape === 'circle') {
+            const r = Math.min(w, h) / 2;
+            c.arc(0, 0, r, 0, Math.PI * 2);
+          } else if (pip.shape === 'rounded') {
+            const rad = Math.min(28, Math.min(w, h) * 0.12);
+            c.roundRect(-w / 2, -h / 2, w, h, rad);
+          } else {
+            c.rect(-w / 2, -h / 2, w, h);
+          }
+          c.stroke();
+          c.restore();
+        }
       }
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
       drawMotionOverlay(c, w / 2, h / 2, adjustment);
@@ -1013,8 +1063,11 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
     if (!item.visible) continue;
     switch (item.type) {
       case 'video': {
-        if (assets.activeVideo && assets.activeVideo.assetId === item.mediaAssetId) {
-          drawVideoItem(ctx, item, assets.activeVideo.element, canvasWidth, canvasHeight, timeSeconds);
+        const videoEl =
+          assets.videos?.get(item.mediaAssetId) ??
+          (assets.activeVideo && assets.activeVideo.assetId === item.mediaAssetId ? assets.activeVideo.element : undefined);
+        if (videoEl) {
+          drawVideoItem(ctx, item, videoEl, canvasWidth, canvasHeight, timeSeconds);
         }
         break;
       }
@@ -1040,5 +1093,52 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
       default:
         break;
     }
+  }
+
+  // v1 free-tier watermark: premium pill badge, bottom-right. Paid projects
+  // set watermarkEnabled=false. Undefined = true (pre-v1 projects default to free).
+  // Design: subtle dark pill (not a big logo), small yellow RiddimRoom dot + clean
+  // white text. Sits bottom-right so it never covers centered captions or PiP.
+  // Opacity + size kept low on purpose — free users should not hate it.
+  if (project.watermarkEnabled !== false) {
+    ctx.save();
+    const label = 'Made with RiddimRoom Studio';
+    const fontSize = Math.max(13, Math.round(canvasWidth * 0.016));
+    ctx.font = `600 ${fontSize}px Inter, Arial, Helvetica, sans-serif`;
+    const textWidth = ctx.measureText(label).width;
+    const dotRadius = Math.max(3.5, fontSize * 0.28);
+    const padX = Math.round(fontSize * 0.85);
+    const padY = Math.round(fontSize * 0.45);
+    const pillW = padX * 2 + dotRadius * 2 + 6 + textWidth;
+    const pillH = fontSize + padY * 2;
+    const margin = Math.round(canvasWidth * 0.018);
+    const x = canvasWidth - margin - pillW;
+    const y = canvasHeight - margin - pillH;
+    const radius = pillH / 2;
+    // Pill background
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(x, y, pillW, pillH, radius);
+    } else {
+      ctx.rect(x, y, pillW, pillH);
+    }
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.stroke();
+    // Yellow RiddimRoom dot
+    const dotX = x + padX + dotRadius;
+    const dotY = y + pillH / 2;
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, dotRadius, 0, Math.PI * 2);
+    ctx.fillStyle = '#FFD100';
+    ctx.fill();
+    // Label
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+    ctx.fillText(label, dotX + dotRadius + 6, dotY + 1);
+    ctx.restore();
   }
 }
