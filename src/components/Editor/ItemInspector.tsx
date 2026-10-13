@@ -219,6 +219,57 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
 
       {item.type === 'video' && (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Video overlay (PiP)</span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => patch({ pip: { shape: (item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded', borderWidth: (item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4, borderColor: (item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF', shadow: (item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true, isPip: true } })}
+              disabled={!!(item as { pip?: { isPip?: boolean } }).pip?.isPip}
+              className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40"
+            >
+              {(item as { pip?: { isPip?: boolean } }).pip?.isPip ? '✓ Is PiP overlay' : 'Make PiP overlay'}
+            </button>
+            {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
+              <button
+                onClick={() => patch({ pip: { shape: 'rounded', borderWidth: 0, borderColor: '#FFFFFF', shadow: false, isPip: false } })}
+                className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold"
+              >
+                Remove PiP
+              </button>
+            )}
+          </div>
+          {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
+            <>
+              <label className="flex flex-col gap-1 text-xs">
+                Shape
+                <select
+                  value={(item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded'}
+                  onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, shape: e.target.value } })}
+                  className="bg-white/10 rounded px-2 py-2 text-white min-h-11"
+                >
+                  <option value="circle">Circle</option>
+                  <option value="rounded">Rounded</option>
+                  <option value="square">Square</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs">
+                Border width ({(item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4}px)
+                <input type="range" min={0} max={12} step={1} value={(item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, borderWidth: Number(e.target.value) } })} />
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                Border color
+                <input type="color" value={(item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF'} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, borderColor: e.target.value } })} />
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={(item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, shadow: e.target.checked } })} />
+                Shadow
+              </label>
+            </>
+          )}
+        </div>
+      )}
+
+      {item.type === 'video' && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
           <span className="font-bold uppercase tracking-wide text-white/40">Audio</span>
           <div className="flex items-center gap-2">
           <label className="flex flex-col gap-1 flex-1">
