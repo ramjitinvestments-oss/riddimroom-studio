@@ -268,7 +268,10 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
             // Switching which video item is active: pause the previous one,
             // seek the new one to the correct source offset for this timeline position.
             videoElsRef.current.forEach((el) => el.pause());
-            const targetSourceTime = active.trimStart + Math.max(0, t - active.startTime);
+            // Speed (Phase 2.3): timeline seconds map to source seconds
+            // through the item's rate — source = trimStart + elapsed * speed
+            // (the inverse of the clock derivation below).
+            const targetSourceTime = active.trimStart + Math.max(0, t - active.startTime) * (active.speed || 1);
             if (Number.isFinite(targetSourceTime)) {
               try {
                 videoEl.currentTime = targetSourceTime;
@@ -287,6 +290,10 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // fields were already correctly respected by the real export
           // renderer, `canvas2dRenderer.ts`).
           videoEl.muted = active.muted;
+          // Speed (Phase 2.3): the element itself must run at the item's
+          // rate — the clock derivation below only stays truthful if the
+          // media advances `speed` source-seconds per wall-clock second.
+          videoEl.playbackRate = active.speed || 1;
           // "Universal 30-second media standard" spec item 6 — a video's
           // OWN embedded audio must respect its own `fade` field too, not
           // just the standalone AudioTimelineItem branch below (which
@@ -301,8 +308,11 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           if (isPlayingRef.current) {
             if (videoEl.paused) videoEl.play().catch(() => {});
             // Video-driven clock: derive global time from the element's own
-            // currentTime so audio and picture never drift apart.
-            const derived = active.startTime + (videoEl.currentTime - active.trimStart);
+            // currentTime so audio and picture never drift apart. Speed
+            // (Phase 2.3): divide the source offset by the item's rate —
+            // at 2x the element burns through source twice as fast, so one
+            // source second is only half a timeline second.
+            const derived = active.startTime + (videoEl.currentTime - active.trimStart) / (active.speed || 1);
             if (Number.isFinite(derived) && derived >= active.startTime) {
               t = derived;
               currentTimeRef.current = t;
@@ -423,7 +433,11 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           if (!asset) continue;
           const el = getVideoEl(asset.id, asset.storageUrl);
           videos.set(asset.id, el);
-          const target = item.trimStart + Math.max(0, t - item.startTime);
+          // Speed (Phase 2.3): same source-mapping as the main-video
+          // branch — elapsed timeline seconds consume `speed`x source
+          // seconds, and the element runs at the item's rate.
+          el.playbackRate = item.speed || 1;
+          const target = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
           if (isPlayingRef.current) {
             if (Math.abs(el.currentTime - target) > 0.35) {
               try { el.currentTime = target; } catch { /* not seekable yet */ }
@@ -502,7 +516,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       const asset = project.mediaAssets[active.mediaAssetId];
       if (asset) {
         const el = getVideoEl(asset.id, asset.storageUrl);
-        const targetSourceTime = active.trimStart + Math.max(0, currentTime - active.startTime);
+        const targetSourceTime = active.trimStart + Math.max(0, currentTime - active.startTime) * (active.speed || 1);
         try {
           el.currentTime = targetSourceTime;
         } catch {
