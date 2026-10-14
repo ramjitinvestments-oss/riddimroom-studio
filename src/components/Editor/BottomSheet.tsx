@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { X } from 'lucide-react';
 
 /**
  * "Final production fix" spec item 3a (mobile-first redesign) — a hand-
@@ -50,9 +51,9 @@ export function BottomSheet({
           <button
             onClick={onClose}
             title="Close"
-            className="min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-lg leading-none"
+            className="min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white leading-none"
           >
-            ✕
+            <X size={18} />
           </button>
         </div>
         <div className="overflow-y-auto p-4 flex flex-col gap-4">{children}</div>
