@@ -104,3 +104,47 @@ describe('appendMediaToTimeline — media detection / enforcement (v1: 600s cap)
     expect(item.endTime - item.startTime).toBeLessThanOrEqual(MAX_MEDIA_SECONDS + 0.001);
   });
 });
+
+describe('appendMediaToTimeline image placement (Add Overlay upload flow)', () => {
+  function imageAsset(): MediaAsset {
+    return {
+      id: 'asset-image-1',
+      kind: 'image',
+      storageUrl: 'https://example.com/logo.png',
+      fileName: 'logo.png',
+      sizeBytes: 100_000,
+      mimeType: 'image/png',
+      width: 512,
+      height: 512,
+      createdAt: 0,
+    };
+  }
+
+  function projectWithImageTrack() {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    project = addTrack(project, createTrack('image', 'Image', 0));
+    return project;
+  }
+
+  it('defaults to the centered full-frame placement every image has always gotten', () => {
+    const next = appendMediaToTimeline(projectWithImageTrack(), imageAsset());
+    const item = next.items[0];
+    if (item.type !== 'image') throw new Error('expected an image item');
+    expect(item.position).toEqual({ x: 50, y: 50 });
+    expect(item.scale).toBe(1);
+    expect(item.role).toBe('photo');
+  });
+
+  it('honors an explicit overlay placement + role', () => {
+    const next = appendMediaToTimeline(projectWithImageTrack(), imageAsset(), {
+      role: 'overlay',
+      position: { x: 82, y: 78 },
+      scale: 0.32,
+    });
+    const item = next.items[0];
+    if (item.type !== 'image') throw new Error('expected an image item');
+    expect(item.position).toEqual({ x: 82, y: 78 });
+    expect(item.scale).toBeCloseTo(0.32, 5);
+    expect(item.role).toBe('overlay');
+  });
+});
