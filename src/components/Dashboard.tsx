@@ -106,7 +106,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
           <button
             onClick={() => setShowRatioPicker(true)}
             disabled={isCreating}
-            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-white"
+            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
           >
             {isCreating ? 'Creating…' : 'New project'}
           </button>
@@ -114,7 +114,16 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
 
         {error && <p className="text-sm text-red-400 mb-4">{error}</p>}
 
-        {projects === null && !error && <p className="text-sm text-white/40">Loading projects…</p>}
+        {projects === null && !error && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" aria-label="Loading projects">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse">
+                <div className="h-4 w-2/3 rounded bg-white/10" />
+                <div className="h-3 w-1/2 rounded bg-white/5 mt-2" />
+              </div>
+            ))}
+          </div>
+        )}
 
         {projects !== null && projects.length === 0 && (
           <div className="text-center py-16 border border-dashed border-white/10 rounded-xl">
@@ -173,7 +182,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
                   key={ratio.id}
                   onClick={() => handleCreate(ratio)}
                   disabled={isCreating}
-                  className="text-left bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 hover:border-emerald-500/60 rounded-xl p-4 transition flex flex-col items-center gap-3"
+                  className="text-left bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 hover:border-gold/60 rounded-xl p-4 transition flex flex-col items-center gap-3"
                 >
                   <RatioGlyph ratioW={ratio.canvasWidth} ratioH={ratio.canvasHeight} />
                   <div className="text-center">
@@ -213,7 +222,7 @@ function RatioGlyph({ ratioW, ratioH }: { ratioW: number; ratioH: number }) {
         width={w}
         height={h}
         rx={2}
-        className="fill-emerald-500/20 stroke-emerald-400"
+        className="fill-gold/20 stroke-gold"
         strokeWidth={1.5}
       />
     </svg>
