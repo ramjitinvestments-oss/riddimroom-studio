@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeFadeOpacity } from './compositor';
+import { computeFadeOpacity, interpolateTransform } from './compositor';
+import type { Transform } from '../../types/timeline';
 
 /**
  * "Universal 30-second media standard" focused tests — spec item 9 ("Add
@@ -52,5 +53,43 @@ describe('computeFadeOpacity — clamped to min(3s, clip duration)', () => {
     const opacity = computeFadeOpacity({ fadeInDuration: -5, fadeOutDuration: -5 }, 1, 1);
     expect(opacity).toBeGreaterThanOrEqual(0);
     expect(opacity).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('interpolateTransform — keyframe-lite (Phase 2.3)', () => {
+  const base: Transform = { position: { x: 20, y: 30 }, scale: 1, rotation: 15, opacity: 1 };
+
+  it('returns the base transform itself when no end transform is set', () => {
+    expect(interpolateTransform(base, undefined, 0.5)).toBe(base);
+  });
+
+  it('hits the base at progress 0 and the end state at progress 1', () => {
+    const end = { position: { x: 80, y: 70 }, scale: 2, opacity: 0.4 };
+    const atStart = interpolateTransform(base, end, 0);
+    expect(atStart.position).toEqual({ x: 20, y: 30 });
+    expect(atStart.scale).toBe(1);
+    expect(atStart.opacity).toBe(1);
+    const atEnd = interpolateTransform(base, end, 1);
+    expect(atEnd.position).toEqual({ x: 80, y: 70 });
+    expect(atEnd.scale).toBe(2);
+    expect(atEnd.opacity).toBeCloseTo(0.4, 5);
+  });
+
+  it('lerps linearly at the midpoint and holds base rotation throughout', () => {
+    const end = { position: { x: 80, y: 70 }, scale: 2, opacity: 0.4 };
+    const mid = interpolateTransform(base, end, 0.5);
+    expect(mid.position).toEqual({ x: 50, y: 50 });
+    expect(mid.scale).toBeCloseTo(1.5, 5);
+    expect(mid.opacity).toBeCloseTo(0.7, 5);
+    expect(mid.rotation).toBe(15);
+  });
+
+  it('eased mode is smoothstep: slower than linear early, and clamps out-of-range progress', () => {
+    const end = { position: { x: 80, y: 70 }, scale: 2, opacity: 0.4, eased: true };
+    const quarter = interpolateTransform(base, end, 0.25);
+    // smoothstep(0.25) = 0.15625 < 0.25
+    expect(quarter.position.x).toBeCloseTo(20 + 60 * 0.15625, 5);
+    expect(interpolateTransform(base, end, 2).position).toEqual({ x: 80, y: 70 });
+    expect(interpolateTransform(base, end, -1).position).toEqual({ x: 20, y: 30 });
   });
 });
