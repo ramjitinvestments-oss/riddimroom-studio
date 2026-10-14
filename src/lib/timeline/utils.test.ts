@@ -9,6 +9,10 @@ import {
   setItemDuration,
   getProjectDuration,
   projectDurationExceedsLimit,
+  applyTransition,
+  getBoundaryTransition,
+  updateItem,
+  updateItemMotion,
 } from './utils';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
 import type { ImageTimelineItem, Project } from '../../types/timeline';
@@ -116,5 +120,60 @@ describe('project-level guard (projectDurationExceedsLimit)', () => {
     project = addItem(project, makeItem({ trackId: track.id, startTime: MAX_MEDIA_SECONDS, endTime: MAX_MEDIA_SECONDS + 10, zIndex: 1 }));
     expect(getProjectDuration(project)).toBeCloseTo(MAX_MEDIA_SECONDS + 10, 5);
     expect(projectDurationExceedsLimit(project)).toBe(true);
+  });
+});
+
+function projectWithTwoAdjacentImageItems(): { project: Project; firstId: string; secondId: string } {
+  let project = createEmptyProject({ ownerUid: 'test-uid' });
+  const track = createTrack('image', 'Image', 0);
+  project = addTrack(project, track);
+  const first = makeItem({ trackId: track.id, startTime: 0, endTime: 5, zIndex: 0 });
+  const second = makeItem({ trackId: track.id, startTime: 5, endTime: 10, zIndex: 1 });
+  project = addItem(project, first);
+  project = addItem(project, second);
+  return { project, firstId: first.id, secondId: second.id };
+}
+
+describe('getBoundaryTransition (Phase 2.1 Transitions panel read-side)', () => {
+  it('is undefined for back-to-back clips with no transition applied', () => {
+    const { project, firstId } = projectWithTwoAdjacentImageItems();
+    expect(getBoundaryTransition(project, firstId)).toBeUndefined();
+  });
+
+  it('reports the preset + overlap duration after applyTransition', () => {
+    const { project, firstId } = projectWithTwoAdjacentImageItems();
+    const next = applyTransition(project, firstId, 'fade');
+    const boundary = getBoundaryTransition(next, firstId);
+    expect(boundary?.preset).toBe('fade');
+    // 'fade' catalog default is 0.45s — the overlap applyTransition created.
+    expect(boundary?.durationSeconds).toBeCloseTo(0.45, 5);
+  });
+
+  it('is undefined for a lone hand-set entrance with no matching exit/overlap pair', () => {
+    const { project, firstId, secondId } = projectWithTwoAdjacentImageItems();
+    const next = updateItem(project, secondId, { animation: { entrance: 'fade' } });
+    expect(getBoundaryTransition(next, firstId)).toBeUndefined();
+  });
+});
+
+describe('updateItemMotion (Phase 2.1 shared motion setter)', () => {
+  it('sets the effect type on a media item, defaulting the rest of the motion shape', () => {
+    const { project, itemId } = projectWithImageItem(5);
+    const next = updateItemMotion(project, itemId, { type: 'ken-burns' });
+    const updated = next.items.find((i) => i.id === itemId) as ImageTimelineItem;
+    expect(updated.motion?.type).toBe('ken-burns');
+  });
+
+  it('merges partial patches without wiping the chosen effect', () => {
+    const { project, itemId } = projectWithImageItem(5);
+    let next = updateItemMotion(project, itemId, { type: 'parallax', direction: 'left' });
+    next = updateItemMotion(next, itemId, { intensity: 1.5 });
+    const updated = next.items.find((i) => i.id === itemId) as ImageTimelineItem;
+    expect(updated.motion).toEqual({ type: 'parallax', direction: 'left', intensity: 1.5 });
+  });
+
+  it('is a no-op (same project reference) for a missing item id', () => {
+    const { project } = projectWithImageItem(5);
+    expect(updateItemMotion(project, 'no-such-item', { type: 'flash' })).toBe(project);
   });
 });
