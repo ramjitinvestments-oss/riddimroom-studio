@@ -84,6 +84,29 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   isPlayingRef.current = isPlaying;
   onPlayingChangeRef.current = onPlayingChange;
 
+  // Media elements are created with crossOrigin='anonymous' because canvas
+  // export needs CORS-clean media — but if the Storage bucket has no CORS
+  // config for this app's origin, the browser refuses to load the media AT
+  // ALL (preview included): play() stalls at readyState 0, the canvas stays
+  // black, time never advances, and no sound plays, with every play() error
+  // swallowed. Fallback: on the first load error, retry the element once
+  // WITHOUT crossOrigin — plain (non-CORS) media still plays and is audible;
+  // only canvas capture is affected (tainted canvas) — and if the retry
+  // also fails, surface a visible banner instead of a silent black preview.
+  // (The durable fix remains applying `storage.cors.json` to the bucket.)
+  const corsRetriedRef = useRef<WeakSet<object>>(new WeakSet());
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const handleMediaLoadError = useCallback((el: HTMLMediaElement, storageUrl: string) => {
+    if (el.crossOrigin && !corsRetriedRef.current.has(el)) {
+      corsRetriedRef.current.add(el);
+      el.crossOrigin = null;
+      el.src = storageUrl;
+      el.load();
+      return;
+    }
+    setMediaError('Media failed to load — check your connection or file access, then try reloading the project.');
+  }, []);
+
   const getVideoEl = useCallback((assetId: string, storageUrl: string) => {
     let el = videoElsRef.current.get(assetId);
     if (!el) {
@@ -108,26 +131,39 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       el.style.pointerEvents = 'none';
       el.tabIndex = -1;
       document.body.appendChild(el);
+      const createdEl: HTMLVideoElement = el;
+      createdEl.addEventListener('error', () => handleMediaLoadError(createdEl, storageUrl));
       el.src = storageUrl;
       videoElsRef.current.set(assetId, el);
     }
     return el;
-  }, []);
+  }, [handleMediaLoadError]);
 
   const getImageEl = useCallback((assetId: string, storageUrl: string) => {
     let el = imageElsRef.current.get(assetId);
     if (!el) {
       el = new Image();
       el.crossOrigin = 'anonymous';
-      // Diagnostic only — this does not change what gets drawn. A failed
-      // load (network error, 404, or a Storage bucket missing CORS config
-      // for this origin) leaves `el` in the "broken" state (complete=true,
-      // naturalWidth=0); `drawFrame`'s `isImageReady` check in
-      // compositor.ts is what actually keeps a broken image out of
-      // `ctx.drawImage()`, so this handler only surfaces the failure for
-      // debugging rather than papering over it.
-      el.onerror = () => {
+      // A failed load (network error, 404, or a Storage bucket missing
+      // CORS config for this origin) leaves `el` in the "broken" state
+      // (complete=true, naturalWidth=0); `drawFrame`'s `isImageReady`
+      // check in compositor.ts keeps a broken image out of
+      // `ctx.drawImage()` — this handler first retries without CORS
+      // (see below), then surfaces the failure to the user.
+      const createdImg: HTMLImageElement = el;
+      createdImg.onerror = () => {
+        // Same CORS fallback as the media elements above: a crossOrigin
+        // image that the bucket won't serve CORS-clean is refused entirely;
+        // retry once without it (the compositor can still draw it; only
+        // canvas pixel capture is affected).
+        if (createdImg.crossOrigin && !corsRetriedRef.current.has(createdImg)) {
+          corsRetriedRef.current.add(createdImg);
+          createdImg.crossOrigin = null;
+          createdImg.src = storageUrl;
+          return;
+        }
         console.warn(`[PreviewPane] failed to load image asset "${assetId}" from ${storageUrl}`);
+        setMediaError('An image failed to load — check your connection or file access.');
       };
       el.src = storageUrl;
       imageElsRef.current.set(assetId, el);
@@ -143,11 +179,13 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       el.preload = 'auto';
       el.style.display = 'none';
       document.body.appendChild(el);
+      const createdEl: HTMLAudioElement = el;
+      createdEl.addEventListener('error', () => handleMediaLoadError(createdEl, storageUrl));
       el.src = storageUrl;
       audioElsRef.current.set(assetId, el);
     }
     return el;
-  }, []);
+  }, [handleMediaLoadError]);
 
   // Main render/clock loop. Runs continuously while mounted so the canvas
   // stays correct after edits even while paused, not just while playing.
@@ -365,6 +403,24 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         frameAssets = { ...frameAssets, videos };
       }
       drawFrame(ctx, proj, t, frameAssets);
+
+      // If the main video's media hasn't decoded a frame yet (still
+      // loading, or failed outright), paint a simple slate over the canvas
+      // so a stalled/failed load reads as feedback instead of a frozen
+      // black rectangle that looks like a hang.
+      if (active && active.type === 'video') {
+        const asset = proj.mediaAssets[active.mediaAssetId];
+        const el = asset ? videoElsRef.current.get(asset.id) : undefined;
+        if (el && el.readyState < 2) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(255,255,255,0.5)';
+          ctx.font = `${Math.max(14, Math.round(canvas.height * 0.035))}px Arial, Helvetica, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(el.error ? 'Media failed to load' : 'Loading…', canvas.width / 2, canvas.height / 2);
+          ctx.restore();
+        }
+      }
 
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -693,6 +749,14 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         <div className="absolute inset-0 bg-black rounded-lg overflow-hidden border border-white/10">
           <canvas ref={canvasRef} className="w-full h-full" />
         </div>
+        {mediaError && (
+          <div className="absolute top-2 left-2 right-2 z-10 flex items-start justify-between gap-2 rounded-md bg-red-600/90 px-3 py-2 text-xs text-white shadow-lg">
+            <span>{mediaError}</span>
+            <button onClick={() => setMediaError(null)} aria-label="Dismiss" className="shrink-0 font-bold leading-none">
+              ×
+            </button>
+          </div>
+        )}
         {selectedBounds && (
           <div
             className="absolute border-2 border-emerald-400 cursor-move"
