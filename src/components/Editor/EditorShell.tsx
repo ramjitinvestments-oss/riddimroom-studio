@@ -21,8 +21,9 @@ import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
+import { addPipOverlay } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
-import type { MediaAsset } from '../../types/timeline';
+import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 
 /**
  * Phase 1 Step 6 (Shared editor shell) — the actual authenticated editor
@@ -100,15 +101,50 @@ function EditorInner({ uid }: { uid: string }) {
   }, [project]);
 
   const handleAssetUploaded = useCallback(
-    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number }) => {
+    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; role?: AudioTimelineItem['role'] }) => {
       // First-run flow: the moment the first clip lands in an empty
       // project, move the user to Step 2 (Edit) instead of leaving them
       // on the upload screen wondering what to do next.
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
-      mutate((p) => appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd }));
+      mutate((p) =>
+        appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role }),
+      );
       if (wasEmpty) setStep(2);
     },
     [mutate],
+  );
+
+  // Tweaks round — "Add Overlay" uploads (MediaImportPanel purpose
+  // 'overlay'). Videos go through the SAME PiP insert path as PipPanel
+  // (bottom-right layout preset, muted by default, draggable/resizable
+  // on canvas afterwards); images land as corner-placed overlay items on
+  // the image track, sized like an overlay rather than a full-frame
+  // photo. Either way the overlay starts at the playhead.
+  const handleOverlayAssetUploaded = useCallback(
+    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number }) => {
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      if (asset.kind === 'video') {
+        mutate((p) =>
+          addPipOverlay(p, asset, {
+            layoutId: 'bottom-right',
+            atTime: currentTime,
+            trimStart: options?.trimStart,
+            trimEnd: options?.trimEnd,
+          }),
+        );
+      } else if (asset.kind === 'image') {
+        mutate((p) =>
+          appendMediaToTimeline(p, asset, {
+            atTime: currentTime,
+            role: 'overlay',
+            position: { x: 82, y: 78 },
+            scale: 0.32,
+          }),
+        );
+      }
+      if (wasEmpty) setStep(2);
+    },
+    [mutate, currentTime],
   );
 
   const handleAddExistingAssetToTimeline = useCallback(
@@ -209,6 +245,7 @@ function EditorInner({ uid }: { uid: string }) {
           canvasWidth={project.canvasWidth}
           canvasHeight={project.canvasHeight}
           onAssetUploaded={handleAssetUploaded}
+          onOverlayAssetUploaded={handleOverlayAssetUploaded}
         />
       </section>
 
@@ -251,6 +288,21 @@ function EditorInner({ uid }: { uid: string }) {
 
   const sidePanel = (
     <>
+      {/* Tweaks round — Step 2 gets the same three clear add actions as
+          Step 1's import panel (before this, adding media mid-edit meant
+          going back to Step 1). Same MediaImportPanel component and the
+          same upload handlers — never a second upload system. */}
+      <section className="flex flex-col gap-2">
+        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Add media</h3>
+        <MediaImportPanel
+          uid={uid}
+          canvasWidth={project.canvasWidth}
+          canvasHeight={project.canvasHeight}
+          onAssetUploaded={handleAssetUploaded}
+          onOverlayAssetUploaded={handleOverlayAssetUploaded}
+        />
+      </section>
+
       {selectedItem ? (
         <section>
           <h3 className="text-xs font-bold uppercase tracking-wide text-white/50 mb-2">Selected item</h3>
