@@ -105,9 +105,20 @@ const LIFETIME_DAILY_QUOTA = 10;
 async function getLicenseTier(uid: string): Promise<'free' | 'lifetime'> {
   try {
     const doc = await db.collection('licenses').doc(uid).get();
-    if (!doc.exists) return 'free';
-    const data = doc.data() as { tier?: string; active?: boolean };
-    if (data.tier === 'lifetime' && data.active !== false) return 'lifetime';
+    if (doc.exists) {
+      const data = doc.data() as { tier?: string; active?: boolean };
+      if (data.tier === 'lifetime' && data.active !== false) return 'lifetime';
+    }
+    // Admin/owner grant: `admins/{uid}` is this codebase's existing admin
+    // concept (the same collection /api/user/status already consults for
+    // the global kill-switch bypass). Admins resolve to the lifetime tier
+    // so the studio owner is never bitten by free-tier gates (watermark,
+    // export cap, transcription quota) on their own app. This is the
+    // single tier choke point — /api/license, /api/user/status,
+    // /api/transcribe and /api/checkout all resolve through here, and the
+    // client only ever displays/soft-gates on what this returns.
+    const adminDoc = await db.collection('admins').doc(uid).get();
+    if (adminDoc.exists) return 'lifetime';
     return 'free';
   } catch {
     return 'free';
