@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Play } from 'lucide-react';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 
 /**
@@ -142,8 +143,8 @@ export function TrimSelectModal({ file, kind, durationSeconds, onConfirm, onCanc
             </span>
             <input type="range" min={0} max={safeDuration} step={0.1} value={end} onChange={(e) => handleEndChange(Number(e.target.value))} />
           </label>
-          <button onClick={previewSelection} className="self-start min-h-9 text-xs text-emerald-400 hover:text-emerald-300 underline">
-            ▶ Preview selection
+          <button onClick={previewSelection} className="self-start min-h-9 text-xs text-gold hover:text-gold-bright underline flex items-center gap-1">
+            <Play size={12} /> Preview selection
           </button>
         </div>
 
@@ -163,7 +164,7 @@ export function TrimSelectModal({ file, kind, durationSeconds, onConfirm, onCanc
           <button
             onClick={() => onConfirm({ trimStart: start, trimEnd: end })}
             disabled={overLimit || tooShort}
-            className="min-h-11 px-4 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-white"
+            className="min-h-11 px-4 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >
             Use This Clip
           </button>
