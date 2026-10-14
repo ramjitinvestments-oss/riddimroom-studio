@@ -272,7 +272,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
               <span className="flex-1 truncate text-white/70">{upload.fileName}</span>
               {upload.status === 'uploading' && (
                 <div className="w-24 h-1.5 bg-white/10 rounded overflow-hidden">
-                  <div className="h-full bg-emerald-500" style={{ width: `${Math.round(upload.progress * 100)}%` }} />
+                  <div className="h-full bg-gold" style={{ width: `${Math.round(upload.progress * 100)}%` }} />
                 </div>
               )}
               {upload.status === 'done' && <span className="text-emerald-400 font-bold">Done</span>}
