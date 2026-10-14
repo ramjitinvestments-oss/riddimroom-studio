@@ -96,16 +96,23 @@ function EditorInner({ uid }: { uid: string }) {
 
   const handleAssetUploaded = useCallback(
     (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number }) => {
+      // First-run flow: the moment the first clip lands in an empty
+      // project, move the user to Step 2 (Edit) instead of leaving them
+      // on the upload screen wondering what to do next.
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
       mutate((p) => appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd }));
+      if (wasEmpty) setStep(2);
     },
     [mutate],
   );
 
   const handleAddExistingAssetToTimeline = useCallback(
     (asset: MediaAsset) => {
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
       const selectedVariantId = bgVariantByAssetId[asset.id];
       const assetToAdd = (selectedVariantId && project?.mediaAssets[selectedVariantId]) || asset;
       mutate((p) => appendMediaToTimeline(p, assetToAdd, { atTime: currentTime }));
+      if (wasEmpty) setStep(2);
     },
     [mutate, currentTime, bgVariantByAssetId, project],
   );
@@ -335,8 +342,8 @@ function EditorInner({ uid }: { uid: string }) {
               ↻ <span className="hidden md:inline">Redo</span>
             </button>
           </div>
-          {saveError && <span className="hidden sm:inline text-red-400">{saveError}</span>}
-          <span className="hidden md:inline text-white/30">
+          {saveError && <span className="text-red-400">{saveError}</span>}
+          <span className="text-white/30">
             {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}
           </span>
           <button
@@ -429,7 +436,10 @@ function EditorInner({ uid }: { uid: string }) {
               <button onClick={() => setStep(3)} className="min-h-11 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-bold">Continue to Export →</button>
             </div>
           </main>
-          <aside className="flex flex-col gap-4">{sidePanel}</aside>
+          {/* Hidden below lg: on mobile this panel mounts once, inside the
+              BottomSheet below — rendering it inline too double-mounted
+              every panel (duplicate stateful widgets) on phones. */}
+          <aside className="hidden lg:flex flex-col gap-4">{sidePanel}</aside>
         </div>
       )}
 
@@ -447,7 +457,7 @@ function EditorInner({ uid }: { uid: string }) {
             />
             <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold">← Back to Edit</button>
           </main>
-          <aside className="flex flex-col gap-4">{exportPanel}</aside>
+          <aside className="hidden lg:flex flex-col gap-4">{exportPanel}</aside>
         </div>
       )}
 
