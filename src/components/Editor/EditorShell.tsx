@@ -476,7 +476,7 @@ function EditorInner({ uid }: { uid: string }) {
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
           <div className="flex flex-col gap-4">{libraryPanel}</div>
           <aside className="flex flex-col gap-4">
-            <TemplatesPanel />
+            <TemplatesPanel currentTime={currentTime} />
             <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
               <p className="font-bold text-white text-sm">How it works</p>
               <p>1. Upload or record your clip.</p>
