@@ -51,11 +51,22 @@ export class Canvas2DRenderer implements Renderer {
       throw new Error('This project has no timeline items to export.');
     }
 
+    // Export-quality output size (Phase 2.1): defaults to the project's
+    // own canvas dimensions exactly as before. When the picker asked for a
+    // smaller output, the canvas IS that size and the compositor — which
+    // lays out every frame in project coordinates (see drawFrame) — is
+    // brought to it with a base scale transform set once here; every
+    // per-item transform inside drawFrame composes on top of it.
+    const outputWidth = options.output?.width ?? project.canvasWidth;
+    const outputHeight = options.output?.height ?? project.canvasHeight;
     const canvas = document.createElement('canvas');
-    canvas.width = project.canvasWidth;
-    canvas.height = project.canvasHeight;
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('This browser could not create a 2D rendering context for export.');
+    if (outputWidth !== project.canvasWidth || outputHeight !== project.canvasHeight) {
+      ctx.setTransform(outputWidth / project.canvasWidth, 0, 0, outputHeight / project.canvasHeight, 0, 0);
+    }
 
     const audioCtx = new AudioContext();
     const destination = audioCtx.createMediaStreamDestination();
@@ -192,7 +203,9 @@ export class Canvas2DRenderer implements Renderer {
     // that as a clear message instead of an opaque browser exception.
     let canvasStream: MediaStream;
     try {
-      canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(project.frameRate);
+      canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(
+        options.output?.frameRate ?? project.frameRate,
+      );
     } catch {
       cleanup();
       throw new Error(
@@ -202,7 +215,15 @@ export class Canvas2DRenderer implements Renderer {
     const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
 
     const mimeType = pickSupportedMimeType();
-    const recorder = new MediaRecorder(combinedStream, { mimeType });
+    // Export-quality bitrates (Phase 2.1): pinned only when the caller
+    // resolved output settings; without them MediaRecorder keeps its
+    // browser-default bitrate, as before.
+    const recorderOptions: MediaRecorderOptions = { mimeType };
+    if (options.output) {
+      recorderOptions.videoBitsPerSecond = options.output.videoBitsPerSecond;
+      recorderOptions.audioBitsPerSecond = options.output.audioBitsPerSecond;
+    }
+    const recorder = new MediaRecorder(combinedStream, recorderOptions);
     const chunks: Blob[] = [];
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
