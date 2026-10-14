@@ -5,31 +5,34 @@ import { canExportToday, exportsRemainingToday, type LicenseTier } from '../../l
 
 interface LicenseInfo { tier: LicenseTier; watermarkEnabled: boolean; checkoutAvailable: boolean; }
 
-function useLicense(): LicenseInfo & { loading: boolean; error: string | null; refresh: () => void } {
+function useLicense(): LicenseInfo & { loading: boolean; refresh: () => void } {
   const { currentUser: user, idToken } = useAuth();
   const [info, setInfo] = useState<LicenseInfo>({ tier: 'free', watermarkEnabled: true, checkoutAvailable: false });
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     if (!user) { setLoading(false); return; }
-    setLoading(true); setError(null);
+    setLoading(true);
     try {
       const res = await fetch('/api/license', { headers: idToken ? { Authorization: `Bearer ${idToken}` } : {} });
-      if (!res.ok) throw new Error(`License lookup failed (${res.status})`);
+      // On builds without the API (e.g. the static preview) the lookup
+      // 404s — that's expected there, not a user-facing error. Quietly
+      // keep the Free defaults instead of alarming the user with a
+      // "License lookup failed (404)" banner.
+      if (!res.ok) return;
       const data = await res.json();
       setInfo({ tier: data.tier ?? 'free', watermarkEnabled: data.watermarkEnabled ?? true, checkoutAvailable: !!data.checkoutAvailable });
-    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'License lookup failed.'); }
+    } catch { /* keep Free defaults */ }
     finally { setLoading(false); }
   }, [user, idToken]);
   useEffect(() => { void refresh(); }, [refresh]);
-  return { ...info, loading, error, refresh };
+  return { ...info, loading, refresh };
 }
 
-/** v1 Licensing — free vs one-time lifetime. Upgrade button calls /api/checkout (stub until Stripe keys are set). */
+/** v1 Licensing — free vs one-time lifetime. Upgrade button calls /api/checkout. */
 export function LicensingPanel() {
   const { currentUser: user, idToken } = useAuth();
   const { project, mutate } = useProject();
-  const { tier, loading, error, checkoutAvailable } = useLicense();
+  const { tier, loading, checkoutAvailable } = useLicense();
   const [busy, setBusy] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
@@ -42,11 +45,18 @@ export function LicensingPanel() {
     setBusy(true); setCheckoutError(null); setCheckoutUrl(null);
     try {
       const res = await fetch('/api/checkout', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}) }, body: JSON.stringify({}) });
+      // Same static-build guard as TranscribePanel: no /api routes means
+      // an HTML 404 page, not JSON — answer in human terms, never a raw
+      // parse error or internal setup instructions.
+      const isJson = (res.headers.get('content-type') || '').includes('application/json');
+      if (!res.ok || !isJson) {
+        setCheckoutError("Checkout isn't live on this preview yet.");
+        return;
+      }
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Checkout failed (${res.status})`);
       if (data.checkoutUrl) setCheckoutUrl(data.checkoutUrl);
-      else setCheckoutError('Checkout is not configured yet. Add STRIPE_* keys on the server to enable it.');
-    } catch (e: unknown) { setCheckoutError(e instanceof Error ? e.message : 'Checkout failed.'); }
+      else setCheckoutError(data.error || "Checkout isn't live on this preview yet.");
+    } catch (e: unknown) { setCheckoutError(e instanceof SyntaxError ? "Checkout isn't live on this preview yet." : e instanceof Error ? e.message : 'Checkout failed.'); }
     finally { setBusy(false); }
   };
 
@@ -61,7 +71,6 @@ export function LicensingPanel() {
       {loading ? <p className="text-xs text-white/40">Checking plan…</p> : (
         <p className="text-xs text-white/70">Current plan: <span className="font-bold text-white">{isPaid ? 'Lifetime' : 'Free'}</span></p>
       )}
-      {error && <p className="text-xs text-amber-400">{error} — showing Free defaults.</p>}
       <ul className="text-xs text-white/60 space-y-1">
         <li>• Free: 30s projects · {remaining === null ? '—' : `${remaining} export${remaining === 1 ? '' : 's'} left today`} · 2 transcriptions/day · watermark on</li>
         <li>• Lifetime — $35 one-time: up to 10 min projects · 10 transcriptions/day · no watermark · all templates</li>
@@ -69,11 +78,10 @@ export function LicensingPanel() {
       {!isPaid && (
         <>
           <button onClick={handleCheckout} disabled={busy} className="px-4 py-3 rounded-lg bg-white text-black font-bold text-sm min-h-11 disabled:opacity-50">
-            {busy ? 'Starting checkout…' : checkoutAvailable ? 'Upgrade to Lifetime — $35 one-time' : 'Upgrade to Lifetime — $35 one-time (setup needed)'}
+            {busy ? 'Starting checkout…' : 'Upgrade to Lifetime — $35 one-time'}
           </button>
           {checkoutError && <p className="text-xs text-amber-400">{checkoutError}</p>}
           {checkoutUrl && <p className="text-xs text-white/70">Checkout link: <a className="underline break-all" href={checkoutUrl} target="_blank" rel="noreferrer">{checkoutUrl}</a></p>}
-          <p className="text-[11px] text-white/30">Stripe Checkout is a stub until STRIPE_SECRET_KEY + STRIPE_PRICE_ID_LIFETIME are set on the server. No payment is taken in this build.</p>
         </>
       )}
       {isPaid && <p className="text-xs text-emerald-400">Lifetime unlocked — no watermark, full templates, longer videos.</p>}
