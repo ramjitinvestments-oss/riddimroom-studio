@@ -15,6 +15,8 @@ import { BackgroundRemovalButton } from './BackgroundRemovalButton';
 import { BottomSheet } from './BottomSheet';
 import { PipPanel } from './PipPanel';
 import { TemplatesPanel } from './TemplatesPanel';
+import { TransitionsPanel } from './TransitionsPanel';
+import { EffectsPanel } from './EffectsPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
@@ -264,6 +266,19 @@ function EditorInner({ uid }: { uid: string }) {
         </>
       )}
 
+      {/* Phase 2.1 — Transitions + Effects as first-class Step 2 panels.
+          They act on the selected item (guided empty states when nothing
+          eligible is selected) and live in this same `sidePanel` node, so
+          they mount in the desktop aside AND the mobile BottomSheet,
+          exactly like every other panel here — never a second copy. */}
+      <section>
+        <TransitionsPanel item={selectedItem} />
+      </section>
+
+      <section>
+        <EffectsPanel item={selectedItem} />
+      </section>
+
       <section>
         <PipPanel />
       </section>
@@ -394,7 +409,7 @@ function EditorInner({ uid }: { uid: string }) {
           </React.Fragment>
         ))}
         <span className="ml-auto hidden sm:inline text-[11px] text-white/30">
-          {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, add captions, PiP, text' : 'Choose format, export, done'}
+          {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, transitions, effects, captions, PiP' : 'Choose format and quality, export, done'}
         </span>
       </nav>
 
