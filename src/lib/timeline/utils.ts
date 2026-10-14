@@ -632,6 +632,39 @@ export function updateItemMotion(project: Project, itemId: string, fields: Parti
 }
 
 // ---------------------------------------------------------------------------
+// Playback speed (Phase 2.3) — `VideoTimelineItem.speed` has been in the
+// data model since the Bolt port and every trim/split helper already
+// converts timeline deltas to source seconds through it (`delta * speed`),
+// which fixes the invariant this setter must preserve:
+//
+//     timeline duration = (trimEnd - trimStart) / speed
+//
+// Until now nothing could CHANGE speed, so the invariant only ever held
+// trivially at speed 1. `setItemSpeed` is the one write path: it anchors
+// `startTime`, leaves the trim window untouched, and re-derives `endTime`
+// from the new rate. The per-item duration cap (`MAX_MEDIA_SECONDS`, the
+// same one `trimItemEnd` enforces) still applies, so slowing a long clip
+// far down clamps its timeline duration at the cap rather than breaking
+// the product limit (the clip then ends at the cap, before its trim
+// window finishes playing — the same trade-off the cap already imposes
+// on over-length items everywhere else).
+// ---------------------------------------------------------------------------
+
+/** Slowest/fastest rates the speed UI offers; `setItemSpeed` clamps to this range. */
+export const SPEED_MIN = 0.25;
+export const SPEED_MAX = 2;
+
+/** Sets a video item's playback speed, re-deriving its timeline `endTime` from its (unchanged) trim window. No-op for non-video items or a missing id. */
+export function setItemSpeed(project: Project, itemId: string, newSpeed: number): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || item.type !== 'video') return project;
+  const speed = Math.max(SPEED_MIN, Math.min(SPEED_MAX, Number.isFinite(newSpeed) && newSpeed > 0 ? newSpeed : 1));
+  const sourceSpan = Math.max(0.1, item.trimEnd - item.trimStart);
+  const duration = Math.max(0.1, Math.min(MAX_MEDIA_SECONDS, sourceSpan / speed));
+  return updateItem(project, itemId, { speed, endTime: item.startTime + duration });
+}
+
+// ---------------------------------------------------------------------------
 // Layer order — z-index reordering for overlay composition
 //
 // `zIndex` has always existed on every item (see `types/timeline.ts`'s
