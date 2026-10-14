@@ -1,5 +1,14 @@
 @import "tailwindcss";
 
+/* Locked brand system (v1): near-black surfaces, gold #FFD100 as the one
+   primary accent, cream text. Emerald/green is reserved for success states
+   only — never for primary actions, selection, or progress. */
+@theme {
+  --color-gold: #ffd100;
+  --color-gold-bright: #ffe14d;
+  --color-cream: #fff6d8;
+}
+
 :root {
   color-scheme: dark;
 }
@@ -9,4 +18,72 @@ body {
   background: #070707;
   color: #fff;
   font-family: system-ui, -apple-system, sans-serif;
+}
+
+::selection {
+  background: #ffd100;
+  color: #000;
+}
+
+/* Thin, dark scrollbars that don't fight the near-black UI. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 209, 0, 0.45);
+}
+
+/* Range inputs — gold accent everywhere (sliders, scrub bar, volume).
+   Native `accent-color` covers checkbox/radio; the webkit/moz rules give
+   range tracks a slim dark rail with a gold thumb so every slider reads
+   as part of the same system instead of the browser default blue/grey. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  outline: none;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #ffd100;
+  border: none;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #ffd100;
+  border: none;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+}
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: #ffd100;
 }
