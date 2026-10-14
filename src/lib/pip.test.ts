@@ -44,3 +44,24 @@ describe('addPipOverlay', () => {
     expect((pip as { pip?: { shape?: string } } | undefined)?.pip?.shape).toBe('square');
   });
 });
+
+describe('addPipOverlay with a trim window (Add Overlay upload flow)', () => {
+  it('plays the supplied source window instead of the asset’s head', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { trimStart: 3, trimEnd: 7 });
+    const pip = next.items.find((i) => i.type === 'video' && (i as { pip?: { isPip?: boolean } }).pip?.isPip);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.trimStart).toBe(3);
+    expect(pip.trimEnd).toBe(7);
+    expect(pip.endTime - pip.startTime).toBeCloseTo(4, 5);
+  });
+
+  it('without a window, behavior is unchanged (whole asset from 0)', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), {});
+    const pip = next.items.find((i) => i.type === 'video' && (i as { pip?: { isPip?: boolean } }).pip?.isPip);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.trimStart).toBe(0);
+    expect(pip.trimEnd).toBe(10);
+  });
+});
