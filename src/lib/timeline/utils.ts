@@ -12,6 +12,7 @@ import type {
   AnimationSettings,
   CaptionTimelineItem,
   FadeSettings,
+  MotionSettings,
   Project,
   Track,
   TrackType,
@@ -576,6 +577,58 @@ export function applyTransition(project: Project, itemId: string, preset: Animat
   next_ = updateItem(next_, item.id, { animation: { ...itemAnimation, exit: preset } });
   next_ = updateItem(next_, next.id, { animation: { ...nextAnimation, entrance: preset } });
   return next_;
+}
+
+/**
+ * The boundary transition currently applied between `itemId` and its
+ * adjacent next item, if any — the read-side companion to `applyTransition`
+ * (which is what the Transitions panel uses to highlight the active preset
+ * card). A boundary transition counts as applied only when ALL THREE hold:
+ * `itemId`'s exit preset and the next item's entrance preset are the same
+ * non-'none' preset (the pair `applyTransition` writes), AND the two items
+ * actually overlap in time (the shift `applyTransition` performs). A lone
+ * entrance/exit set by hand in the inspector — with no matching partner or
+ * no overlap — is a single-clip animation, not a boundary transition, and
+ * returns undefined here.
+ *
+ * Note there is deliberately no `removeTransition` counterpart:
+ * `applyTransition` shifts the next item earlier by the transition
+ * duration, and the item's pre-transition position/gap is not recorded
+ * anywhere, so the shift cannot be reversed safely after the fact (the
+ * original gap is unknowable — `findAdjacentNextItem` tolerates up to 2s).
+ * Undo is the supported way back.
+ */
+export function getBoundaryTransition(
+  project: Project,
+  itemId: string,
+): { preset: AnimationPreset; durationSeconds: number } | undefined {
+  const item = project.items.find((i) => i.id === itemId);
+  const next = findAdjacentNextItem(project, itemId);
+  if (!item || !next || !hasAnimationField(item) || !hasAnimationField(next)) return undefined;
+  const exit = item.animation?.exit;
+  const entrance = next.animation?.entrance;
+  if (!exit || exit === 'none' || exit !== entrance) return undefined;
+  const overlap = item.endTime - next.startTime;
+  if (overlap <= 0.05) return undefined;
+  return { preset: exit, durationSeconds: overlap };
+}
+
+/**
+ * Patches a video/image item's `motion` settings (the continuous Motion/
+ * Zoom Effects — see lib/motionEffects.ts), merging `fields` over the
+ * item's current settings exactly the way ItemInspector's motion controls
+ * always have (`{ type: 'none', ...current, ...fields }`, so a partial
+ * patch like `{ intensity }` never wipes the chosen effect). Extracted
+ * here so the first-class Effects panel and the inspector write the one
+ * same `motion` field through the one same merge — no parallel
+ * representation. No-op for items without a motion concept (text/caption/
+ * audio) or a missing item id.
+ */
+export function updateItemMotion(project: Project, itemId: string, fields: Partial<MotionSettings>): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || (item.type !== 'video' && item.type !== 'image')) return project;
+  const motion = (item as { motion?: MotionSettings }).motion;
+  return updateItem(project, itemId, { motion: { type: 'none', ...motion, ...fields } });
 }
 
 // ---------------------------------------------------------------------------
