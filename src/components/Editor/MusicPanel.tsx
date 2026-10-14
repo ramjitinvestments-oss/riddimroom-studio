@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { Loader2, Music, Plus } from 'lucide-react';
+import { Loader2, Music, Plus, Repeat, Scissors } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import type { AudioTimelineItem, MediaAsset, TimelineItem } from '../../types/timeline';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
-import { updateItem } from '../../lib/timeline/utils';
+import { getContentEndTime, loopAudioToProjectEnd, trimAudioToProjectEnd, updateItem } from '../../lib/timeline/utils';
 import { LOOP_DEFS, renderLoopFile, type LoopDef } from '../../lib/media/loops';
 import { uploadMediaFile } from '../../lib/media/upload';
 import { MAX_FADE_SECONDS } from '../../lib/media/constants';
@@ -88,7 +88,7 @@ export function MusicPanel({ uid, item }: { uid: string; item: TimelineItem | nu
       <div className="flex flex-col gap-1.5">
         <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Your audio</span>
         {audioAssets.length === 0 ? (
-          <p className="text-[11px] text-white/40">No audio in this project yet — upload a track in Step 1, or add a built-in loop above.</p>
+          <p className="text-[11px] text-white/40">No audio in this project yet — use Add Audio under “Add media”, or add a built-in loop above.</p>
         ) : (
           audioAssets.map((asset) => (
             <div key={asset.id} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-2">
@@ -120,12 +120,18 @@ export function MusicPanel({ uid, item }: { uid: string; item: TimelineItem | nu
 
 /** Volume/mute/fade for the selected audio item — writes the item's real fields via `updateItem`, mirroring ItemInspector's audio section (fade clamped to min(MAX_FADE_SECONDS, clip duration), same as the inspector). */
 function AudioItemControls({ item }: { item: AudioTimelineItem }) {
-  const { mutate } = useProject();
+  const { project, mutate } = useProject();
   const patch = (fields: Record<string, unknown>) => {
     mutate((project) => updateItem(project, item.id, fields));
   };
   const clipDuration = item.endTime - item.startTime;
   const maxFade = Math.min(MAX_FADE_SECONDS, clipDuration);
+  // Fit (tweaks round): both actions align this clip's end with the end
+  // of everything ELSE on the timeline (`getContentEndTime` excluding
+  // this item) — they never grow the project itself. Disabled with an
+  // explanation when there is nothing else to fit to.
+  const contentEnd = project ? getContentEndTime(project, item.id) : 0;
+  const canFit = contentEnd > item.startTime + 0.1;
   return (
     <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
       <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Selected audio clip</span>
@@ -164,6 +170,43 @@ function AudioItemControls({ item }: { item: AudioTimelineItem }) {
             className="bg-white/10 rounded px-2 py-1 text-white"
           />
         </label>
+      </div>
+
+      <div className="flex flex-col gap-1.5 border-t border-white/10 pt-2">
+        <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Fit to project</span>
+        {item.loop && (
+          <p className="text-[11px] font-bold text-gold flex items-center gap-1">
+            <Repeat size={12} /> Looping — repeats to the project’s end
+          </p>
+        )}
+        <div className="flex gap-2">
+          <button
+            onClick={() => mutate((p) => trimAudioToProjectEnd(p, item.id))}
+            disabled={!canFit}
+            className="min-h-11 flex-1 px-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 disabled:opacity-40 text-white/85 text-xs font-bold flex items-center justify-center gap-1.5 transition"
+            title="Play this clip’s source once, cut or extended so it ends exactly when the rest of the project ends"
+          >
+            <Scissors size={14} /> Trim to project end
+          </button>
+          <button
+            onClick={() => mutate((p) => loopAudioToProjectEnd(p, item.id))}
+            disabled={!canFit}
+            aria-pressed={!!item.loop}
+            className={`min-h-11 flex-1 px-2 rounded-lg border text-xs font-bold flex items-center justify-center gap-1.5 transition disabled:opacity-40 ${
+              item.loop
+                ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/85'
+            }`}
+            title="Repeat this clip inside its span until it reaches the project’s end — for music beds shorter than the video"
+          >
+            <Repeat size={14} /> Loop to fill project
+          </button>
+        </div>
+        <p className="text-[11px] text-white/35 leading-snug">
+          {canFit
+            ? '“Trim” plays the source once, ending with the rest of the project. “Loop” repeats it to cover the whole project. Both add a short fade-out at the end if the clip has none.'
+            : 'Nothing else on the timeline to fit to yet — add video or other content first.'}
+        </p>
       </div>
     </div>
   );
