@@ -15,6 +15,9 @@ import {
   transitionAlreadyApplied,
   applyTransition,
   updateItemMotion,
+  setItemSpeed,
+  SPEED_MIN,
+  SPEED_MAX,
   addCaptionWord,
   isVisualItem,
   bringForward,
@@ -144,6 +147,36 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
       {item.type === 'text' && (
         <div className="flex flex-col gap-2">
           <span className="font-bold uppercase tracking-wide text-white/40">Text</span>
+          {/* Phase 2.3 — text style presets. They set only the two fields
+              the compositor's drawTextItem actually consumes for text
+              (fontSize — multiplied by the item's scale — and color), so a
+              preset click is a real render change in preview + export,
+              never a label-only choice. */}
+          <div className="flex gap-1.5">
+            {(
+              [
+                { id: 'headline', label: 'Headline', fontSize: 76, color: '#FFD100' },
+                { id: 'subtitle', label: 'Subtitle', fontSize: 36, color: '#FFFFFF' },
+                { id: 'cta', label: 'CTA', fontSize: 48, color: '#FF5C1A' },
+              ] as const
+            ).map((preset) => {
+              const isActive = item.fontSize === preset.fontSize && item.color.toLowerCase() === preset.color.toLowerCase();
+              return (
+                <button
+                  key={preset.id}
+                  onClick={() => patch({ fontSize: preset.fontSize, color: preset.color })}
+                  aria-pressed={isActive}
+                  className={`min-h-11 flex-1 px-2 rounded-lg border text-xs font-bold transition ${
+                    isActive
+                      ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                      : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
           <label className="flex flex-col gap-1">
             Text
             <textarea
@@ -277,6 +310,50 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               </label>
             </>
           )}
+        </div>
+      )}
+
+      {item.type === 'video' && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Speed</span>
+          {/* Phase 2.3 — writes through `setItemSpeed`, the one helper that
+              keeps the timeline invariant (duration = source span / speed)
+              by re-deriving endTime from the unchanged trim window; the
+              preview and export both run the element at this rate. */}
+          <div className="flex flex-wrap gap-1.5">
+            {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => {
+              const isActive = Math.abs(item.speed - rate) < 0.001;
+              return (
+                <button
+                  key={rate}
+                  onClick={() => mutate((p) => setItemSpeed(p, item.id, rate))}
+                  aria-pressed={isActive}
+                  className={`min-h-11 px-2.5 rounded-lg border text-xs font-bold transition ${
+                    isActive
+                      ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                      : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
+                  }`}
+                >
+                  {rate}x
+                </button>
+              );
+            })}
+          </div>
+          <label className="flex flex-col gap-1">
+            <span className="flex items-center justify-between">
+              <span>Playback speed</span>
+              <span className="text-white/40">{item.speed.toFixed(2)}x · clip now {duration.toFixed(1)}s</span>
+            </span>
+            <input
+              type="range"
+              min={SPEED_MIN}
+              max={SPEED_MAX}
+              step={0.05}
+              value={item.speed}
+              onChange={(e) => mutate((p) => setItemSpeed(p, item.id, Number(e.target.value)))}
+              className="w-full"
+            />
+          </label>
         </div>
       )}
 
