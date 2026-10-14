@@ -58,6 +58,25 @@ export function maxProjectSecondsFor(tier: LicenseTier): number {
   return getPlanLimits(tier).maxProjectSeconds;
 }
 
+/**
+ * Effective-tier resolution for the client's display + soft gates.
+ *
+ * `serverTier` is authoritative whenever the API actually answered
+ * (/api/user/status or /api/license — server.ts's `getLicenseTier`
+ * already folds the admin grant into what it returns, so a present
+ * server tier is never second-guessed here). Only when there is NO
+ * server answer (e.g. the static preview build, where /api/* 404s)
+ * does the admin fallback apply: a user with an `admins/{uid}` doc —
+ * this codebase's existing admin concept, readable by its owner per
+ * firestore.rules — resolves to 'lifetime', so the studio owner isn't
+ * free-gated on their own app. Everyone else resolves to 'free'.
+ * Server-enforced quotas (transcription) never consult this function.
+ */
+export function resolveEffectiveTier(serverTier: LicenseTier | null | undefined, isAdmin: boolean): LicenseTier {
+  if (serverTier) return serverTier;
+  return isAdmin ? 'lifetime' : 'free';
+}
+
 /** Daily export counter key (localStorage, client-side soft gate). */
 export function exportCounterKey(uid: string): string {
   const day = new Date().toISOString().slice(0, 10);
