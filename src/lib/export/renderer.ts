@@ -13,6 +13,7 @@
  */
 
 import type { Project } from '../../types/timeline';
+import type { ResolvedExportSettings } from './quality';
 
 export interface RenderProgress {
   /** 0-1. */
@@ -26,6 +27,14 @@ export interface RenderProgress {
 export interface RenderOptions {
   onProgress?: (progress: RenderProgress) => void;
   signal?: AbortSignal;
+  /**
+   * Resolved export-quality settings (see lib/export/quality.ts). When
+   * present, the renderer honors them exactly: canvas/output dimensions,
+   * capture-stream frame rate, and recorder bitrates. When absent, the
+   * renderer falls back to the project's own canvas size and frame rate
+   * with browser-default recorder bitrates — the pre-picker behavior.
+   */
+  output?: ResolvedExportSettings;
 }
 
 export interface RenderResult {
