@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, X } from 'lucide-react';
 import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -224,9 +225,9 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
             <button
               onClick={() => patch({ pip: { shape: (item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded', borderWidth: (item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4, borderColor: (item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF', shadow: (item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true, isPip: true } })}
               disabled={!!(item as { pip?: { isPip?: boolean } }).pip?.isPip}
-              className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40"
+              className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 flex items-center gap-1.5"
             >
-              {(item as { pip?: { isPip?: boolean } }).pip?.isPip ? '✓ Is PiP overlay' : 'Make PiP overlay'}
+              {(item as { pip?: { isPip?: boolean } }).pip?.isPip ? (<><Check size={14} strokeWidth={3} /> Is PiP overlay</>) : 'Make PiP overlay'}
             </button>
             {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
               <button
@@ -297,30 +298,30 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
           <button
             onClick={() => mutate((p) => sendToBack(p, item.id))}
             title="Send to back"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            ⇤ Back
+            <ArrowLeftToLine size={13} /> Back
           </button>
           <button
             onClick={() => mutate((p) => sendBackward(p, item.id))}
             title="Send backward"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            ← Back
+            <ArrowLeft size={13} /> Back
           </button>
           <button
             onClick={() => mutate((p) => bringForward(p, item.id))}
             title="Bring forward"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            Fwd →
+            Fwd <ArrowRight size={13} />
           </button>
           <button
             onClick={() => mutate((p) => bringToFront(p, item.id))}
             title="Bring to front"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            Front ⇥
+            Front <ArrowRightToLine size={13} />
           </button>
         </div>
       )}
@@ -497,7 +498,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                 }`}
                 title="Overlap this clip with the next one on this track and cross-fade between them"
               >
-                {dissolveApplied ? 'Cross Dissolve Applied' : 'Cross Dissolve →'}
+                {dissolveApplied ? 'Cross Dissolve Applied' : (<>Cross Dissolve <ArrowRight size={12} className="inline" /></>)}
               </button>
             </div>
           )}
@@ -528,7 +529,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                   }`}
                   title="Overlap this clip with the next one on this track and play this transition between them — both clips draw simultaneously during the overlap, real WYSIWYG in preview and export"
                 >
-                  {transitionApplied ? 'Applied' : 'Apply →'}
+                  {transitionApplied ? 'Applied' : (<>Apply <ArrowRight size={12} className="inline" /></>)}
                 </button>
               </div>
             </div>
@@ -687,20 +688,53 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
     <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
       <span className="font-bold uppercase tracking-wide text-white/40">Caption</span>
 
-      <label className="flex flex-col gap-1">
-        Style
-        <select
-          value={item.captionStyleId}
-          onChange={(e) => mutate((project) => updateItem(project, item.id, { captionStyleId: e.target.value }))}
-          className="bg-white/10 rounded px-2 py-1 text-white"
-        >
-          {CAPTION_STYLES.map((style) => (
-            <option key={style.id} value={style.id}>
-              {style.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="flex flex-col gap-1.5">
+        <span>Style</span>
+        {/* Preview chips (polish batch) — each chip renders the style's
+            REAL params (family / weight / color / stroke / background /
+            uppercase) on sample text at chip scale, so the picker shows
+            what the caption will actually look like instead of a bare
+            name in a <select>. Selected chip carries the gold ring. */}
+        <div className="grid grid-cols-2 gap-1.5">
+          {CAPTION_STYLES.map((style) => {
+            const isSelected = item.captionStyleId === style.id;
+            const chipStroke =
+              style.strokeWidth > 0 && style.strokeColor !== 'transparent'
+                ? Math.max(0.4, style.strokeWidth / 6)
+                : 0;
+            return (
+              <button
+                key={style.id}
+                onClick={() => mutate((project) => updateItem(project, item.id, { captionStyleId: style.id }))}
+                title={style.label}
+                aria-pressed={isSelected}
+                className={`rounded-lg overflow-hidden border text-left transition ${
+                  isSelected ? 'border-gold ring-1 ring-gold' : 'border-white/10 hover:border-white/30'
+                }`}
+              >
+                <span className="flex h-11 items-center justify-center overflow-hidden px-1.5" style={{ background: style.background ?? '#141414' }}>
+                  <span
+                    className="whitespace-nowrap"
+                    style={{
+                      fontFamily: style.fontFamily,
+                      fontSize: 13,
+                      fontWeight: 700,
+                      lineHeight: 1.1,
+                      color: style.color,
+                      textTransform: style.uppercase ? 'uppercase' : 'none',
+                      WebkitTextStroke: chipStroke ? `${chipStroke}px ${style.strokeColor}` : undefined,
+                      textShadow: '0 1px 2px rgba(0,0,0,0.7)',
+                    }}
+                  >
+                    Your caption
+                  </span>
+                </span>
+                <span className="block truncate bg-white/5 px-1.5 py-1 text-[10px] text-white/60">{style.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       <div className="flex flex-col gap-1 max-h-56 overflow-y-auto pr-1">
         {item.words.length === 0 && <p className="text-white/30 italic">No words in this caption.</p>}
@@ -736,9 +770,10 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
                 bare 1-char tap target. */}
             <button
               onClick={() => deleteWord(index)}
-              className="min-h-9 min-w-9 flex items-center justify-center text-red-400 hover:text-red-300 font-bold"
+              aria-label="Delete word"
+              className="min-h-9 min-w-9 flex items-center justify-center text-red-400 hover:text-red-300"
             >
-              ✕
+              <X size={14} strokeWidth={3} />
             </button>
           </div>
         ))}
