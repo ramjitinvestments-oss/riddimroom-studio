@@ -39,8 +39,17 @@ export function TranscribePanel({ uid }: { uid: string }) {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({ storageUrl: asset.storageUrl, mimeType: asset.mimeType, durationSeconds: asset.durationSeconds }),
       });
+      // Static preview builds have no /api routes at all — the response is
+      // an HTML 404 page, and res.json() on it throws a raw SyntaxError
+      // ("Unexpected token '<'…") that reads like a crash to the user.
+      // Check status + content-type first and give a human answer instead.
+      const isJson = (res.headers.get('content-type') || '').includes('application/json');
+      if (!res.ok || !isJson) {
+        setError("Transcription isn't available on this preview build yet.");
+        return;
+      }
       const data = await res.json();
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         setError(data.error || `Transcription failed (HTTP ${res.status}).`);
         return;
       }
@@ -52,7 +61,8 @@ export function TranscribePanel({ uid }: { uid: string }) {
       }
       await refreshUserProfile();
     } catch (err: any) {
-      setError(err?.message || 'Transcription request failed.');
+      // Never surface a raw parser/network exception message to the user.
+      setError(err instanceof SyntaxError ? "Transcription isn't available on this preview build yet." : err?.message || 'Transcription request failed.');
     } finally {
       setIsTranscribing(null);
     }
