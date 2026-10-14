@@ -201,6 +201,7 @@ function validateTypeSpecificFields(
       }
       if (!isFiniteNumber(item.volume) || item.volume < 0 || item.volume > 1) errors.push({ path: `${path}.volume`, message: 'volume must be a number between 0 and 1.' });
       if (typeof item.muted !== 'boolean') errors.push({ path: `${path}.muted`, message: 'muted must be a boolean.' });
+      if (item.loop !== undefined && typeof item.loop !== 'boolean') errors.push({ path: `${path}.loop`, message: 'loop must be a boolean when present.' });
       if (!isFiniteNumber(item.trimStart) || item.trimStart < 0) errors.push({ path: `${path}.trimStart`, message: 'trimStart must be a non-negative finite number.' });
       if (!isFiniteNumber(item.trimEnd) || item.trimEnd <= item.trimStart) errors.push({ path: `${path}.trimEnd`, message: 'trimEnd must be a finite number greater than trimStart.' });
       if (!item.fade || !isFiniteNumber(item.fade.fadeInDuration) || !isFiniteNumber(item.fade.fadeOutDuration)) {
