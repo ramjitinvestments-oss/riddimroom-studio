@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getPlanLimits, canExportToday, exportsRemainingToday, recordExport, getExportsToday, exportCounterKey } from './licensing';
+import { getPlanLimits, canExportToday, exportsRemainingToday, recordExport, getExportsToday, exportCounterKey, resolveEffectiveTier } from './licensing';
 
 describe('licensing plan limits', () => {
   it('free is limited, lifetime is generous', () => {
@@ -9,6 +9,22 @@ describe('licensing plan limits', () => {
     expect(getPlanLimits('lifetime').maxProjectSeconds).toBe(600);
     expect(getPlanLimits('lifetime').dailyTranscriptions).toBe(10);
     expect(getPlanLimits('lifetime').watermark).toBe(false);
+  });
+});
+
+describe('resolveEffectiveTier (owner/admin grant)', () => {
+  it('a present server tier is authoritative — never second-guessed', () => {
+    expect(resolveEffectiveTier('lifetime', false)).toBe('lifetime');
+    expect(resolveEffectiveTier('free', false)).toBe('free');
+    expect(resolveEffectiveTier('free', true)).toBe('free');
+  });
+  it('with no server answer, an admin resolves to lifetime', () => {
+    expect(resolveEffectiveTier(null, true)).toBe('lifetime');
+    expect(resolveEffectiveTier(undefined, true)).toBe('lifetime');
+  });
+  it('with no server answer, a non-admin stays free', () => {
+    expect(resolveEffectiveTier(null, false)).toBe('free');
+    expect(resolveEffectiveTier(undefined, false)).toBe('free');
   });
 });
 
