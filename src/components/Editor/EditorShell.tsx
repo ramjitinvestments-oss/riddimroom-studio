@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, ArrowRight, ChevronRight, FolderOpen, Plus, Redo2, Settings, Undo2, X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import BrandLogo from '../BrandLogo';
 import { ProjectProvider, useProject } from '../../context/ProjectContext';
 import { PreviewPane } from './PreviewPane';
 import { TimelinePanel } from './TimelinePanel';
@@ -170,8 +172,10 @@ function EditorInner({ uid }: { uid: string }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#070707] text-white/50 text-sm">
-        Loading project…
+      <div className="min-h-screen flex flex-col items-center justify-center gap-5 bg-[#070707]">
+        <BrandLogo size="lg" />
+        <div className="w-10 h-10 rounded-full border-4 border-gold/20 border-t-gold animate-spin" aria-label="Loading project" />
+        <p className="text-white/40 text-xs uppercase tracking-wide">Loading project…</p>
       </div>
     );
   }
@@ -207,7 +211,7 @@ function EditorInner({ uid }: { uid: string }) {
 
       <section className="flex flex-col gap-2">
         <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Media library</h3>
-        {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/30">Nothing uploaded yet.</p>}
+        {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/30">Nothing uploaded yet — import a clip above and it lands here.</p>}
         <ul className="flex flex-col gap-1">
           {Object.values(project.mediaAssets)
             // A background-removed asset is a derivative of its original,
@@ -222,10 +226,10 @@ function EditorInner({ uid }: { uid: string }) {
                 <span className="text-white/30 uppercase text-[10px]">{asset.kind}</span>
                 <button
                   onClick={() => handleAddExistingAssetToTimeline(asset)}
-                  className="text-emerald-400 hover:text-emerald-300 font-bold min-h-11 min-w-11 flex items-center justify-center text-base"
+                  className="text-gold hover:text-gold-bright font-bold min-h-11 min-w-11 flex items-center justify-center"
                   title="Add to timeline at playhead"
                 >
-                  +
+                  <Plus size={18} strokeWidth={3} />
                 </button>
                 {asset.kind === 'image' && (
                   <BackgroundRemovalButton
@@ -300,8 +304,8 @@ function EditorInner({ uid }: { uid: string }) {
           instead of those panels being fixed side columns. */}
       <header className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2 sm:py-3 border-b border-white/10 shrink-0">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <a href="/" className="text-white/40 hover:text-white text-xs shrink-0 min-h-11 flex items-center">
-            ← <span className="hidden sm:inline">Projects</span>
+          <a href="/" className="text-white/40 hover:text-white text-xs shrink-0 min-h-11 flex items-center gap-1">
+            <ArrowLeft size={16} /> <span className="hidden sm:inline">Projects</span>
           </a>
           <input
             value={project.name}
@@ -313,33 +317,33 @@ function EditorInner({ uid }: { uid: string }) {
           <button
             onClick={() => setMobileSheet('library')}
             title="Media library"
-            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-base"
+            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
           >
-            🗂
+            <FolderOpen size={18} />
           </button>
           <button
             onClick={() => setMobileSheet('panel')}
             title={selectedItem ? 'Selected item' : 'Add / Export'}
-            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-base"
+            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
           >
-            ⚙
+            <Settings size={18} />
           </button>
-          <div className="hidden sm:flex items-center gap-1">
+          <div className="flex items-center gap-1">
             <button
               onClick={undo}
               disabled={!canUndo}
               title="Undo (Ctrl/Cmd+Z)"
-              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white"
+              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center gap-1.5"
             >
-              ↺ <span className="hidden md:inline">Undo</span>
+              <Undo2 size={16} /> <span className="hidden md:inline">Undo</span>
             </button>
             <button
               onClick={redo}
               disabled={!canRedo}
               title="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
-              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white"
+              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center gap-1.5"
             >
-              ↻ <span className="hidden md:inline">Redo</span>
+              <Redo2 size={16} /> <span className="hidden md:inline">Redo</span>
             </button>
           </div>
           {saveError && <span className="text-red-400">{saveError}</span>}
@@ -349,7 +353,7 @@ function EditorInner({ uid }: { uid: string }) {
           <button
             onClick={save}
             disabled={isSaving || !isDirty}
-            className="min-h-11 px-3 sm:px-4 font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-white"
+            className="min-h-11 px-3 sm:px-4 font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >
             Save
           </button>
@@ -365,8 +369,8 @@ function EditorInner({ uid }: { uid: string }) {
       {projectLimitWarning && (
         <div className="mx-3 sm:mx-4 mt-2 flex items-center justify-between gap-3 rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-xs text-amber-200">
           <span>{projectLimitWarning}</span>
-          <button onClick={dismissProjectLimitWarning} className="text-amber-200/60 hover:text-amber-100 shrink-0 min-h-8 min-w-8 flex items-center justify-center">
-            ×
+          <button onClick={dismissProjectLimitWarning} aria-label="Dismiss" className="text-amber-200/60 hover:text-amber-100 shrink-0 min-h-8 min-w-8 flex items-center justify-center">
+            <X size={14} strokeWidth={3} />
           </button>
         </div>
       )}
@@ -379,11 +383,11 @@ function EditorInner({ uid }: { uid: string }) {
           { n: 3 as const, label: 'Export' },
         ]).map((s, idx) => (
           <React.Fragment key={s.n}>
-            {idx > 0 && <span className="text-white/20">→</span>}
+            {idx > 0 && <ChevronRight size={14} className="text-white/20 shrink-0" />}
             <button
               onClick={() => setStep(s.n)}
               aria-current={step === s.n ? 'step' : undefined}
-              className={`min-h-11 px-3 rounded-lg text-xs font-bold ${step === s.n ? 'bg-white text-black' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+              className={`min-h-11 px-3 rounded-lg text-xs font-bold ${step === s.n ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'}`}
             >
               {s.n}. {s.label}
             </button>
@@ -405,7 +409,7 @@ function EditorInner({ uid }: { uid: string }) {
               <p>2. Edit + add captions.</p>
               <p>3. Export MP4 (or SRT/VTT).</p>
             </div>
-            <button onClick={() => setStep(2)} className="min-h-11 px-4 font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm">Continue to Edit →</button>
+            <button onClick={() => setStep(2)} className="min-h-11 px-4 font-bold rounded-lg bg-gold hover:bg-gold-bright text-black text-sm flex items-center justify-center gap-1.5">Continue to Edit <ArrowRight size={16} /></button>
           </aside>
         </div>
       )}
@@ -432,8 +436,8 @@ function EditorInner({ uid }: { uid: string }) {
               />
             </div>
             <div className="w-full max-w-3xl flex gap-2">
-              <button onClick={() => setStep(1)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold">← Back</button>
-              <button onClick={() => setStep(3)} className="min-h-11 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm font-bold">Continue to Export →</button>
+              <button onClick={() => setStep(1)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back</button>
+              <button onClick={() => setStep(3)} className="min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5">Continue to Export <ArrowRight size={16} /></button>
             </div>
           </main>
           {/* Hidden below lg: on mobile this panel mounts once, inside the
@@ -455,7 +459,7 @@ function EditorInner({ uid }: { uid: string }) {
               selectedItemId={selectedItemId}
               onSelectItem={setSelectedItemId}
             />
-            <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold">← Back to Edit</button>
+            <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
           </main>
           <aside className="hidden lg:flex flex-col gap-4">{exportPanel}</aside>
         </div>
