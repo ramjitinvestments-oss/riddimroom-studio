@@ -1,0 +1,20 @@
+# RiddimRoom Studio — API server (Express, server.ts) for Render.
+# The static front-end stays on Vercel; vercel.json proxies /api/* here.
+# Blueprint: Render dashboard -> New -> Blueprint -> pick this repo (branch preview/v1).
+services:
+  - type: web
+    name: riddimroom-studio-api
+    runtime: docker
+    branch: preview/v1
+    plan: starter
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_URL
+        value: https://riddimroom-studio-git-preview-v1-riddimroom-s-projects.vercel.app
+      - key: GEMINI_API_KEY
+        sync: false # set in Render dashboard — key from https://aistudio.google.com/apikey
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false # set in Render dashboard — Firebase console -> riddimroom-studio -> Project settings -> Service accounts -> Generate new private key (paste whole JSON)
+      - key: FIREBASE_PROJECT_ID
+        value: riddimroom-studio
