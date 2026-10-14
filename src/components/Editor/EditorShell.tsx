@@ -17,6 +17,7 @@ import { PipPanel } from './PipPanel';
 import { TemplatesPanel } from './TemplatesPanel';
 import { TransitionsPanel } from './TransitionsPanel';
 import { EffectsPanel } from './EffectsPanel';
+import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
@@ -277,6 +278,12 @@ function EditorInner({ uid }: { uid: string }) {
 
       <section>
         <EffectsPanel item={selectedItem} />
+      </section>
+
+      {/* Phase 2.3 — Music & Audio panel, same sidePanel node/mounting
+          pattern as Transitions/Effects above. */}
+      <section>
+        <MusicPanel uid={uid} item={selectedItem} />
       </section>
 
       <section>
