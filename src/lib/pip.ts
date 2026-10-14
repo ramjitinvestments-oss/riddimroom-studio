@@ -38,6 +38,14 @@ export interface AddPipOptions {
   shape?: PipSettings['shape'];
   borderWidth?: number;
   borderColor?: string;
+  /**
+   * Source window (seconds) chosen in the pre-import trim/select modal for
+   * an over-limit overlay video — same meaning as `appendMediaToTimeline`'s
+   * options. When supplied, the overlay plays exactly that window instead
+   * of the asset's head.
+   */
+  trimStart?: number;
+  trimEnd?: number;
 }
 
 /**
@@ -56,7 +64,11 @@ export function addPipOverlay(project: Project, asset: MediaAsset, options: AddP
   const track = (next.tracks.find((t) => t.type === 'video') ?? null);
   if (!track) throw new Error('This project has no "video" track.');
   const zIndex = next.items.reduce((m, i) => Math.max(m, i.zIndex), -1) + 1;
-  const duration = Math.min(asset.durationSeconds && Number.isFinite(asset.durationSeconds) ? asset.durationSeconds : 5, MAX_MEDIA_SECONDS);
+  const fullDuration = asset.durationSeconds && Number.isFinite(asset.durationSeconds) ? asset.durationSeconds : 5;
+  const trimStart = options.trimStart !== undefined ? Math.max(0, Math.min(options.trimStart, fullDuration)) : 0;
+  const trimEnd =
+    options.trimEnd !== undefined ? Math.max(trimStart + 0.1, Math.min(options.trimEnd, fullDuration)) : fullDuration;
+  const duration = Math.min(trimEnd - trimStart, MAX_MEDIA_SECONDS);
   const startTime = options.atTime ?? 0;
   const item: VideoTimelineItem = {
     id: generateTimelineId('item'),
@@ -71,8 +83,8 @@ export function addPipOverlay(project: Project, asset: MediaAsset, options: AddP
     scale: layout.scale,
     rotation: 0,
     opacity: 1,
-    trimStart: 0,
-    trimEnd: duration,
+    trimStart,
+    trimEnd: trimStart + duration,
     speed: 1,
     reverse: false,
     volume: 1,
