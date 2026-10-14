@@ -13,9 +13,12 @@ import {
   getBoundaryTransition,
   updateItem,
   updateItemMotion,
+  setItemSpeed,
+  SPEED_MIN,
+  SPEED_MAX,
 } from './utils';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
-import type { ImageTimelineItem, Project } from '../../types/timeline';
+import type { ImageTimelineItem, Project, VideoTimelineItem } from '../../types/timeline';
 
 /**
  * v1 cap tests — MAX_MEDIA_SECONDS (600s / 10 min) replaces the old
@@ -175,5 +178,68 @@ describe('updateItemMotion (Phase 2.1 shared motion setter)', () => {
   it('is a no-op (same project reference) for a missing item id', () => {
     const { project } = projectWithImageItem(5);
     expect(updateItemMotion(project, 'no-such-item', { type: 'flash' })).toBe(project);
+  });
+});
+
+describe('setItemSpeed (Phase 2.3 speed controls)', () => {
+  function projectWithVideoItem(): { project: Project; itemId: string } {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const track = createTrack('video', 'Video', 0);
+    project = addTrack(project, track);
+    const item: VideoTimelineItem = {
+      id: generateTimelineId('item'),
+      type: 'video',
+      trackId: track.id,
+      startTime: 2,
+      endTime: 10, // 8s timeline span == 8s source span at speed 1
+      zIndex: 0,
+      visible: true,
+      mediaAssetId: 'asset1',
+      position: { x: 50, y: 50 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      trimStart: 4,
+      trimEnd: 12,
+      speed: 1,
+      reverse: false,
+      volume: 1,
+      muted: false,
+    };
+    project = addItem(project, item);
+    return { project, itemId: item.id };
+  }
+
+  it('2x halves the timeline duration, anchored at startTime, trim untouched', () => {
+    const { project, itemId } = projectWithVideoItem();
+    const next = setItemSpeed(project, itemId, 2);
+    const updated = next.items.find((i) => i.id === itemId) as VideoTimelineItem;
+    expect(updated.speed).toBe(2);
+    expect(updated.startTime).toBe(2);
+    expect(updated.endTime).toBeCloseTo(6, 5); // 2 + 8/2
+    expect(updated.trimStart).toBe(4);
+    expect(updated.trimEnd).toBe(12);
+  });
+
+  it('0.5x doubles the timeline duration', () => {
+    const { project, itemId } = projectWithVideoItem();
+    const next = setItemSpeed(project, itemId, 0.5);
+    const updated = next.items.find((i) => i.id === itemId) as VideoTimelineItem;
+    expect(updated.endTime).toBeCloseTo(18, 5); // 2 + 8/0.5
+  });
+
+  it('clamps out-of-range rates to SPEED_MIN/SPEED_MAX', () => {
+    const { project, itemId } = projectWithVideoItem();
+    const fast = setItemSpeed(project, itemId, 99).items.find((i) => i.id === itemId) as VideoTimelineItem;
+    expect(fast.speed).toBe(SPEED_MAX);
+    const slow = setItemSpeed(project, itemId, 0.01).items.find((i) => i.id === itemId) as VideoTimelineItem;
+    expect(slow.speed).toBe(SPEED_MIN);
+  });
+
+  it('is a no-op for non-video items and missing ids', () => {
+    const { project, itemId } = projectWithImageItem(5);
+    expect(setItemSpeed(project, itemId, 2)).toBe(project);
+    const { project: videoProject } = projectWithVideoItem();
+    expect(setItemSpeed(videoProject, 'no-such-item', 2)).toBe(videoProject);
   });
 });
