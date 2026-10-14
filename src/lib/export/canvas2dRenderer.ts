@@ -24,7 +24,7 @@
 
 import type { Project, TimelineItem } from '../../types/timeline';
 import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
-import { computeFadeOpacity, drawFrame } from './../render/compositor';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame } from './../render/compositor';
 import type { Renderer, RenderOptions, RenderResult } from './renderer';
 import { RenderAbortedError } from './renderer';
 
@@ -324,14 +324,31 @@ export class Canvas2DRenderer implements Renderer {
           if (!asset) return;
           activeAudioIds.add(asset.id);
           const handle = getAudioHandle(asset.id, asset.storageUrl);
+          // Looping items (tweaks round): the target wraps inside the
+          // trim window (`computeLoopedSourceTime`, the same helper the
+          // preview uses, so both wrap at the same moments). A playing
+          // element only needs a seek when it crosses a wrap — the
+          // >0.35s divergence check catches exactly that, mirroring the
+          // video branch's drift handling above. The element's own
+          // `loop` property is not used: it wraps at the file's end, not
+          // the trim window's. Non-loop items keep the original
+          // seek-on-start behavior untouched.
+          const targetTime = item.loop
+            ? computeLoopedSourceTime(item.trimStart, item.trimEnd, Math.max(0, t - item.startTime))
+            : item.trimStart + Math.max(0, t - item.startTime);
           if ((handle.element as HTMLAudioElement).paused) {
-            const targetTime = item.trimStart + Math.max(0, t - item.startTime);
             try {
               (handle.element as HTMLAudioElement).currentTime = targetTime;
             } catch {
               /* ignore */
             }
             handle.element.play().catch(() => {});
+          } else if (item.loop && Math.abs((handle.element as HTMLAudioElement).currentTime - targetTime) > 0.35) {
+            try {
+              (handle.element as HTMLAudioElement).currentTime = targetTime;
+            } catch {
+              /* ignore */
+            }
           }
           // Apply the item's own fade-in/fade-out to its gain, not just
           // mute/volume — `AudioTimelineItem.fade` previously had no effect
