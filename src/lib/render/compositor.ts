@@ -682,6 +682,31 @@ function animationFor(
   return a;
 }
 
+/**
+ * COVER-fit source rect: the centered sub-rectangle of a (srcW × srcH)
+ * source that fills a (destW × destH) box with no distortion — the
+ * overflow dimension is cropped symmetrically. Used by drawVideoItem so a
+ * clip whose aspect differs from its target rect (e.g. a 16:9 clip on a
+ * 9:16 canvas) is cropped, never stretched/squashed.
+ */
+function coverSourceRect(
+  srcW: number,
+  srcH: number,
+  destW: number,
+  destH: number,
+): { sx: number; sy: number; sw: number; sh: number } {
+  const srcAspect = srcW / srcH;
+  const destAspect = destW / destH;
+  if (srcAspect > destAspect) {
+    // Source is wider than the box: crop left/right.
+    const sw = srcH * destAspect;
+    return { sx: (srcW - sw) / 2, sy: 0, sw, sh: srcH };
+  }
+  // Source is taller than (or equal to) the box: crop top/bottom.
+  const sh = srcW / destAspect;
+  return { sx: 0, sy: (srcH - sh) / 2, sw: srcW, sh };
+}
+
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
   item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
@@ -721,11 +746,26 @@ function drawVideoItem(
         c.clip();
       }
       try {
+        // COVER fit: crop the source to the target rect's aspect (see
+        // coverSourceRect) instead of stretching the full frame into the
+        // rect, which visibly distorted any clip whose aspect differed
+        // from its box. Falls back to the plain full-frame draw while the
+        // element has no decoded dimensions yet (videoWidth/Height 0).
+        const srcW = videoEl.videoWidth;
+        const srcH = videoEl.videoHeight;
         if (pip?.shape === 'circle') {
           // Cover-fit inside the circle: draw so the circle is fully filled (no letterbox).
           const r = Math.min(w, h) / 2;
           const size = r * 2;
-          c.drawImage(videoEl, -size / 2, -size / 2, size, size);
+          if (srcW > 0 && srcH > 0) {
+            const s = coverSourceRect(srcW, srcH, size, size);
+            c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -size / 2, -size / 2, size, size);
+          } else {
+            c.drawImage(videoEl, -size / 2, -size / 2, size, size);
+          }
+        } else if (srcW > 0 && srcH > 0) {
+          const s = coverSourceRect(srcW, srcH, w, h);
+          c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -w / 2, -h / 2, w, h);
         } else {
           c.drawImage(videoEl, -w / 2, -h / 2, w, h);
         }
