@@ -129,18 +129,41 @@ export class Canvas2DRenderer implements Renderer {
       return el;
     };
 
+    const cleanup = () => {
+      videoHandles.forEach((h) => {
+        h.element.pause();
+        h.element.src = '';
+        if (h.element.parentNode) h.element.parentNode.removeChild(h.element);
+      });
+      videoHandles.clear();
+      imageEls.clear();
+      audioCtx.close().catch(() => {});
+    };
+
     // Preload everything referenced by the project up front so the render
     // loop never stalls mid-recording waiting on a network fetch.
+    // Video/audio items are REQUIRED media: one that fails to load (e.g.
+    // the bucket refuses the crossOrigin fetch because CORS isn't applied
+    // for this origin) is collected here and aborts the export below —
+    // the old behavior (resolve on error and record anyway) is exactly
+    // how users ended up with a black, silent MP4 and no explanation.
+    const failedMedia: string[] = [];
     await Promise.all(
       project.items.map((item) => {
         if (item.type === 'video' || item.type === 'audio') {
           const asset = project.mediaAssets[item.mediaAssetId];
           if (!asset) return Promise.resolve();
           const el = item.type === 'video' ? getVideoHandle(asset.id, asset.storageUrl).element : getAudioHandle(asset.id, asset.storageUrl).element;
+          const media = el as HTMLMediaElement;
           return new Promise<void>((resolve) => {
-            if ((el as HTMLMediaElement).readyState >= 1) return resolve();
-            el.addEventListener('loadedmetadata', () => resolve(), { once: true });
-            el.addEventListener('error', () => resolve(), { once: true }); // don't let one bad asset block the whole export
+            const fail = () => {
+              failedMedia.push(asset.fileName || asset.id);
+              resolve();
+            };
+            if (media.error) return fail();
+            if (media.readyState >= 1) return resolve();
+            media.addEventListener('loadedmetadata', () => resolve(), { once: true });
+            media.addEventListener('error', fail, { once: true });
           });
         }
         if (item.type === 'image') {
@@ -157,7 +180,25 @@ export class Canvas2DRenderer implements Renderer {
       }),
     );
 
-    const canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(project.frameRate);
+    if (failedMedia.length > 0) {
+      cleanup();
+      throw new Error(
+        `Media failed to load (${failedMedia.join(', ')}) — export cancelled. Check your connection or file access, then try again.`,
+      );
+    }
+
+    // A canvas tainted by non-CORS media (e.g. the preview's playback
+    // fallback) makes captureStream() throw a SecurityError — surface
+    // that as a clear message instead of an opaque browser exception.
+    let canvasStream: MediaStream;
+    try {
+      canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(project.frameRate);
+    } catch {
+      cleanup();
+      throw new Error(
+        'Export could not capture the preview canvas — a clip loaded without CORS access. Storage CORS must allow this app for exports; check the connection and try again.',
+      );
+    }
     const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
 
     const mimeType = pickSupportedMimeType();
@@ -167,16 +208,17 @@ export class Canvas2DRenderer implements Renderer {
       if (e.data.size > 0) chunks.push(e.data);
     };
 
-    const cleanup = () => {
-      videoHandles.forEach((h) => {
-        h.element.pause();
-        h.element.src = '';
-        if (h.element.parentNode) h.element.parentNode.removeChild(h.element);
-      });
-      videoHandles.clear();
-      imageEls.clear();
-      audioCtx.close().catch(() => {});
-    };
+    // Autoplay policy: an AudioContext created outside the direct export
+    // click handler can start in the 'suspended' state, which would leave
+    // the mixed destination stream silent for the entire recording even
+    // though every element is playing. Resume it before the recorder
+    // starts so the exported audio track actually carries sound.
+    try {
+      await audioCtx.resume();
+    } catch {
+      /* best effort — the render proceeds; the final blob-size sanity
+         check in the caller still guards against a silent output file */
+    }
 
     return new Promise<RenderResult>((resolve, reject) => {
       let aborted = false;
