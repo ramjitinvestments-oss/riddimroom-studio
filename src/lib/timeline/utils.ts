@@ -197,6 +197,22 @@ export function retargetItemsToAsset(project: Project, fromAssetId: string, toAs
 // ---------------------------------------------------------------------------
 
 /**
+ * Formats a timeline position/duration as `m:ss.d` (e.g. `0:07.5`,
+ * `12:03.0`) — the ONE timecode format the editor UI uses everywhere
+ * (transport readout, timeline header), replacing the mix of raw
+ * `toFixed(1) + 's'` strings and `0:00` literals components used to
+ * hand-roll inconsistently. Negative/NaN input clamps to `0:00.0`.
+ */
+export function formatTimecode(totalSeconds: number): string {
+  const safe = Number.isFinite(totalSeconds) ? Math.max(0, totalSeconds) : 0;
+  const tenths = Math.round(safe * 10);
+  const minutes = Math.floor(tenths / 600);
+  const remTenths = tenths - minutes * 600;
+  const seconds = Math.floor(remTenths / 10);
+  return `${minutes}:${String(seconds).padStart(2, '0')}.${remTenths % 10}`;
+}
+
+/**
  * An item's duration is deliberately NOT a stored field — storing both
  * `startTime`/`endTime` and `duration` would let them drift out of sync
  * (e.g. an edit that updates endTime but forgets duration). It is always
