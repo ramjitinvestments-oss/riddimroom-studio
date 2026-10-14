@@ -21,6 +21,15 @@ export interface CaptionStyle {
   uppercase?: boolean;
   /** Suggested entrance animation for this style (editor hint). */
   animation?: string;
+  /**
+   * Phase 2.3 — karaoke-style active-word color. When set, the compositor
+   * fills the currently-spoken word with this color while the remaining
+   * words stay in `color` (see `drawCaptionItem` in lib/render/compositor.ts,
+   * which already tracks the active word from the item's `words[]` timings
+   * for its pop-scale effect). Absent = active word uses `color`, words
+   * not yet spoken are dimmed — the long-standing behavior.
+   */
+  highlightColor?: string;
 }
 
 export const CAPTION_STYLES: CaptionStyle[] = [
@@ -36,6 +45,12 @@ export const CAPTION_STYLES: CaptionStyle[] = [
   { id: 'fire', label: 'Fire Burner', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 54, color: '#FF8A00', strokeColor: '#7A0000', strokeWidth: 6, uppercase: true, animation: 'fire' },
   { id: 'rainbow', label: 'Cosmic Rainbow', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 52, color: '#FFD100', strokeColor: '#FF7A1A', strokeWidth: 5, uppercase: true, animation: 'rainbow' },
   { id: 'heartbeat', label: 'Heartbeat', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 52, color: '#ffffff', strokeColor: '#E8490F', strokeWidth: 6, uppercase: true, animation: 'heartbeat' },
+  // Phase 2.3 — on-brand additions (black / gold #FFD100 / cream / ember).
+  { id: 'gold-premium', label: 'Gold Premium', fontFamily: '"Helvetica Neue", Arial, sans-serif', fontSize: 48, color: '#FFD100', strokeColor: '#000000', strokeWidth: 5, background: 'rgba(0,0,0,0.55)', animation: 'fadeup' },
+  { id: 'soca-pop', label: 'Soca Pop', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 54, color: '#FFF6E3', strokeColor: '#FF5C1A', strokeWidth: 7, uppercase: true, animation: 'pop' },
+  { id: 'bold-outline', label: 'Bold Outline', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 54, color: '#ffffff', strokeColor: '#000000', strokeWidth: 11, uppercase: true, animation: 'fade' },
+  { id: 'minimal-clean', label: 'Minimal Clean', fontFamily: '"Helvetica Neue", Arial, sans-serif', fontSize: 40, color: '#ffffff', strokeColor: 'transparent', strokeWidth: 0, animation: 'fade' },
+  { id: 'karaoke-gold', label: 'Karaoke Gold', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 52, color: '#ffffff', strokeColor: '#000000', strokeWidth: 6, highlightColor: '#FFD100', animation: 'word-by-word' },
 ];
 
 export function getCaptionStyle(id: string): CaptionStyle {
