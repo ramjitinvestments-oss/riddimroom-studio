@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { createProject, listProjects, deleteProject, type ProjectSummary } from '../lib/projects/persistence';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
 import BrandLogo from './BrandLogo';
+import { useLicenseTier } from '../hooks/useLicenseTier';
 
 /**
  * Phase 1 Step 6 — authenticated home screen. Replaces the placeholder
@@ -17,6 +18,7 @@ interface DashboardProps {
 
 export function Dashboard({ onOpenProject }: DashboardProps) {
   const { currentUser, userProfile, signOut } = useAuth();
+  const { tier } = useLicenseTier();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
@@ -49,7 +51,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
       setIsCreating(true);
       setError(null);
       try {
-        const project = await createProject(currentUser.uid, 'Untitled Project', ratio.canvasWidth, ratio.canvasHeight);
+        const project = await createProject(currentUser.uid, 'Untitled Project', ratio.canvasWidth, ratio.canvasHeight, { watermarkEnabled: tier !== 'lifetime' });
         setShowRatioPicker(false);
         onOpenProject(project.id);
       } catch (err: any) {
@@ -58,7 +60,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
         setIsCreating(false);
       }
     },
-    [currentUser, onOpenProject],
+    [currentUser, onOpenProject, tier],
   );
 
   const handleDelete = useCallback(
@@ -91,7 +93,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
       <main className="max-w-3xl mx-auto px-6 py-8">
         <div className="flex flex-wrap items-center gap-2 mb-4">
           <span className="px-3 py-1.5 rounded-full bg-white/10 border border-white/10 text-xs font-bold">
-            Plan: {userProfile?.licenseTier === 'lifetime' ? 'Lifetime' : 'Free'}
+            Plan: {tier === 'lifetime' ? 'Lifetime' : 'Free'}
           </span>
           <span className="text-xs text-white/40">Free: 30s projects · 3 exports/day · watermark · Lifetime: up to 10 min · no watermark · all templates</span>
         </div>
