@@ -64,10 +64,12 @@ export interface ProjectSummary {
  * one real caller that now always passes an explicit size, chosen once at
  * creation from the 4 marketing-standard ratios.
  */
-export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Project {
+export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean }): Project {
   let project = createEmptyProject({ ownerUid, name, canvasWidth, canvasHeight });
-  // v1 free default: watermark on. Lifetime users can toggle it off per project.
-  project = { ...project, watermarkEnabled: true };
+  // v1 free default: watermark on. Lifetime users can toggle it off per project,
+  // and callers that know the creator's tier (Dashboard) pass it so paid/owner
+  // projects start with the watermark OFF instead of needing a manual toggle.
+  project = { ...project, watermarkEnabled: opts?.watermarkEnabled ?? true };
   const trackSpecs: Array<[Project['tracks'][number]['type'], string]> = [
     ['video', 'Main Video'],
     ['image', 'Watermark'],
@@ -81,8 +83,8 @@ export function createDefaultProject(ownerUid: string, name?: string, canvasWidt
   return project;
 }
 
-export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Promise<Project> {
-  const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight);
+export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean }): Promise<Project> {
+  const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight, opts);
   assertValidProject(project);
   await setDoc(doc(db, PROJECTS_COLLECTION, project.id), serializeProject(project));
   return project;
