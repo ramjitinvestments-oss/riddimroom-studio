@@ -4,6 +4,7 @@ import {
   createTrack,
   addTrack,
   addItem,
+  addMediaAsset,
   generateTimelineId,
   trimItemEnd,
   setItemDuration,
@@ -16,9 +17,14 @@ import {
   setItemSpeed,
   SPEED_MIN,
   SPEED_MAX,
+  getContentEndTime,
+  trimAudioToProjectEnd,
+  loopAudioToProjectEnd,
+  FIT_FADE_OUT_SECONDS,
 } from './utils';
+import { serializeProject, parseProject } from './serialization';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
-import type { ImageTimelineItem, Project, VideoTimelineItem } from '../../types/timeline';
+import type { AudioTimelineItem, ImageTimelineItem, MediaAsset, Project, VideoTimelineItem } from '../../types/timeline';
 
 /**
  * v1 cap tests — MAX_MEDIA_SECONDS (600s / 10 min) replaces the old
@@ -241,5 +247,188 @@ describe('setItemSpeed (Phase 2.3 speed controls)', () => {
     expect(setItemSpeed(project, itemId, 2)).toBe(project);
     const { project: videoProject } = projectWithVideoItem();
     expect(setItemSpeed(videoProject, 'no-such-item', 2)).toBe(videoProject);
+  });
+});
+
+describe('audio fit (trimAudioToProjectEnd / loopAudioToProjectEnd)', () => {
+  const audioAsset = (durationSeconds: number): MediaAsset => ({
+    id: 'audio-asset',
+    kind: 'audio',
+    storageUrl: 'https://example.com/song.mp3',
+    fileName: 'song.mp3',
+    sizeBytes: 500_000,
+    mimeType: 'audio/mpeg',
+    durationSeconds,
+    createdAt: 0,
+  });
+
+  /**
+   * Project fixture: one video item spanning [0, videoEnd] and one audio
+   * item (on its own track) with the given span/trim on a registered
+   * audio asset of `assetSeconds`. Returns ids for assertions.
+   */
+  function projectWithAudioAndVideo(opts: {
+    videoEnd: number;
+    audioStart?: number;
+    audioEnd: number;
+    trimStart?: number;
+    trimEnd: number;
+    assetSeconds: number;
+    fadeOut?: number;
+    loop?: boolean;
+  }): { project: Project; audioId: string; videoId: string } {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const videoTrack = createTrack('video', 'Video', 0);
+    const audioTrack = createTrack('audio', 'Audio', 1);
+    project = addTrack(project, videoTrack);
+    project = addTrack(project, audioTrack);
+    project = addMediaAsset(project, audioAsset(opts.assetSeconds));
+    project = addMediaAsset(project, {
+      id: 'video-asset',
+      kind: 'video',
+      storageUrl: 'https://example.com/clip.mp4',
+      fileName: 'clip.mp4',
+      sizeBytes: 1_000_000,
+      mimeType: 'video/mp4',
+      durationSeconds: opts.videoEnd,
+      width: 1080,
+      height: 1920,
+      createdAt: 0,
+    });
+    const video: VideoTimelineItem = {
+      id: generateTimelineId('item'),
+      type: 'video',
+      trackId: videoTrack.id,
+      startTime: 0,
+      endTime: opts.videoEnd,
+      zIndex: 0,
+      visible: true,
+      mediaAssetId: 'video-asset',
+      position: { x: 50, y: 50 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      trimStart: 0,
+      trimEnd: opts.videoEnd,
+      speed: 1,
+      reverse: false,
+      volume: 1,
+      muted: false,
+    };
+    const audio: AudioTimelineItem = {
+      id: generateTimelineId('item'),
+      type: 'audio',
+      trackId: audioTrack.id,
+      startTime: opts.audioStart ?? 0,
+      endTime: opts.audioEnd,
+      zIndex: 1,
+      visible: true,
+      mediaAssetId: 'audio-asset',
+      role: 'music',
+      volume: 1,
+      muted: false,
+      trimStart: opts.trimStart ?? 0,
+      trimEnd: opts.trimEnd,
+      fade: { fadeInDuration: 0, fadeOutDuration: opts.fadeOut ?? 0 },
+      ...(opts.loop ? { loop: true } : {}),
+    };
+    project = addItem(project, video);
+    project = addItem(project, audio);
+    return { project, audioId: audio.id, videoId: video.id };
+  }
+
+  it('getContentEndTime excludes the fitted item itself', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 20, audioEnd: 45, trimEnd: 45, assetSeconds: 45 });
+    expect(getContentEndTime(project)).toBe(45);
+    expect(getContentEndTime(project, audioId)).toBe(20);
+  });
+
+  it('trim: cuts an over-long clip down to the project end, moving the trim window 1:1 and clearing loop', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 20, audioEnd: 30, trimEnd: 30, assetSeconds: 30, loop: true });
+    const next = trimAudioToProjectEnd(project, audioId);
+    const updated = next.items.find((i) => i.id === audioId) as AudioTimelineItem;
+    expect(updated.endTime).toBe(20);
+    expect(updated.trimEnd).toBe(20);
+    expect(updated.loop).toBe(false);
+    expect(updated.fade.fadeOutDuration).toBeCloseTo(FIT_FADE_OUT_SECONDS, 5);
+  });
+
+  it('trim: extends a short clip using source the asset actually has', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 20, audioEnd: 10, trimEnd: 10, assetSeconds: 25 });
+    const next = trimAudioToProjectEnd(project, audioId);
+    const updated = next.items.find((i) => i.id === audioId) as AudioTimelineItem;
+    expect(updated.endTime).toBe(20);
+    expect(updated.trimEnd).toBe(20);
+  });
+
+  it('trim: never extends past the asset’s real duration', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 20, audioEnd: 10, trimEnd: 10, assetSeconds: 15 });
+    const next = trimAudioToProjectEnd(project, audioId);
+    const updated = next.items.find((i) => i.id === audioId) as AudioTimelineItem;
+    expect(updated.endTime).toBe(15);
+    expect(updated.trimEnd).toBe(15);
+  });
+
+  it('trim: respects a fade-out the user already set instead of overwriting it with the default', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 20, audioEnd: 30, trimEnd: 30, assetSeconds: 30, fadeOut: 2 });
+    const next = trimAudioToProjectEnd(project, audioId);
+    const updated = next.items.find((i) => i.id === audioId) as AudioTimelineItem;
+    expect(updated.fade.fadeOutDuration).toBe(2);
+    expect(updated.fade.fadeInDuration).toBe(0);
+  });
+
+  it('loop: stretches the span to the project end, sets loop, leaves the trim window untouched', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 24, audioEnd: 8, trimEnd: 8, assetSeconds: 8 });
+    const next = loopAudioToProjectEnd(project, audioId);
+    const updated = next.items.find((i) => i.id === audioId) as AudioTimelineItem;
+    expect(updated.loop).toBe(true);
+    expect(updated.endTime).toBe(24);
+    expect(updated.trimStart).toBe(0);
+    expect(updated.trimEnd).toBe(8);
+    expect(updated.fade.fadeOutDuration).toBeCloseTo(FIT_FADE_OUT_SECONDS, 5);
+  });
+
+  it('both fit helpers are no-ops when the audio item is alone on the timeline', () => {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const audioTrack = createTrack('audio', 'Audio', 0);
+    project = addTrack(project, audioTrack);
+    project = addMediaAsset(project, audioAsset(10));
+    const audio: AudioTimelineItem = {
+      id: generateTimelineId('item'),
+      type: 'audio',
+      trackId: audioTrack.id,
+      startTime: 0,
+      endTime: 10,
+      zIndex: 0,
+      visible: true,
+      mediaAssetId: 'audio-asset',
+      role: 'music',
+      volume: 1,
+      muted: false,
+      trimStart: 0,
+      trimEnd: 10,
+      fade: { fadeInDuration: 0, fadeOutDuration: 0 },
+    };
+    project = addItem(project, audio);
+    expect(trimAudioToProjectEnd(project, audio.id)).toBe(project);
+    expect(loopAudioToProjectEnd(project, audio.id)).toBe(project);
+  });
+
+  it('fit helpers ignore non-audio items and missing ids', () => {
+    const { project, videoId } = projectWithAudioAndVideo({ videoEnd: 20, audioEnd: 10, trimEnd: 10, assetSeconds: 25 });
+    expect(trimAudioToProjectEnd(project, videoId)).toBe(project);
+    expect(loopAudioToProjectEnd(project, videoId)).toBe(project);
+    expect(trimAudioToProjectEnd(project, 'no-such-item')).toBe(project);
+    expect(loopAudioToProjectEnd(project, 'no-such-item')).toBe(project);
+  });
+
+  it('a looped, fitted project survives a serialize/parse round-trip and still validates', () => {
+    const { project, audioId } = projectWithAudioAndVideo({ videoEnd: 24, audioEnd: 8, trimEnd: 8, assetSeconds: 8 });
+    const fitted = loopAudioToProjectEnd(project, audioId);
+    const parsed = parseProject(serializeProject(fitted, 1234));
+    expect(parsed.project).not.toBeNull();
+    const roundTripped = parsed.project!.items.find((i) => i.id === audioId) as AudioTimelineItem;
+    expect(roundTripped.loop).toBe(true);
+    expect(roundTripped.endTime).toBe(24);
   });
 });
