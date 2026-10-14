@@ -15,6 +15,7 @@ import {
   type ExportResolutionId,
 } from '../../lib/export/quality';
 import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
+import { useLicenseTier } from '../../hooks/useLicenseTier';
 
 /**
  * Phase 1 Step 12 (Export engine), extended for genuine MP4 output. Drives
@@ -28,7 +29,7 @@ import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/l
  */
 export function ExportPanel() {
   const { project } = useProject();
-  const { currentUser: user, userProfile } = useAuth();
+  const { currentUser: user } = useAuth();
   const [status, setStatus] = useState<'idle' | 'rendering' | 'converting' | 'done' | 'error'>('idle');
   const [progress, setProgress] = useState<RenderProgress | null>(null);
   const [convertRatio, setConvertRatio] = useState(0);
@@ -36,7 +37,9 @@ export function ExportPanel() {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const busy = status === 'rendering' || status === 'converting';
-  const tier = userProfile?.licenseTier ?? 'free';
+  // Effective tier (server profile when the API answered; admin-grant
+  // fallback on builds without /api/*) — see hooks/useLicenseTier.
+  const { tier } = useLicenseTier();
   const remaining = user ? exportsRemainingToday(user.uid, tier) : 0;
   const canExport = user ? canExportToday(user.uid, tier) : false;
 
