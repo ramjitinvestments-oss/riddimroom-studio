@@ -5,6 +5,15 @@ import { Canvas2DRenderer } from '../../lib/export/canvas2dRenderer';
 import { validateRenderResult } from '../../lib/export/validate';
 import type { RenderProgress } from '../../lib/export/renderer';
 import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
+import {
+  EXPORT_FRAME_RATES,
+  EXPORT_QUALITY_TIERS,
+  EXPORT_RESOLUTIONS,
+  resolveExportDimensions,
+  resolveExportSettings,
+  type ExportQualityTier,
+  type ExportResolutionId,
+} from '../../lib/export/quality';
 import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
 
 /**
@@ -31,6 +40,15 @@ export function ExportPanel() {
   const remaining = user ? exportsRemainingToday(user.uid, tier) : 0;
   const canExport = user ? canExportToday(user.uid, tier) : false;
 
+  // Export quality picker (Phase 2.1). Defaults reproduce the pre-picker
+  // behavior exactly: native project resolution, the project's own frame
+  // rate (`frameRateChoice === null` until the user picks one), and the
+  // High tier (whose CRF/audio bitrate are the transcoder's original
+  // hardcoded values — see lib/export/quality.ts).
+  const [resolution, setResolution] = useState<ExportResolutionId>('native');
+  const [frameRateChoice, setFrameRateChoice] = useState<number | null>(null);
+  const [qualityTier, setQualityTier] = useState<ExportQualityTier>('high');
+
   const handleExport = useCallback(async () => {
     if (!project || busy) return; // guards against duplicate/overlapping exports
     if (user && !canExportToday(user.uid, tier)) {
@@ -48,11 +66,21 @@ export function ExportPanel() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // Resolve the picker into concrete encoder settings once, up front —
+    // the SAME resolved values drive both stages (recording + MP4
+    // transcode) so the two can never disagree about size/fps/quality.
+    const output = resolveExportSettings(project.canvasWidth, project.canvasHeight, {
+      resolution,
+      frameRate: frameRateChoice ?? project.frameRate,
+      quality: qualityTier,
+    });
+
     try {
       const renderer = new Canvas2DRenderer();
       const result = await renderer.render(project, {
         signal: controller.signal,
         onProgress: setProgress,
+        output,
       });
       const validation = validateRenderResult(result.blob, result.durationSeconds);
       if (!validation.valid) {
@@ -64,7 +92,10 @@ export function ExportPanel() {
       setStatus('converting');
       let mp4Blob: Blob;
       try {
-        mp4Blob = await transcodeWebmToMp4(result.blob, project.frameRate, ({ ratio }) => setConvertRatio(ratio));
+        mp4Blob = await transcodeWebmToMp4(result.blob, output.frameRate, ({ ratio }) => setConvertRatio(ratio), {
+          crf: output.crf,
+          audioBitrateKbps: output.audioBitsPerSecond / 1000,
+        });
       } catch (convertErr: any) {
         setError(convertErr?.message || 'Could not convert the export to MP4.');
         setStatus('error');
@@ -84,13 +115,34 @@ export function ExportPanel() {
     } finally {
       abortRef.current = null;
     }
-  }, [project, downloadUrl, busy, user, tier]);
+  }, [project, downloadUrl, busy, user, tier, resolution, frameRateChoice, qualityTier]);
 
   const handleCancel = () => {
     abortRef.current?.abort();
   };
 
   if (!project) return null;
+
+  const effectiveFrameRate = frameRateChoice ?? project.frameRate;
+  const resolved = resolveExportSettings(project.canvasWidth, project.canvasHeight, {
+    resolution,
+    frameRate: effectiveFrameRate,
+    quality: qualityTier,
+  });
+  // A resolution option that resolves to the native size anyway would be
+  // a duplicate of "Native" (exports never upscale) — disable it honestly
+  // instead of offering a choice that changes nothing.
+  const isRedundantResolution = (id: ExportResolutionId): boolean => {
+    if (id === 'native') return false;
+    const dims = resolveExportDimensions(project.canvasWidth, project.canvasHeight, id);
+    return dims.width === project.canvasWidth && dims.height === project.canvasHeight;
+  };
+  const chipClass = (isActive: boolean) =>
+    `min-h-11 px-2 rounded-lg border text-xs font-bold transition ${
+      isActive
+        ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+        : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80 disabled:opacity-30 disabled:hover:bg-white/5'
+    }`;
 
   return (
     <div className="flex flex-col gap-2">
@@ -99,6 +151,63 @@ export function ExportPanel() {
         {user ? `${remaining} export${remaining === 1 ? '' : 's'} left today (${tier === 'lifetime' ? 'Lifetime' : 'Free'})` : 'Sign in to export.'}
         {project.watermarkEnabled !== false ? ' · Watermark on (free).' : ' · No watermark.'}
       </p>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Resolution</span>
+        <div className="flex gap-1.5">
+          {EXPORT_RESOLUTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setResolution(opt.id)}
+              disabled={busy || isRedundantResolution(opt.id)}
+              aria-pressed={resolution === opt.id}
+              title={isRedundantResolution(opt.id) ? 'Same as this project\'s native size — exports never upscale' : undefined}
+              className={`${chipClass(resolution === opt.id)} flex-1`}
+            >
+              {opt.id === 'native' ? `Native ${project.canvasWidth}×${project.canvasHeight}` : opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Frame rate</span>
+        <div className="flex gap-1.5">
+          {EXPORT_FRAME_RATES.map((fps) => (
+            <button
+              key={fps}
+              onClick={() => setFrameRateChoice(fps)}
+              disabled={busy}
+              aria-pressed={effectiveFrameRate === fps}
+              className={`${chipClass(effectiveFrameRate === fps)} flex-1`}
+            >
+              {fps} fps
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Quality</span>
+        <div className="flex gap-1.5">
+          {EXPORT_QUALITY_TIERS.map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setQualityTier(opt.id)}
+              disabled={busy}
+              aria-pressed={qualityTier === opt.id}
+              title={opt.description}
+              className={`${chipClass(qualityTier === opt.id)} flex-1`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] text-white/30">
+          Output: {resolved.width}×{resolved.height} · {resolved.frameRate} fps · ~{(resolved.videoBitsPerSecond / 1_000_000).toFixed(1)} Mbps video
+          {' · '}{EXPORT_QUALITY_TIERS.find((t) => t.id === qualityTier)?.description}
+        </p>
+      </div>
       {!busy && (
         <button
           onClick={handleExport}
