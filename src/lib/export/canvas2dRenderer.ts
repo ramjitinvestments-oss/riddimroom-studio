@@ -292,7 +292,12 @@ export class Canvas2DRenderer implements Renderer {
           if (!asset) continue;
           activeVideoAssetIds.add(asset.id);
           const handle = getVideoHandle(asset.id, asset.storageUrl);
-          const targetTime = item.trimStart + Math.max(0, t - item.startTime);
+          // Speed (Phase 2.3): mirror PreviewPane exactly — the element
+          // plays at the item's rate and timeline time maps to source
+          // time through it, so a 2x clip occupies half the timeline span
+          // in the export just as it does in the preview.
+          (handle.element as HTMLVideoElement).playbackRate = item.speed || 1;
+          const targetTime = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
           if (Math.abs((handle.element as HTMLVideoElement).currentTime - targetTime) > 0.35) {
             try { (handle.element as HTMLVideoElement).currentTime = targetTime; } catch { /* not seekable yet */ }
           }
