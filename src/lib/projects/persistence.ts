@@ -1,1 +1,153 @@
-LyoqCiAqIFJpZGRpbVJvb20gU3R1ZGlvIOKAlCBwcm9qZWN0IHBlcnNpc3RlbmNlIChTdGVwIDYsIFNoYXJlZCBlZGl0b3Igc2hlbGwpLgogKgogKiBSZWFkcy93cml0ZXMgYHByb2plY3RzL3twcm9qZWN0SWR9YCBkaXJlY3RseSB0aHJvdWdoIHRoZSBGaXJlYmFzZSBjbGllbnQKICogU0RLLCB1c2luZyBgc2VyaWFsaXplUHJvamVjdGAvYHBhcnNlUHJvamVjdGAgZnJvbSB0aGUgdGltZWxpbmUgZm91bmRhdGlvbgogKiBmb3IgdGhlIGFjdHVhbCBzaGFwZSBjb252ZXJzaW9uICsgdmFsaWRhdGlvbi4gYGZpcmVzdG9yZS5ydWxlc2AgYWxyZWFkeQogKiBzY29wZXMgdGhpcyBjb2xsZWN0aW9uIHRvIGByZXNvdXJjZS5kYXRhLm93bmVyVWlkID09IHJlcXVlc3QuYXV0aC51aWRgCiAqIChyZWFkL3dyaXRlKSBhbmQgYHJlcXVlc3QucmVzb3VyY2UuZGF0YS5vd25lclVpZCA9PSByZXF1ZXN0LmF1dGgudWlkYAogKiAoY3JlYXRlKSDigJQgc2NhZmZvbGRlZCBpbiBTdGVwIDEsIHVudXNlZCB1bnRpbCBub3cuCiAqCiAqIERvY3VtZW50ZWQgZGV2aWF0aW9uIGZyb20gdGhlIHJvYWRtYXAncyB0ZW50YXRpdmUgc3VnZ2VzdGlvbiBvZiByb3V0aW5nCiAqIHByb2plY3Qgc2F2ZXMgdGhyb3VnaCB0aGUgRXhwcmVzcy9BZG1pbiBTREsgYmFja2VuZCAobWlycm9yaW5nIGhvdwogKiBgL2FwaS91c2VyL3N0YXR1c2Agd29ya3MpOiBgdXNlcnMve3VpZH1gIG5lZWRlZCBzZXJ2ZXItbWVkaWF0aW9uIGJlY2F1c2UKICogcm9sZS9zdGF0dXMvcXVvdGEgbXVzdCBuZXZlciBiZSBjbGllbnQtd3JpdGFibGUuIGBwcm9qZWN0cy97cHJvamVjdElkfWAKICogaGFzIG5vIHN1Y2ggcHJpdmlsZWdlZCBmaWVsZCDigJQgZXZlcnkgZmllbGQgb24gYSBQcm9qZWN0IGlzIHRoZSBvd25pbmcKICogdXNlcidzIG93biBlZGl0b3JpYWwgZGF0YSDigJQgc28gdGhlIHNlY3VyaXR5IHJ1bGUncyBwZXItZG9jdW1lbnQKICogb3duZXJzaGlwIGNoZWNrIGlzIHN1ZmZpY2llbnQgb24gaXRzIG93biwgdGhlIHNhbWUgdHJ1c3QgbW9kZWwgRmlyZXN0b3JlCiAqIGNsaWVudCBTREtzIHVzZSBmb3IgYW55IHVzZXItb3duZWQgY29sbGVjdGlvbi4gR29pbmcgdGhyb3VnaCBhIHNlcnZlcgogKiByb3V0ZSBoZXJlIHdvdWxkIGFkZCBhIG5ldHdvcmsgaG9wIGFuZCBhIGJlc3Bva2UgQVBJIHN1cmZhY2UgZm9yIG5vCiAqIGFkZGl0aW9uYWwgc2VjdXJpdHkuIFJldmlzaXQgb25seSBpZiBhIGZ1dHVyZSBwaGFzZSBhZGRzCiAqIHNlcnZlci1jb21wdXRlZCBmaWVsZHMgKGUuZy4gbW9kZXJhdGlvbiBzdGF0dXMpIHRvIFByb2plY3QuCiAqLwoKaW1wb3J0IHsKICBjb2xsZWN0aW9uLAogIGRvYywKICBnZXREb2MsCiAgZ2V0RG9jcywKICBzZXREb2MsCiAgZGVsZXRlRG9jLAogIHF1ZXJ5LAogIHdoZXJlLAogIGxpbWl0IGFzIGZzTGltaXQsCn0gZnJvbSAnZmlyZWJhc2UvZmlyZXN0b3JlJzsKaW1wb3J0IHsgZGIgfSBmcm9tICcuLi9maXJlYmFzZSc7CmltcG9ydCB7IHNlcmlhbGl6ZVByb2plY3QsIHBhcnNlUHJvamVjdCB9IGZyb20gJy4uL3RpbWVsaW5lL3NlcmlhbGl6YXRpb24nOwppbXBvcnQgeyBjcmVhdGVFbXB0eVByb2plY3QsIGNyZWF0ZVRyYWNrLCBhZGRUcmFjayB9IGZyb20gJy4uL3RpbWVsaW5lL3V0aWxzJzsKaW1wb3J0IHsgYXNzZXJ0VmFsaWRQcm9qZWN0IH0gZnJvbSAnLi4vdGltZWxpbmUvdmFsaWRhdGlvbic7CmltcG9ydCB0eXBlIHsgUHJvamVjdCB9IGZyb20gJy4uLy4uL3R5cGVzL3RpbWVsaW5lJzsKCmNvbnN0IFBST0pFQ1RTX0NPTExFQ1RJT04gPSAncHJvamVjdHMnOwoKZXhwb3J0IGludGVyZmFjZSBQcm9qZWN0U3VtbWFyeSB7CiAgaWQ6IHN0cmluZzsKICBuYW1lOiBzdHJpbmc7CiAgdXBkYXRlZEF0OiBudW1iZXI7CiAgY3JlYXRlZEF0OiBudW1iZXI7CiAgY2FudmFzV2lkdGg6IG51bWJlcjsKICBjYW52YXNIZWlnaHQ6IG51bWJlcjsKICAvKiogRGFzaGJvYXJkIGNhcmQgY292ZXIgKHNlZSBgUHJvamVjdC5wb3N0ZXJEYXRhVXJsYCkg4oCUIGFic2VudCBvbiBvbGRlciBwcm9qZWN0cy4gKi8KICBwb3N0ZXJEYXRhVXJsPzogc3RyaW5nOwp9CgovKioKICogQnVpbGRzIGEgbmV3IFByb2plY3Qgd2l0aCBvbmUgdHJhY2sgcGVyIHRyYWNrIHR5cGUgYWxyZWFkeSBwcmVzZW50LCBwZXIKICogdGhlIHJvYWRtYXAncyBTdGVwIDYgZ3VpZGFuY2U6IENhcHR1cmUvVXBsb2FkL292ZXJsYXkvY2FwdGlvbiBzdGVwcwogKiBzaG91bGQgc2xvdCBpdGVtcyBvbnRvIGV4aXN0aW5nIHRyYWNrcyB2aWEgdGhlIHRpbWVsaW5lIGZvdW5kYXRpb24ncwogKiB1dGlscyByYXRoZXIgdGhhbiBlYWNoIGludmVudGluZyBpdHMgb3duIHRyYWNrLWNyZWF0aW9uIGxvZ2ljLgogKgogKiBgY2FudmFzV2lkdGhgL2BjYW52YXNIZWlnaHRgIGRlZmF1bHQgdG8gYGNyZWF0ZUVtcHR5UHJvamVjdGAncyBvd24KICogMTA4MHgxOTIwICg5OjE2KSBkZWZhdWx0IHdoZW4gb21pdHRlZCDigJQgY2FsbGVycyB0aGF0IGRvbid0IGNhcmUgYWJvdXQKICogYXNwZWN0IHJhdGlvICh0ZXN0cywgb2xkZXIgY2FsbCBzaXRlcykga2VlcCB3b3JraW5nIHVuY2hhbmdlZC4gVGhlCiAqICJmaW5hbCBwcm9kdWN0aW9uIiBwYXNzJ3MgYXNwZWN0LXJhdGlvIHBpY2tlciAoYERhc2hib2FyZC50c3hgKSBpcyB0aGUKICogb25lIHJlYWwgY2FsbGVyIHRoYXQgbm93IGFsd2F5cyBwYXNzZXMgYW4gZXhwbGljaXQgc2l6ZSwgY2hvc2VuIG9uY2UgYXQKICogY3JlYXRpb24gZnJvbSB0aGUgNCBtYXJrZXRpbmctc3RhbmRhcmQgcmF0aW9zLgogKi8KZXhwb3J0IGZ1bmN0aW9uIGNyZWF0ZURlZmF1bHRQcm9qZWN0KG93bmVyVWlkOiBzdHJpbmcsIG5hbWU/OiBzdHJpbmcsIGNhbnZhc1dpZHRoPzogbnVtYmVyLCBjYW52YXNIZWlnaHQ/OiBudW1iZXIpOiBQcm9qZWN0IHsKICBsZXQgcHJvamVjdCA9IGNyZWF0ZUVtcHR5UHJvamVjdCh7IG93bmVyVWlkLCBuYW1lLCBjYW52YXNXaWR0aCwgY2FudmFzSGVpZ2h0IH0pOwogIC8vIHYxIGZyZWUgZGVmYXVsdDogd2F0ZXJtYXJrIG9uLiBMaWZldGltZSB1c2VycyBjYW4gdG9nZ2xlIGl0IG9mZiBwZXIgcHJvamVjdC4KICBwcm9qZWN0ID0geyAuLi5wcm9qZWN0LCB3YXRlcm1hcmtFbmFibGVkOiB0cnVlIH07CiAgY29uc3QgdHJhY2tTcGVjczogQXJyYXk8W1Byb2plY3RbJ3RyYWNrcyddW251bWJlcl1bJ3R5cGUnXSwgc3RyaW5nXT4gPSBbCiAgICBbJ3ZpZGVvJywgJ01haW4gVmlkZW8nXSwKICAgIFsnaW1hZ2UnLCAnV2F0ZXJtYXJrJ10sCiAgICBbJ3RleHQnLCAnVGV4dCddLAogICAgWydjYXB0aW9uJywgJ0NhcHRpb25zJ10sCiAgICBbJ2F1ZGlvJywgJ09yaWdpbmFsIEF1ZGlvJ10sCiAgXTsKICB0cmFja1NwZWNzLmZvckVhY2goKFt0eXBlLCB0cmFja05hbWVdLCBpbmRleCkgPT4gewogICAgcHJvamVjdCA9IGFkZFRyYWNrKHByb2plY3QsIGNyZWF0ZVRyYWNrKHR5cGUsIHRyYWNrTmFtZSwgaW5kZXgpKTsKICB9KTsKICByZXR1cm4gcHJvamVjdDsKfQoKZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIGNyZWF0ZVByb2plY3Qob3duZXJVaWQ6IHN0cmluZywgbmFtZT86IHN0cmluZywgY2FudmFzV2lkdGg/OiBudW1iZXIsIGNhbnZhc0hlaWdodD86IG51bWJlcik6IFByb21pc2U8UHJvamVjdD4gewogIGNvbnN0IHByb2plY3QgPSBjcmVhdGVEZWZhdWx0UHJvamVjdChvd25lclVpZCwgbmFtZSwgY2FudmFzV2lkdGgsIGNhbnZhc0hlaWdodCk7CiAgYXNzZXJ0VmFsaWRQcm9qZWN0KHByb2plY3QpOwogIGF3YWl0IHNldERvYyhkb2MoZGIsIFBST0pFQ1RTX0NPTExFQ1RJT04sIHByb2plY3QuaWQpLCBzZXJpYWxpemVQcm9qZWN0KHByb2plY3QpKTsKICByZXR1cm4gcHJvamVjdDsKfQoKZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIHNhdmVQcm9qZWN0KHByb2plY3Q6IFByb2plY3QpOiBQcm9taXNlPFByb2plY3Q+IHsKICBhc3NlcnRWYWxpZFByb2plY3QocHJvamVjdCk7CiAgY29uc3Qgc2VyaWFsaXplZCA9IHNlcmlhbGl6ZVByb2plY3QocHJvamVjdCk7CiAgYXdhaXQgc2V0RG9jKGRvYyhkYiwgUFJPSkVDVFNfQ09MTEVDVElPTiwgcHJvamVjdC5pZCksIHNlcmlhbGl6ZWQpOwogIHJldHVybiB7IC4uLnByb2plY3QsIHVwZGF0ZWRBdDogc2VyaWFsaXplZC51cGRhdGVkQXQgfTsKfQoKZXhwb3J0IGludGVyZmFjZSBMb2FkUHJvamVjdFJlc3VsdCB7CiAgcHJvamVjdDogUHJvamVjdCB8IG51bGw7CiAgZXJyb3I/OiBzdHJpbmc7Cn0KCi8qKiBMb2FkcyBhIHByb2plY3QgYW5kIGVuZm9yY2VzIG93bmVyc2hpcCBjbGllbnQtc2lkZSB0b28gKGRlZmVuc2UgaW4gZGVwdGggb24gdG9wIG9mIHRoZSBGaXJlc3RvcmUgcnVsZSkuICovCmV4cG9ydCBhc3luYyBmdW5jdGlvbiBsb2FkUHJvamVjdChwcm9qZWN0SWQ6IHN0cmluZywgb3duZXJVaWQ6IHN0cmluZyk6IFByb21pc2U8TG9hZFByb2plY3RSZXN1bHQ+IHsKICBjb25zdCBzbmFwc2hvdCA9IGF3YWl0IGdldERvYyhkb2MoZGIsIFBST0pFQ1RTX0NPTExFQ1RJT04sIHByb2plY3RJZCkpOwogIGlmICghc25hcHNob3QuZXhpc3RzKCkpIHsKICAgIHJldHVybiB7IHByb2plY3Q6IG51bGwsIGVycm9yOiAnUHJvamVjdCBub3QgZm91bmQuJyB9OwogIH0KICBjb25zdCB7IHByb2plY3QsIHN0cnVjdHVyYWxFcnJvcnMsIHZhbGlkYXRpb24gfSA9IHBhcnNlUHJvamVjdChzbmFwc2hvdC5kYXRhKCkpOwogIGlmICghcHJvamVjdCkgewogICAgcmV0dXJuIHsgcHJvamVjdDogbnVsbCwgZXJyb3I6IGBQcm9qZWN0IGRhdGEgaXMgY29ycnVwdGVkOiAke3N0cnVjdHVyYWxFcnJvcnMuam9pbignOyAnKX1gIH07CiAgfQogIGlmIChwcm9qZWN0Lm93bmVyVWlkICE9PSBvd25lclVpZCkgewogICAgLy8gVGhlIEZpcmVzdG9yZSBydWxlIGFscmVhZHkgYmxvY2tzIHRoaXMgYXQgdGhlIG5ldHdvcmsgbGV2ZWw7IHRoaXMgaXMKICAgIC8vIGEgc2Vjb25kLCBleHBsaWNpdCBjaGVjayBzbyBhIFVJIGJ1ZyBjYW4gbmV2ZXIgZXZlbiBhdHRlbXB0IHRvIHJlbmRlcgogICAgLy8gYW5vdGhlciB1c2VyJ3MgcHJvamVjdCBkYXRhLgogICAgcmV0dXJuIHsgcHJvamVjdDogbnVsbCwgZXJyb3I6ICdZb3UgZG8gbm90IGhhdmUgYWNjZXNzIHRvIHRoaXMgcHJvamVjdC4nIH07CiAgfQogIGlmICh2YWxpZGF0aW9uICYmICF2YWxpZGF0aW9uLnZhbGlkKSB7CiAgICByZXR1cm4geyBwcm9qZWN0OiBudWxsLCBlcnJvcjogYFByb2plY3QgZmFpbGVkIHZhbGlkYXRpb246ICR7dmFsaWRhdGlvbi5lcnJvcnMubWFwKChlKSA9PiBlLm1lc3NhZ2UpLmpvaW4oJzsgJyl9YCB9OwogIH0KICByZXR1cm4geyBwcm9qZWN0IH07Cn0KCmV4cG9ydCBhc3luYyBmdW5jdGlvbiBsaXN0UHJvamVjdHMob3duZXJVaWQ6IHN0cmluZywgbWF4ID0gNTApOiBQcm9taXNlPFByb2plY3RTdW1tYXJ5W10+IHsKICAvLyBEZWxpYmVyYXRlbHkgbm8gYG9yZGVyQnkoJ3VwZGF0ZWRBdCcpYCBpbiB0aGUgcXVlcnkgaXRzZWxmOiBjb21iaW5lZAogIC8vIHdpdGggYHdoZXJlKCdvd25lclVpZCcsICc9PScsIC4uLilgIG9uIGEgZGlmZmVyZW50IGZpZWxkLCBGaXJlc3RvcmUKICAvLyB3b3VsZCByZXF1aXJlIGEgY29tcG9zaXRlIGluZGV4IHRvIGJlIGNyZWF0ZWQgaW4gdGhlIGNvbnNvbGUgYmVmb3JlCiAgLy8gdGhpcyBxdWVyeSB3b3JrcyBhdCBhbGwg4oCUIGFuIGV4dHJhIG1hbnVhbCBkZXBsb3ltZW50IHN0ZXAgb3V0c2lkZSB0aGlzCiAgLy8gY29kZWJhc2UuIFNvcnRpbmcgdGhlIChjYXBwZWQgYXQgYG1heGApIHJlc3VsdCBjbGllbnQtc2lkZSBhdm9pZHMgdGhhdAogIC8vIGRlcGVuZGVuY3k7IHJldmlzaXQgaWYgYSB1c2VyJ3MgcHJvamVjdCBjb3VudCBldmVyIG1ha2VzIGNsaWVudC1zaWRlCiAgLy8gc29ydCBpbXByYWN0aWNhbC4KICBjb25zdCBxID0gcXVlcnkoY29sbGVjdGlvbihkYiwgUFJPSkVDVFNfQ09MTEVDVElPTiksIHdoZXJlKCdvd25lclVpZCcsICc9PScsIG93bmVyVWlkKSwgZnNMaW1pdChtYXgpKTsKICBjb25zdCBzbmFwc2hvdCA9IGF3YWl0IGdldERvY3MocSk7CiAgcmV0dXJuIHNuYXBzaG90LmRvY3MKICAgIC5tYXAoKGRvY1NuYXApID0+IHsKICAgICAgY29uc3QgZGF0YSA9IGRvY1NuYXAuZGF0YSgpIGFzIFByb2plY3Q7CiAgICAgIHJldHVybiB7CiAgICAgICAgaWQ6IGRhdGEuaWQsCiAgICAgICAgbmFtZTogZGF0YS5uYW1lLAogICAgICAgIHVwZGF0ZWRBdDogZGF0YS51cGRhdGVkQXQsCiAgICAgICAgY3JlYXRlZEF0OiBkYXRhLmNyZWF0ZWRBdCwKICAgICAgICBjYW52YXNXaWR0aDogZGF0YS5jYW52YXNXaWR0aCwKICAgICAgICBjYW52YXNIZWlnaHQ6IGRhdGEuY2FudmFzSGVpZ2h0LAogICAgICAgIHBvc3RlckRhdGFVcmw6IHR5cGVvZiBkYXRhLnBvc3RlckRhdGFVcmwgPT09ICdzdHJpbmcnID8gZGF0YS5wb3N0ZXJEYXRhVXJsIDogdW5kZWZpbmVkLAogICAgICB9OwogICAgfSkKICAgIC5zb3J0KChhLCBiKSA9PiBiLnVwZGF0ZWRBdCAtIGEudXBkYXRlZEF0KTsKfQoKZXhwb3J0IGFzeW5jIGZ1bmN0aW9uIGRlbGV0ZVByb2plY3QocHJvamVjdElkOiBzdHJpbmcpOiBQcm9taXNlPHZvaWQ+IHsKICBhd2FpdCBkZWxldGVEb2MoZG9jKGRiLCBQUk9KRUNUU19DT0xMRUNUSU9OLCBwcm9qZWN0SWQpKTsKfQo=
+/**
+ * RiddimRoom Studio — project persistence (Step 6, Shared editor shell).
+ *
+ * Reads/writes `projects/{projectId}` directly through the Firebase client
+ * SDK, using `serializeProject`/`parseProject` from the timeline foundation
+ * for the actual shape conversion + validation. `firestore.rules` already
+ * scopes this collection to `resource.data.ownerUid == request.auth.uid`
+ * (read/write) and `request.resource.data.ownerUid == request.auth.uid`
+ * (create) — scaffolded in Step 1, unused until now.
+ *
+ * Documented deviation from the roadmap's tentative suggestion of routing
+ * project saves through the Express/Admin SDK backend (mirroring how
+ * `/api/user/status` works): `users/{uid}` needed server-mediation because
+ * role/status/quota must never be client-writable. `projects/{projectId}`
+ * has no such privileged field — every field on a Project is the owning
+ * user's own editorial data — so the security rule's per-document
+ * ownership check is sufficient on its own, the same trust model Firestore
+ * client SDKs use for any user-owned collection. Going through a server
+ * route here would add a network hop and a bespoke API surface for no
+ * additional security. Revisit only if a future phase adds
+ * server-computed fields (e.g. moderation status) to Project.
+ */
+
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  deleteDoc,
+  query,
+  where,
+  limit as fsLimit,
+} from 'firebase/firestore';
+import { db } from '../firebase';
+import { serializeProject, parseProject } from '../timeline/serialization';
+import { createEmptyProject, createTrack, addTrack } from '../timeline/utils';
+import { assertValidProject } from '../timeline/validation';
+import type { Project } from '../../types/timeline';
+
+const PROJECTS_COLLECTION = 'projects';
+
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  updatedAt: number;
+  createdAt: number;
+  canvasWidth: number;
+  canvasHeight: number;
+  /** Dashboard card cover (see `Project.posterDataUrl`) — absent on older projects. */
+  posterDataUrl?: string;
+}
+
+/**
+ * Builds a new Project with one track per track type already present, per
+ * the roadmap's Step 6 guidance: Capture/Upload/overlay/caption steps
+ * should slot items onto existing tracks via the timeline foundation's
+ * utils rather than each inventing its own track-creation logic.
+ *
+ * `canvasWidth`/`canvasHeight` default to `createEmptyProject`'s own
+ * 1080x1920 (9:16) default when omitted — callers that don't care about
+ * aspect ratio (tests, older call sites) keep working unchanged. The
+ * "final production" pass's aspect-ratio picker (`Dashboard.tsx`) is the
+ * one real caller that now always passes an explicit size, chosen once at
+ * creation from the 4 marketing-standard ratios.
+ */
+export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Project {
+  let project = createEmptyProject({ ownerUid, name, canvasWidth, canvasHeight });
+  // v1 free default: watermark on. Lifetime users can toggle it off per project.
+  project = { ...project, watermarkEnabled: true };
+  const trackSpecs: Array<[Project['tracks'][number]['type'], string]> = [
+    ['video', 'Main Video'],
+    ['image', 'Watermark'],
+    ['text', 'Text'],
+    ['caption', 'Captions'],
+    ['audio', 'Original Audio'],
+  ];
+  trackSpecs.forEach(([type, trackName], index) => {
+    project = addTrack(project, createTrack(type, trackName, index));
+  });
+  return project;
+}
+
+export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Promise<Project> {
+  const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight);
+  assertValidProject(project);
+  await setDoc(doc(db, PROJECTS_COLLECTION, project.id), serializeProject(project));
+  return project;
+}
+
+export async function saveProject(project: Project): Promise<Project> {
+  assertValidProject(project);
+  const serialized = serializeProject(project);
+  await setDoc(doc(db, PROJECTS_COLLECTION, project.id), serialized);
+  return { ...project, updatedAt: serialized.updatedAt };
+}
+
+export interface LoadProjectResult {
+  project: Project | null;
+  error?: string;
+}
+
+/** Loads a project and enforces ownership client-side too (defense in depth on top of the Firestore rule). */
+export async function loadProject(projectId: string, ownerUid: string): Promise<LoadProjectResult> {
+  const snapshot = await getDoc(doc(db, PROJECTS_COLLECTION, projectId));
+  if (!snapshot.exists()) {
+    return { project: null, error: 'Project not found.' };
+  }
+  const { project, structuralErrors, validation } = parseProject(snapshot.data());
+  if (!project) {
+    return { project: null, error: `Project data is corrupted: ${structuralErrors.join('; ')}` };
+  }
+  if (project.ownerUid !== ownerUid) {
+    // The Firestore rule already blocks this at the network level; this is
+    // a second, explicit check so a UI bug can never even attempt to render
+    // another user's project data.
+    return { project: null, error: 'You do not have access to this project.' };
+  }
+  if (validation && !validation.valid) {
+    return { project: null, error: `Project failed validation: ${validation.errors.map((e) => e.message).join('; ')}` };
+  }
+  return { project };
+}
+
+export async function listProjects(ownerUid: string, max = 50): Promise<ProjectSummary[]> {
+  // Deliberately no `orderBy('updatedAt')` in the query itself: combined
+  // with `where('ownerUid', '==', ...)` on a different field, Firestore
+  // would require a composite index to be created in the console before
+  // this query works at all — an extra manual deployment step outside this
+  // codebase. Sorting the (capped at `max`) result client-side avoids that
+  // dependency; revisit if a user's project count ever makes client-side
+  // sort impractical.
+  const q = query(collection(db, PROJECTS_COLLECTION), where('ownerUid', '==', ownerUid), fsLimit(max));
+  const snapshot = await getDocs(q);
+  return snapshot.docs
+    .map((docSnap) => {
+      const data = docSnap.data() as Project;
+      return {
+        id: data.id,
+        name: data.name,
+        updatedAt: data.updatedAt,
+        createdAt: data.createdAt,
+        canvasWidth: data.canvasWidth,
+        canvasHeight: data.canvasHeight,
+        posterDataUrl: typeof data.posterDataUrl === 'string' ? data.posterDataUrl : undefined,
+      };
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await deleteDoc(doc(db, PROJECTS_COLLECTION, projectId));
+}
