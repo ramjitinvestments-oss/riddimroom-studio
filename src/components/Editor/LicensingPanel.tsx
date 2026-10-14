@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useProject } from '../../context/ProjectContext';
 import { canExportToday, exportsRemainingToday, type LicenseTier } from '../../lib/licensing';
+import { resolveAdminFallbackTier } from '../../hooks/useLicenseTier';
 
 interface LicenseInfo { tier: LicenseTier; watermarkEnabled: boolean; checkoutAvailable: boolean; }
 
@@ -12,16 +13,23 @@ function useLicense(): LicenseInfo & { loading: boolean; refresh: () => void } {
   const refresh = useCallback(async () => {
     if (!user) { setLoading(false); return; }
     setLoading(true);
+    // No-server fallback: resolve the effective tier from the caller's
+    // own admins/{uid} doc (admin = lifetime, everyone else free) so the
+    // owner isn't shown Free gates on builds where /api/* doesn't exist.
+    const applyFallback = async () => {
+      const t = await resolveAdminFallbackTier(user.uid);
+      setInfo({ tier: t, watermarkEnabled: t !== 'lifetime', checkoutAvailable: false });
+    };
     try {
       const res = await fetch('/api/license', { headers: idToken ? { Authorization: `Bearer ${idToken}` } : {} });
       // On builds without the API (e.g. the static preview) the lookup
       // 404s — that's expected there, not a user-facing error. Quietly
       // keep the Free defaults instead of alarming the user with a
       // "License lookup failed (404)" banner.
-      if (!res.ok) return;
+      if (!res.ok) { await applyFallback(); return; }
       const data = await res.json();
       setInfo({ tier: data.tier ?? 'free', watermarkEnabled: data.watermarkEnabled ?? true, checkoutAvailable: !!data.checkoutAvailable });
-    } catch { /* keep Free defaults */ }
+    } catch { await applyFallback(); }
     finally { setLoading(false); }
   }, [user, idToken]);
   useEffect(() => { void refresh(); }, [refresh]);
