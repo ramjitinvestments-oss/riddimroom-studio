@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
 import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
-import { computeFadeOpacity, drawFrame, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
 import { useProject } from '../../context/ProjectContext';
 
 /**
@@ -361,7 +361,15 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
         audioEl.muted = item.muted;
         audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
-        const targetSourceTime = item.trimStart + Math.max(0, t - item.startTime);
+        // Looping items (tweaks round): the target wraps inside the trim
+        // window, so the drift-correction seek below fires exactly at
+        // each wrap and the element never plays past `trimEnd` into the
+        // rest of the file (its own `loop` property wraps at the file's
+        // end, not the window's, so it stays off). Non-loop items keep
+        // the plain play-once mapping, unchanged.
+        const targetSourceTime = item.loop
+          ? computeLoopedSourceTime(item.trimStart, item.trimEnd, Math.max(0, t - item.startTime))
+          : item.trimStart + Math.max(0, t - item.startTime);
         if (isPlayingRef.current) {
           // Only force-seek on a real discontinuity (item just became
           // active, or drifted noticeably) — reassigning currentTime every
