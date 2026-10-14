@@ -103,7 +103,7 @@ export function ExportPanel() {
         <button
           onClick={handleExport}
           disabled={busy || !canExport}
-          className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white self-start disabled:opacity-50"
+          className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black self-start disabled:opacity-50"
         >
           Export video (MP4)
         </button>
@@ -111,7 +111,7 @@ export function ExportPanel() {
       {status === 'rendering' && (
         <div className="flex flex-col gap-2">
           <div className="w-full h-2 bg-white/10 rounded overflow-hidden">
-            <div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round((progress?.fraction ?? 0) * 100)}%` }} />
+            <div className="h-full bg-gold transition-all" style={{ width: `${Math.round((progress?.fraction ?? 0) * 100)}%` }} />
           </div>
           <p className="text-[10px] text-white/40">
             {progress ? `Rendering… ${progress.renderedSeconds.toFixed(1)}s / ${progress.totalSeconds.toFixed(1)}s` : 'Starting…'}
@@ -124,7 +124,7 @@ export function ExportPanel() {
       {status === 'converting' && (
         <div className="flex flex-col gap-2">
           <div className="w-full h-2 bg-white/10 rounded overflow-hidden">
-            <div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round(convertRatio * 100)}%` }} />
+            <div className="h-full bg-gold transition-all" style={{ width: `${Math.round(convertRatio * 100)}%` }} />
           </div>
           <p className="text-[10px] text-white/40">Preparing MP4… {Math.round(convertRatio * 100)}%</p>
         </div>
