@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeFadeOpacity, interpolateTransform } from './compositor';
+import { computeFadeOpacity, computeLoopedSourceTime, interpolateTransform } from './compositor';
 import type { Transform } from '../../types/timeline';
 
 /**
@@ -91,5 +91,33 @@ describe('interpolateTransform — keyframe-lite (Phase 2.3)', () => {
     expect(quarter.position.x).toBeCloseTo(20 + 60 * 0.15625, 5);
     expect(interpolateTransform(base, end, 2).position).toEqual({ x: 80, y: 70 });
     expect(interpolateTransform(base, end, -1).position).toEqual({ x: 20, y: 30 });
+  });
+});
+
+describe('computeLoopedSourceTime — looping audio wraps inside its trim window', () => {
+  // Trim window [2, 10) — an 8s span of source.
+  it('matches the plain play-once mapping within the first pass', () => {
+    expect(computeLoopedSourceTime(2, 10, 0)).toBe(2);
+    expect(computeLoopedSourceTime(2, 10, 3.5)).toBeCloseTo(5.5, 5);
+    expect(computeLoopedSourceTime(2, 10, 7.999)).toBeCloseTo(9.999, 5);
+  });
+
+  it('wraps back to trimStart at each span boundary', () => {
+    expect(computeLoopedSourceTime(2, 10, 8)).toBe(2);
+    expect(computeLoopedSourceTime(2, 10, 16)).toBe(2);
+    expect(computeLoopedSourceTime(2, 10, 20)).toBeCloseTo(6, 5); // 2 full loops + 4s
+  });
+
+  it('never returns a position outside the trim window, however far playback runs', () => {
+    for (const elapsed of [0, 1, 8, 9.5, 40, 123.456, 10_000]) {
+      const pos = computeLoopedSourceTime(2, 10, elapsed);
+      expect(pos).toBeGreaterThanOrEqual(2);
+      expect(pos).toBeLessThan(10);
+    }
+  });
+
+  it('degenerate windows and negative elapsed fall back to a sane position', () => {
+    expect(computeLoopedSourceTime(4, 4, 3)).toBe(7); // zero span: no wrap possible
+    expect(computeLoopedSourceTime(2, 10, -5)).toBe(2); // before the item starts: its head
   });
 });
