@@ -423,6 +423,25 @@ export function computeFadeOpacity(
   return opacity;
 }
 
+/**
+ * Tweaks round — looping audio (`AudioTimelineItem.loop`). Maps an item's
+ * elapsed timeline seconds to the source position inside its trim window,
+ * wrapping at the window's end: a 8s window asked for 20s of timeline
+ * plays 0-8, 0-8, 0-4. Shared by PreviewPane and canvas2dRenderer so the
+ * preview and the export wrap at exactly the same moments (each caller
+ * compares its element's actual position against this target and seeks
+ * when they diverge — the element's own `loop` property is deliberately
+ * NOT used, since it wraps at the FILE's end, not the trim window's).
+ * Within the first pass (`elapsed <= span`) this is exactly
+ * `trimStart + elapsed`, i.e. identical to the non-loop mapping.
+ */
+export function computeLoopedSourceTime(trimStart: number, trimEnd: number, elapsedSeconds: number): number {
+  const span = trimEnd - trimStart;
+  const elapsed = Math.max(0, elapsedSeconds);
+  if (!(span > 0)) return trimStart + elapsed;
+  return trimStart + (elapsed % span);
+}
+
 // ---------------------------------------------------------------------------
 // Motion/zoom effects (Ken Burns family) — "final production fix" spec item
 // 8. Deliberately separate from `computeEntranceExit`: these run
