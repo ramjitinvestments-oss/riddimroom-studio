@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem } from '../../lib/timeline/utils';
+import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
 import { computeFadeOpacity, drawFrame, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
 import { useProject } from '../../context/ProjectContext';
 
@@ -96,6 +97,13 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   // (The durable fix remains applying `storage.cors.json` to the bucket.)
   const corsRetriedRef = useRef<WeakSet<object>>(new WeakSet());
   const [mediaError, setMediaError] = useState<string | null>(null);
+  // Transport-bar master volume (polish batch): a single gain applied on
+  // top of every preview media element's own per-item volume in the tick
+  // loop below — preview-only, it never writes to the project (each item
+  // keeps its own volume/mute; export mixes from those, untouched).
+  const [masterVolume, setMasterVolume] = useState(1);
+  const masterVolumeRef = useRef(1);
+  masterVolumeRef.current = masterVolume;
   const handleMediaLoadError = useCallback((el: HTMLMediaElement, storageUrl: string) => {
     if (el.crossOrigin && !corsRetriedRef.current.has(el)) {
       corsRetriedRef.current.add(el);
@@ -256,7 +264,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // in ItemInspector) visibly faded its picture but silently had NO
           // effect on its own audio in the live preview.
           const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, active.endTime - t);
-          videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul));
+          videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul * masterVolumeRef.current));
 
           if (isPlayingRef.current) {
             if (videoEl.paused) videoEl.play().catch(() => {});
@@ -308,7 +316,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         const audioEl = getAudioEl(asset.id, asset.storageUrl);
         const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
         audioEl.muted = item.muted;
-        audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul));
+        audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
         const targetSourceTime = item.trimStart + Math.max(0, t - item.startTime);
         if (isPlayingRef.current) {
           // Only force-seek on a real discontinuity (item just became
@@ -394,7 +402,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           }
           const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
           el.muted = item.muted;
-          el.volume = Math.max(0, Math.min(1, item.volume * fadeMul));
+          el.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
         }
         // Pause video elements whose items are no longer active.
         videoElsRef.current.forEach((el, assetId) => {
@@ -689,6 +697,27 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   );
 
   const aspect = project.canvasWidth / project.canvasHeight;
+  const projectDuration = getProjectDuration(project);
+
+  // Transport bar (polish batch): seek/skip go through the SAME
+  // `onTimeChange` path the timeline scrubber uses — no second clock.
+  const skipBy = useCallback(
+    (deltaSeconds: number) => {
+      const max = projectDuration > 0 ? projectDuration : currentTime + deltaSeconds;
+      onTimeChange(Math.max(0, Math.min(max, currentTime + deltaSeconds)));
+    },
+    [currentTime, projectDuration, onTimeChange],
+  );
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      el.requestFullscreen?.().catch(() => {});
+    }
+  }, []);
 
   // Preview sizing (full-app audit: "preview/canvas is too small") — fits
   // the canvas box to whichever of (available column width, available
@@ -752,14 +781,14 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         {mediaError && (
           <div className="absolute top-2 left-2 right-2 z-10 flex items-start justify-between gap-2 rounded-md bg-red-600/90 px-3 py-2 text-xs text-white shadow-lg">
             <span>{mediaError}</span>
-            <button onClick={() => setMediaError(null)} aria-label="Dismiss" className="shrink-0 font-bold leading-none">
-              ×
+            <button onClick={() => setMediaError(null)} aria-label="Dismiss" className="shrink-0 leading-none">
+              <X size={14} strokeWidth={3} />
             </button>
           </div>
         )}
         {selectedBounds && (
           <div
-            className="absolute border-2 border-emerald-400 cursor-move"
+            className="absolute border-2 border-gold cursor-move"
             style={{
               left: `${selectedBounds.leftPercent}%`,
               top: `${selectedBounds.topPercent}%`,
@@ -813,19 +842,75 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
               className="absolute flex items-center justify-center w-11 h-11 cursor-nwse-resize touch-none"
               style={{ right: -22, bottom: -22 }}
             >
-              <div className="w-3.5 h-3.5 bg-emerald-400 rounded-sm pointer-events-none" />
+              <div className="w-3.5 h-3.5 bg-gold rounded-sm pointer-events-none" />
             </div>
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      {/* Transport bar (polish batch) — replaces the lone Play/Pause text
+          button + raw seconds readout: round gold play/pause, ±5s skip,
+          timecode readout, a scrub slider on the same seek path as the
+          timeline, master volume, and fullscreen. */}
+      <div className="flex items-center gap-2 sm:gap-3 w-full max-w-3xl px-1">
         <button
           onClick={() => onPlayingChange(!isPlaying)}
-          className="min-h-11 px-4 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white"
+          aria-label={isPlaying ? 'Pause' : 'Play'}
+          title={isPlaying ? 'Pause' : 'Play'}
+          className="shrink-0 w-11 h-11 rounded-full bg-gold hover:bg-gold-bright text-black flex items-center justify-center transition"
         >
-          {isPlaying ? 'Pause' : 'Play'}
+          {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
         </button>
-        <span className="text-xs text-white/40 font-mono">{currentTime.toFixed(1)}s</span>
+        <button
+          onClick={() => skipBy(-5)}
+          aria-label="Back 5 seconds"
+          title="Back 5 seconds"
+          className="shrink-0 min-h-11 min-w-9 flex flex-col items-center justify-center text-white/60 hover:text-white"
+        >
+          <RotateCcw size={16} />
+          <span className="text-[8px] font-bold leading-none mt-0.5">5s</span>
+        </button>
+        <button
+          onClick={() => skipBy(5)}
+          aria-label="Forward 5 seconds"
+          title="Forward 5 seconds"
+          className="shrink-0 min-h-11 min-w-9 flex flex-col items-center justify-center text-white/60 hover:text-white"
+        >
+          <RotateCw size={16} />
+          <span className="text-[8px] font-bold leading-none mt-0.5">5s</span>
+        </button>
+        <span className="shrink-0 text-xs text-white/70 font-mono whitespace-nowrap">
+          {formatTimecode(currentTime)} <span className="text-white/30">/</span> {formatTimecode(projectDuration)}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0.01, projectDuration)}
+          step={0.01}
+          value={Math.min(currentTime, projectDuration)}
+          onChange={(e) => onTimeChange(Number(e.target.value))}
+          aria-label="Seek"
+          className="flex-1 min-w-8"
+        />
+        <Volume2 size={16} className="shrink-0 text-white/40 hidden sm:block" />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={masterVolume}
+          onChange={(e) => setMasterVolume(Number(e.target.value))}
+          aria-label="Preview volume"
+          title="Preview volume"
+          className="w-20 shrink-0 hidden sm:block"
+        />
+        <button
+          onClick={toggleFullscreen}
+          aria-label="Fullscreen"
+          title="Fullscreen"
+          className="shrink-0 min-h-11 min-w-9 flex items-center justify-center text-white/60 hover:text-white"
+        >
+          <Maximize size={16} />
+        </button>
       </div>
     </div>
   );
