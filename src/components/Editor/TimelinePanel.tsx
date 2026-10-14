@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ZoomIn, ZoomOut } from 'lucide-react';
+import { Volume2, VolumeX, ZoomIn, ZoomOut } from 'lucide-react';
 import type { Project } from '../../types/timeline';
-import { getProjectDuration, getItemsForTrack, moveItem, trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode } from '../../lib/timeline/utils';
+import { getProjectDuration, getItemsForTrack, moveItem, trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode, updateItem } from '../../lib/timeline/utils';
 import { getAssetPoster } from '../../lib/media/thumbnails';
 import { useProject } from '../../context/ProjectContext';
 
@@ -412,6 +412,13 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
                   // above); audio/text/caption clips never have one.
                   const posterUrl =
                     item.type === 'video' || item.type === 'image' ? posters.get(item.mediaAssetId) : undefined;
+                  // Quick per-clip mute (tweaks round): video and audio
+                  // items both carry their own `muted` (a video clip's
+                  // ORIGINAL audio, an audio clip's whole sound) already
+                  // honored by preview + export — this button is the
+                  // on-clip surface for it, so silencing one clip doesn't
+                  // require selecting it and hunting through the inspector.
+                  const clipMuted = item.type === 'video' || item.type === 'audio' ? item.muted : null;
                   // Trim grips are ALWAYS at least subtly visible (a faint
                   // grip bar on each edge) instead of hover-only — hover
                   // doesn't exist on touch, so phone users previously had
@@ -448,6 +455,23 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
                       <span className="absolute inset-0 flex items-center px-3 pointer-events-none overflow-hidden">
                         <span className="truncate text-[9px] font-semibold leading-none text-white/90 drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]">{clipLabel}</span>
                       </span>
+                      {clipMuted !== null && (
+                        <button
+                          type="button"
+                          aria-label={clipMuted ? 'Unmute this clip' : 'Mute this clip'}
+                          aria-pressed={clipMuted}
+                          title={clipMuted ? 'Muted — tap to unmute' : 'Mute this clip’s audio'}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onTouchStart={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            mutate((p) => updateItem(p, item.id, { muted: !clipMuted }));
+                          }}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-5 h-5 shrink-0 flex items-center justify-center rounded bg-black/50 hover:bg-black/75 text-white/80"
+                        >
+                          {clipMuted ? <VolumeX size={12} className="text-gold" /> : <Volume2 size={12} />}
+                        </button>
+                      )}
                       {/* Trim handles — narrow hit zones on each edge, layered above the move handler via stopPropagation; widened from 6px to 10px so they're findable with a fingertip. */}
                       <div
                         onMouseDown={(e) => beginMouseDrag(e, item.id, 'trim-start', item.startTime, item.endTime)}
