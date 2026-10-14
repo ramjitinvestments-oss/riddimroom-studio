@@ -35,7 +35,7 @@
  * opposing opacity ramps.
  */
 
-import type { AnimationPreset, CaptionTimelineItem, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { getItemsAtTime } from '../timeline/utils';
 import { getCaptionStyle } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
@@ -661,6 +661,28 @@ function drawMotionOverlay(ctx: CanvasRenderingContext2D, halfWidthPx: number, h
   }
 }
 
+/**
+ * Phase 2.3 — keyframe-lite interpolation. Returns the item's effective
+ * transform at `progress` (0 = item start, 1 = item end) between its base
+ * `Transform` and its optional `endTransform`: position/scale/opacity
+ * lerp (smoothstep when the end settings ask for easing); rotation always
+ * holds at the base value. With no end transform this returns `base`
+ * itself, so non-animated items render exactly as before. Exported for
+ * unit tests — pure math, no canvas involved.
+ */
+export function interpolateTransform(base: Transform, end: EndTransformSettings | undefined, progress: number): Transform {
+  if (!end) return base;
+  const raw = clamp01(progress);
+  const p = end.eased ? raw * raw * (3 - 2 * raw) : raw;
+  const lerp = (a: number, b: number) => a + (b - a) * p;
+  return {
+    position: { x: lerp(base.position.x, end.position.x), y: lerp(base.position.y, end.position.y) },
+    scale: lerp(base.scale, end.scale),
+    rotation: base.rotation,
+    opacity: lerp(base.opacity, end.opacity),
+  };
+}
+
 /** Shared timing → adjustment helper for the three animatable item types (video/image/text). */
 function animationFor(
   item: {
@@ -709,16 +731,19 @@ function coverSourceRect(
 
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
   timeSeconds: number,
 ) {
-  const centerX = (item.position.x / 100) * canvasWidth;
-  const centerY = (item.position.y / 100) * canvasHeight;
-  const w = canvasWidth * item.scale;
-  const h = canvasHeight * item.scale;
+  // Keyframe-lite (Phase 2.3): the frame's effective transform — base
+  // transform unless an end transform interpolates it across the item.
+  const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
+  const centerX = (effective.position.x / 100) * canvasWidth;
+  const centerY = (effective.position.y / 100) * canvasHeight;
+  const w = canvasWidth * effective.scale;
+  const h = canvasHeight * effective.scale;
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
@@ -796,7 +821,7 @@ function drawVideoItem(
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
       drawMotionOverlay(c, w / 2, h / 2, adjustment);
     },
-    item,
+    effective,
     centerX,
     centerY,
     adjustment,
@@ -824,9 +849,11 @@ function drawImageItem(
   canvasHeight: number,
   timeSeconds: number,
 ) {
-  const centerX = (item.position.x / 100) * canvasWidth;
-  const centerY = (item.position.y / 100) * canvasHeight;
-  const baseWidth = canvasWidth * 0.25 * item.scale;
+  // Keyframe-lite (Phase 2.3): same effective-transform treatment as video.
+  const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
+  const centerX = (effective.position.x / 100) * canvasWidth;
+  const centerY = (effective.position.y / 100) * canvasHeight;
+  const baseWidth = canvasWidth * 0.25 * effective.scale;
   const aspect = img.naturalHeight > 0 && img.naturalWidth > 0 ? img.naturalHeight / img.naturalWidth : 1;
   const w = baseWidth;
   const h = baseWidth * aspect;
@@ -847,7 +874,7 @@ function drawImageItem(
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
       drawMotionOverlay(c, w / 2, h / 2, adjustment);
     },
-    item,
+    effective,
     centerX,
     centerY,
     adjustment,
@@ -1068,7 +1095,17 @@ function drawCaptionItem(
         ctx.strokeStyle = style.strokeColor;
         ctx.strokeText(word, 0, 0);
       }
-      ctx.fillStyle = isActive ? style.color : hexWithAlpha(style.color, 0.72);
+      // Karaoke styles (Phase 2.3): a style with `highlightColor` fills
+      // ONLY the active word in that color; words already spoken and words
+      // still to come stay in the base `color` at near-full strength (they
+      // are real caption text, not "upcoming" ghosts). Styles without a
+      // highlight keep the original treatment: active word at full color,
+      // the rest dimmed to 0.72 alpha.
+      ctx.fillStyle = isActive
+        ? (style.highlightColor ?? style.color)
+        : style.highlightColor
+          ? hexWithAlpha(style.color, 0.85)
+          : hexWithAlpha(style.color, 0.72);
       ctx.fillText(word, 0, 0);
       ctx.restore();
 
