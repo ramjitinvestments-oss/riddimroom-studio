@@ -14,6 +14,7 @@ import {
   canApplyTransition,
   transitionAlreadyApplied,
   applyTransition,
+  updateItemMotion,
   addCaptionWord,
   isVisualItem,
   bringForward,
@@ -100,8 +101,12 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
   const hasMotion = item.type === 'video' || item.type === 'image';
   const motion = hasMotion ? ((item as any).motion as MotionSettings | undefined) : undefined;
   const motionEffectInfo = findMotionEffect(motion?.type);
+  // Writes through the shared `updateItemMotion` util (Phase 2.1) — the
+  // exact `{ type: 'none', ...current, ...fields }` merge this closure
+  // used to do inline, now shared with the first-class Effects panel so
+  // both write the one `motion` field identically.
   const patchMotion = (fields: Partial<MotionSettings>) => {
-    patch({ motion: { type: 'none', ...motion, ...fields } });
+    mutate((p) => updateItemMotion(p, item.id, fields));
   };
 
   // Cross Dissolve — only offered when there's an actual adjacent same-
