@@ -91,6 +91,25 @@ export interface FadeSettings {
 }
 
 /**
+ * Phase 2.3 — keyframe-lite: the item's END transform. When present, the
+ * compositor interpolates position/scale/opacity linearly across the
+ * item's on-screen duration, from its base `Transform` to this end state
+ * (`interpolateTransform` in `lib/render/compositor.ts`, shared by preview
+ * and export). Rotation is deliberately not part of it — the base
+ * rotation holds for the whole item. Absent = static transform, exactly
+ * the pre-2.3 behavior.
+ */
+export interface EndTransformSettings {
+  position: Position2D;
+  /** 1 = natural size (same meaning as `Transform.scale`). */
+  scale: number;
+  /** 0-1. */
+  opacity: number;
+  /** True = smoothstep easing; false/absent = linear. */
+  eased?: boolean;
+}
+
+/**
  * Named animation presets. Union of BoltVideoApp's `TextOverlay.animation`
  * values and riddimroom-caption's `AnimationStyle` values, so nothing from
  * either proven source is lost. The future render engine maps these to
@@ -276,6 +295,8 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
   animation?: AnimationSettings;
   /** "Final production fix" spec item 8 — see `MotionSettings`'s doc comment. Video's own motion (e.g. a subtle Ken Burns treatment layered on top of the clip's normal playback). */
   motion?: MotionSettings;
+  /** Phase 2.3 — keyframe-lite end transform; see `EndTransformSettings`. */
+  endTransform?: EndTransformSettings;
 }
 
 export interface ImageTimelineItem extends TimelineItemBase, Transform {
@@ -290,6 +311,8 @@ export interface ImageTimelineItem extends TimelineItemBase, Transform {
   motion?: MotionSettings;
   fade?: FadeSettings;
   animation?: AnimationSettings;
+  /** Phase 2.3 — keyframe-lite end transform; see `EndTransformSettings`. */
+  endTransform?: EndTransformSettings;
 }
 
 export interface TextTimelineItem extends TimelineItemBase, Transform {
