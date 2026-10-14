@@ -358,6 +358,16 @@ export interface AudioTimelineItem extends TimelineItemBase, TrimSettings {
   volume: number;
   muted: boolean;
   fade: FadeSettings;
+  /**
+   * Tweaks round — "Loop to fill project" (see `loopAudioToProjectEnd` in
+   * `lib/timeline/utils.ts`). When true, the item's timeline span may be
+   * LONGER than its trim window: both render paths (PreviewPane,
+   * canvas2dRenderer) wrap the source position inside
+   * `[trimStart, trimEnd)` via `computeLoopedSourceTime` instead of
+   * playing the source once and falling silent. Absent/false = the
+   * pre-existing play-once behavior, so old projects need no migration.
+   */
+  loop?: boolean;
 }
 
 export type TimelineItem =
