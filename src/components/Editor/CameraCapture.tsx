@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Clapperboard, PictureInPicture2 } from 'lucide-react';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 
 /**
@@ -27,6 +28,15 @@ export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blo
 
 interface CameraCaptureProps {
   onCapture: (result: CaptureResult) => void;
+  /**
+   * Tweaks round — camera → PiP flow. When provided, a finished VIDEO
+   * recording's review state offers "Use as Overlay (PiP)" next to the
+   * normal "Add to timeline": the same CaptureResult, handed to the
+   * caller through this callback instead, and the caller routes it to
+   * the overlay insert path (MediaImportPanel purpose 'overlay' →
+   * `addPipOverlay`). Omitted = the choice is never shown.
+   */
+  onCaptureAsOverlay?: (result: CaptureResult) => void;
   onClose: () => void;
   /** The project's own canvas dimensions — used to negotiate a matching, non-distorted recording aspect ratio (16:9 / 9:16 / 1:1 / 4:5, whatever the project actually is), and to size the live preview box to match. */
   canvasWidth: number;
@@ -57,7 +67,7 @@ function idealRecordingDimensions(canvasWidth: number, canvasHeight: number): { 
   return { width: 1080, height: Math.round(1080 / ratio), ratio };
 }
 
-export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
+export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -68,6 +78,17 @@ export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }:
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [isReady, setIsReady] = useState(false);
+  // Review state (tweaks round): a stopped recording is HELD here for
+  // preview + the add-as-main vs use-as-overlay choice instead of being
+  // handed off the instant the recorder stops (the previous behavior —
+  // no chance to review, retake, or pick the overlay track). `url` is an
+  // object URL for the preview <video>, revoked when the state clears.
+  const [pendingVideo, setPendingVideo] = useState<{ blob: Blob; url: string } | null>(null);
+
+  useEffect(() => {
+    if (!pendingVideo) return;
+    return () => URL.revokeObjectURL(pendingVideo.url);
+  }, [pendingVideo]);
 
   const ideal = useMemo(() => idealRecordingDimensions(canvasWidth, canvasHeight), [canvasWidth, canvasHeight]);
   const previewAspectRatio = canvasWidth > 0 && canvasHeight > 0 ? `${canvasWidth} / ${canvasHeight}` : '9 / 16';
@@ -167,19 +188,42 @@ export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }:
     };
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'video/webm' });
-      onCapture({ kind: 'video', blob });
+      // Hold for the review state (see `pendingVideo`) instead of handing
+      // off immediately, and stop the live stream while reviewing — the
+      // camera doesn't need to stay hot for a decision, and the review
+      // <video> replaces the live preview in the same frame.
+      stopStream();
+      setPendingVideo({ blob, url: URL.createObjectURL(blob) });
     };
     recorder.start();
     recorderRef.current = recorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, onCapture]);
+  }, [isReady, stopStream]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
     recorderRef.current = null;
     setIsRecording(false);
   }, []);
+
+  /** Review-state confirm: hand the SAME CaptureResult to the normal path or the overlay path, per the user's pick. */
+  const confirmPendingVideo = useCallback(
+    (asOverlay: boolean) => {
+      if (!pendingVideo) return;
+      const result: CaptureResult = { kind: 'video', blob: pendingVideo.blob };
+      setPendingVideo(null);
+      if (asOverlay && onCaptureAsOverlay) onCaptureAsOverlay(result);
+      else onCapture(result);
+    },
+    [pendingVideo, onCapture, onCaptureAsOverlay],
+  );
+
+  /** Review-state discard: drop the recording and return to the live camera. */
+  const discardPendingVideo = useCallback(() => {
+    setPendingVideo(null);
+    void startStream();
+  }, [startStream]);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -222,10 +266,21 @@ export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }:
             </div>
           </>
         )}
-        {!isRecording && isReady && (
+        {!isRecording && isReady && !pendingVideo && (
           <div className="absolute bottom-3 left-3 right-3 text-center text-[10px] text-white/50 bg-black/40 rounded px-2 py-1">
             Records up to {formatClock(MAX_MEDIA_SECONDS)}
           </div>
+        )}
+        {pendingVideo && (
+          <video
+            src={pendingVideo.url}
+            controls
+            autoPlay
+            loop
+            playsInline
+            className="absolute inset-0 w-full h-full object-cover bg-black"
+            aria-label="Review your recording"
+          />
         )}
         {error && (
           <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/80 text-center text-sm text-red-300">
@@ -234,6 +289,44 @@ export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }:
         )}
       </div>
 
+      {pendingVideo ? (
+        <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
+          <p className="text-xs text-white/60 text-center">
+            Your recording is ready. Add it as your main clip — or as a talking-head overlay on top of your main video.
+          </p>
+          <div className="flex items-center gap-2.5 flex-wrap justify-center">
+            <button
+              onClick={() => confirmPendingVideo(false)}
+              className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+            >
+              <Clapperboard size={15} /> Add to timeline
+            </button>
+            {onCaptureAsOverlay && (
+              <button
+                onClick={() => confirmPendingVideo(true)}
+                className="min-h-11 px-4 rounded-xl border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+              >
+                <PictureInPicture2 size={15} /> Use as Overlay (PiP)
+              </button>
+            )}
+            <button
+              onClick={discardPendingVideo}
+              className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+            >
+              Retake
+            </button>
+            <button
+              onClick={() => {
+                stopStream();
+                onClose();
+              }}
+              className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      ) : (
       <div className="flex items-center gap-3">
         <button
           onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
@@ -275,6 +368,7 @@ export function CameraCapture({ onCapture, onClose, canvasWidth, canvasHeight }:
           Close
         </button>
       </div>
+      )}
     </div>
   );
 }
