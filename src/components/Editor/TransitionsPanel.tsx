@@ -37,7 +37,7 @@ export function TransitionsPanel({ item }: { item: TimelineItem | null }) {
   if (!project) return null;
 
   const header = (
-    <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-white/50">
+    <h3 className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-white/50">
       <Blend size={14} className="text-gold" /> Transitions
     </h3>
   );
