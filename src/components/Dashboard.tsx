@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { createProject, listProjects, deleteProject, type ProjectSummary } from '../lib/projects/persistence';
+import { createProject, listProjects, deleteProjects, type ProjectSummary } from '../lib/projects/persistence';
+import { Check, Trash2, X } from 'lucide-react';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
 import BrandLogo from './BrandLogo';
 import { useLicenseTier } from '../hooks/useLicenseTier';
@@ -29,6 +30,13 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
   // `createProject` and becomes `Project.canvasWidth/canvasHeight`, the
   // single source of truth `lib/aspectRatios.ts` documents.
   const [showRatioPicker, setShowRatioPicker] = useState(false);
+  // Multi-select cleanup mode: cards toggle selection instead of opening,
+  // and a sticky action bar drives the batch delete. Deletion always goes
+  // through the in-app confirm (single or batch) — never window.confirm.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
+  const [confirmDelete, setConfirmDelete] = useState<{ ids: string[]; label: string } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!currentUser) return;
@@ -63,17 +71,37 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
     [currentUser, onOpenProject, tier],
   );
 
-  const handleDelete = useCallback(
-    async (projectId: string) => {
-      try {
-        await deleteProject(projectId);
-        setProjects((list) => (list ? list.filter((p) => p.id !== projectId) : list));
-      } catch (err: any) {
-        setError(err?.message || 'Failed to delete project.');
-      }
-    },
-    [],
-  );
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const toggleSelected = useCallback((projectId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  }, []);
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (!confirmDelete) return;
+    const ids = confirmDelete.ids;
+    setIsDeleting(true);
+    setError(null);
+    try {
+      await deleteProjects(ids);
+      setConfirmDelete(null);
+      exitSelectMode();
+      await refresh();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete project.');
+      setConfirmDelete(null);
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [confirmDelete, exitSelectMode, refresh]);
 
   return (
     <div className="min-h-screen bg-[#070707] text-white">
@@ -90,7 +118,7 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-6 py-8">
+      <main className={`max-w-3xl mx-auto px-6 py-8 ${selectMode ? 'pb-28' : ''}`}>
         <div className="flex flex-wrap items-center gap-2 mb-4">
           <span className="px-3 py-1.5 rounded-full bg-white/10 border border-white/10 text-xs font-bold">
             Plan: {tier === 'lifetime' ? 'Lifetime' : 'Free'}
@@ -105,13 +133,27 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
         </div>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-white/60">Your projects</h2>
-          <button
-            onClick={() => setShowRatioPicker(true)}
-            disabled={isCreating}
-            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
-          >
-            {isCreating ? 'Creating…' : 'New project'}
-          </button>
+          <div className="flex items-center gap-2">
+            {projects && projects.length > 0 && (
+              <button
+                onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                className={`px-4 py-2 min-h-[36px] text-xs font-bold uppercase tracking-wide rounded-lg border transition ${
+                  selectMode
+                    ? 'bg-gold/15 border-gold/60 text-gold'
+                    : 'bg-white/5 hover:bg-white/10 border-white/10 text-white/70'
+                }`}
+              >
+                {selectMode ? 'Done' : 'Select'}
+              </button>
+            )}
+            <button
+              onClick={() => setShowRatioPicker(true)}
+              disabled={isCreating}
+              className="px-4 py-2 min-h-[36px] text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
+            >
+              {isCreating ? 'Creating…' : 'New project'}
+            </button>
+          </div>
         </div>
 
         {error && <p className="text-sm text-red-400 mb-4">{error}</p>}
@@ -138,11 +180,14 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
             {projects.map((project) => {
               const ratio = findAspectRatioOption(project.canvasWidth, project.canvasHeight);
               const metaLine = `${ratio ? `${ratio.ratioLabel} ${ratio.name}` : `${project.canvasWidth}×${project.canvasHeight}`} · updated ${new Date(project.updatedAt).toLocaleString()}`;
+              const isSelected = selectedIds.has(project.id);
               return (
                 <li
                   key={project.id}
-                  className="group relative bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl overflow-hidden cursor-pointer transition"
-                  onClick={() => onOpenProject(project.id)}
+                  className={`group relative bg-white/5 hover:bg-white/10 border rounded-xl overflow-hidden cursor-pointer transition ${
+                    isSelected ? 'border-gold ring-2 ring-gold' : 'border-white/10'
+                  }`}
+                  onClick={() => (selectMode ? toggleSelected(project.id) : onOpenProject(project.id))}
                 >
                   {/* Card cover (polish batch 2): the project's saved poster
                       when it has one; otherwise a designed branded cover —
@@ -162,21 +207,111 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
                       <p className={`text-xs text-white/50 ${project.posterDataUrl ? 'mt-0.5' : ''}`}>{metaLine}</p>
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirm(`Delete "${project.name}"? This cannot be undone.`)) handleDelete(project.id);
-                    }}
-                    className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 bg-black/60 hover:bg-black/80 rounded-md text-white/60 hover:text-red-400 text-xs px-2 py-1 transition"
-                  >
-                    Delete
-                  </button>
+                  {selectMode ? (
+                    <span
+                      aria-hidden="true"
+                      className={`absolute top-2 left-2 z-10 flex items-center justify-center w-8 h-8 rounded-lg border backdrop-blur transition ${
+                        isSelected ? 'bg-gold border-gold text-black' : 'bg-black/60 border-white/30 text-transparent'
+                      }`}
+                    >
+                      <Check size={18} strokeWidth={3} />
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      aria-label={`Delete ${project.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDelete({ ids: [project.id], label: project.name });
+                      }}
+                      className="absolute top-2 right-2 z-10 flex items-center justify-center min-w-[36px] min-h-[36px] w-9 h-9 rounded-lg bg-black/60 hover:bg-black/85 backdrop-blur text-red-400/90 hover:text-red-400 transition"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  )}
                 </li>
               );
             })}
           </ul>
         )}
       </main>
+
+      {selectMode && (
+        <div className="fixed bottom-0 inset-x-0 z-40 bg-[#0a0a0a]/95 backdrop-blur border-t border-white/10">
+          <div className="max-w-3xl mx-auto px-6 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] flex items-center gap-3">
+            <span className="text-sm font-bold text-white/80">{selectedIds.size} selected</span>
+            <div className="flex-1" />
+            <button
+              onClick={exitSelectMode}
+              className="px-4 py-2 min-h-[40px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() =>
+                setConfirmDelete({
+                  ids: [...selectedIds],
+                  label: `${selectedIds.size} project${selectedIds.size === 1 ? '' : 's'}`,
+                })
+              }
+              disabled={selectedIds.size === 0}
+              className="px-4 py-2 min-h-[40px] text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 disabled:opacity-40 disabled:hover:bg-red-600 rounded-lg text-white"
+            >
+              Delete selected
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => !isDeleting && setConfirmDelete(null)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Confirm project deletion"
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-2">
+              <h2 className="font-bold text-base">
+                {confirmDelete.ids.length === 1 ? (
+                  <>Delete &ldquo;{confirmDelete.label}&rdquo;?</>
+                ) : (
+                  <>Delete {confirmDelete.label}?</>
+                )}
+              </h2>
+              <button
+                onClick={() => !isDeleting && setConfirmDelete(null)}
+                disabled={isDeleting}
+                aria-label="Cancel"
+                className="text-white/40 hover:text-white/70 disabled:opacity-50 -mt-1 -mr-1 p-1"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-sm text-white/50 mb-6">This can&rsquo;t be undone.</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                disabled={isDeleting}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmDelete}
+                disabled={isDeleting}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-lg text-white"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showRatioPicker && (
         <div
