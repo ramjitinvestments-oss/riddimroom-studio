@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { Project } from '../types/timeline';
 import { loadProject, saveProject } from '../lib/projects/persistence';
+import { getProjectPoster } from '../lib/media/thumbnails';
 import { emptyHistory, pushHistory, undoHistory, redoHistory, shouldCoalesce, type History } from '../lib/history';
 import { getProjectDuration, projectDurationExceedsLimit } from '../lib/timeline/utils';
 import { MAX_MEDIA_SECONDS } from '../lib/media/constants';
@@ -202,7 +203,23 @@ export function ProjectProvider({
     setIsSaving(true);
     setSaveError(null);
     try {
-      const saved = await saveProject(current);
+      // Dashboard poster refresh (polish batch 2): regenerate from the
+      // project's first visual asset and ride along on this save, so the
+      // dashboard card always shows a current cover. Strictly best-effort
+      // — the thumbnails service resolves null on any failure (and is
+      // cache-hot when the timeline already generated this asset's
+      // poster), and a null result keeps whatever poster the project
+      // already had. It must never block or fail the save itself.
+      let toSave = current;
+      try {
+        const poster = await getProjectPoster(current);
+        if (poster && poster !== current.posterDataUrl) {
+          toSave = { ...current, posterDataUrl: poster };
+        }
+      } catch {
+        /* poster generation is cosmetic — ignore and save without it */
+      }
+      const saved = await saveProject(toSave);
       setProject(saved);
       projectRef.current = saved;
       setLastSavedAt(saved.updatedAt);

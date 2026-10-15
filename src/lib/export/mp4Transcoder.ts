@@ -96,15 +96,25 @@ async function getFFmpeg(): Promise<import('@ffmpeg/ffmpeg').FFmpeg> {
  * file — not a WASM or browser issue — and resolved by forcing the real
  * output frame rate).
  */
+export interface TranscodeQualityOptions {
+  /** libx264 CRF (lower = higher quality). Defaults to 20 — the value hardcoded before the export quality picker existed. */
+  crf?: number;
+  /** AAC audio bitrate in kbps. Defaults to 192 — likewise the pre-picker value. */
+  audioBitrateKbps?: number;
+}
+
 export async function transcodeWebmToMp4(
   webmBlob: Blob,
   sourceFrameRate: number,
   onProgress?: (progress: TranscodeProgress) => void,
+  quality?: TranscodeQualityOptions,
 ): Promise<Blob> {
   if (webmBlob.size === 0) {
     throw new Mp4TranscodeError('Cannot convert an empty recording to MP4.');
   }
   const fps = Number.isFinite(sourceFrameRate) && sourceFrameRate > 0 ? Math.round(sourceFrameRate) : 30;
+  const crf = quality?.crf ?? 20;
+  const audioBitrateKbps = quality?.audioBitrateKbps ?? 192;
 
   const ffmpeg = await getFFmpeg();
   const { fetchFile } = await import('@ffmpeg/util');
@@ -132,10 +142,10 @@ export async function transcodeWebmToMp4(
       '-r', String(fps),
       '-c:v', 'libx264',
       '-preset', 'fast',
-      '-crf', '20',
+      '-crf', String(crf),
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac',
-      '-b:a', '192k',
+      '-b:a', `${audioBitrateKbps}k`,
       '-movflags', '+faststart',
       outputName,
     ]);

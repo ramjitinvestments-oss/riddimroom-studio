@@ -24,7 +24,7 @@
 
 import type { Project, TimelineItem } from '../../types/timeline';
 import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
-import { computeFadeOpacity, drawFrame } from './../render/compositor';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame } from './../render/compositor';
 import type { Renderer, RenderOptions, RenderResult } from './renderer';
 import { RenderAbortedError } from './renderer';
 
@@ -51,11 +51,22 @@ export class Canvas2DRenderer implements Renderer {
       throw new Error('This project has no timeline items to export.');
     }
 
+    // Export-quality output size (Phase 2.1): defaults to the project's
+    // own canvas dimensions exactly as before. When the picker asked for a
+    // smaller output, the canvas IS that size and the compositor — which
+    // lays out every frame in project coordinates (see drawFrame) — is
+    // brought to it with a base scale transform set once here; every
+    // per-item transform inside drawFrame composes on top of it.
+    const outputWidth = options.output?.width ?? project.canvasWidth;
+    const outputHeight = options.output?.height ?? project.canvasHeight;
     const canvas = document.createElement('canvas');
-    canvas.width = project.canvasWidth;
-    canvas.height = project.canvasHeight;
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('This browser could not create a 2D rendering context for export.');
+    if (outputWidth !== project.canvasWidth || outputHeight !== project.canvasHeight) {
+      ctx.setTransform(outputWidth / project.canvasWidth, 0, 0, outputHeight / project.canvasHeight, 0, 0);
+    }
 
     const audioCtx = new AudioContext();
     const destination = audioCtx.createMediaStreamDestination();
@@ -129,18 +140,41 @@ export class Canvas2DRenderer implements Renderer {
       return el;
     };
 
+    const cleanup = () => {
+      videoHandles.forEach((h) => {
+        h.element.pause();
+        h.element.src = '';
+        if (h.element.parentNode) h.element.parentNode.removeChild(h.element);
+      });
+      videoHandles.clear();
+      imageEls.clear();
+      audioCtx.close().catch(() => {});
+    };
+
     // Preload everything referenced by the project up front so the render
     // loop never stalls mid-recording waiting on a network fetch.
+    // Video/audio items are REQUIRED media: one that fails to load (e.g.
+    // the bucket refuses the crossOrigin fetch because CORS isn't applied
+    // for this origin) is collected here and aborts the export below —
+    // the old behavior (resolve on error and record anyway) is exactly
+    // how users ended up with a black, silent MP4 and no explanation.
+    const failedMedia: string[] = [];
     await Promise.all(
       project.items.map((item) => {
         if (item.type === 'video' || item.type === 'audio') {
           const asset = project.mediaAssets[item.mediaAssetId];
           if (!asset) return Promise.resolve();
           const el = item.type === 'video' ? getVideoHandle(asset.id, asset.storageUrl).element : getAudioHandle(asset.id, asset.storageUrl).element;
+          const media = el as HTMLMediaElement;
           return new Promise<void>((resolve) => {
-            if ((el as HTMLMediaElement).readyState >= 1) return resolve();
-            el.addEventListener('loadedmetadata', () => resolve(), { once: true });
-            el.addEventListener('error', () => resolve(), { once: true }); // don't let one bad asset block the whole export
+            const fail = () => {
+              failedMedia.push(asset.fileName || asset.id);
+              resolve();
+            };
+            if (media.error) return fail();
+            if (media.readyState >= 1) return resolve();
+            media.addEventListener('loadedmetadata', () => resolve(), { once: true });
+            media.addEventListener('error', fail, { once: true });
           });
         }
         if (item.type === 'image') {
@@ -157,26 +191,55 @@ export class Canvas2DRenderer implements Renderer {
       }),
     );
 
-    const canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(project.frameRate);
+    if (failedMedia.length > 0) {
+      cleanup();
+      throw new Error(
+        `Media failed to load (${failedMedia.join(', ')}) — export cancelled. Check your connection or file access, then try again.`,
+      );
+    }
+
+    // A canvas tainted by non-CORS media (e.g. the preview's playback
+    // fallback) makes captureStream() throw a SecurityError — surface
+    // that as a clear message instead of an opaque browser exception.
+    let canvasStream: MediaStream;
+    try {
+      canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(
+        options.output?.frameRate ?? project.frameRate,
+      );
+    } catch {
+      cleanup();
+      throw new Error(
+        'Export could not capture the preview canvas — a clip loaded without CORS access. Storage CORS must allow this app for exports; check the connection and try again.',
+      );
+    }
     const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
 
     const mimeType = pickSupportedMimeType();
-    const recorder = new MediaRecorder(combinedStream, { mimeType });
+    // Export-quality bitrates (Phase 2.1): pinned only when the caller
+    // resolved output settings; without them MediaRecorder keeps its
+    // browser-default bitrate, as before.
+    const recorderOptions: MediaRecorderOptions = { mimeType };
+    if (options.output) {
+      recorderOptions.videoBitsPerSecond = options.output.videoBitsPerSecond;
+      recorderOptions.audioBitsPerSecond = options.output.audioBitsPerSecond;
+    }
+    const recorder = new MediaRecorder(combinedStream, recorderOptions);
     const chunks: Blob[] = [];
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };
 
-    const cleanup = () => {
-      videoHandles.forEach((h) => {
-        h.element.pause();
-        h.element.src = '';
-        if (h.element.parentNode) h.element.parentNode.removeChild(h.element);
-      });
-      videoHandles.clear();
-      imageEls.clear();
-      audioCtx.close().catch(() => {});
-    };
+    // Autoplay policy: an AudioContext created outside the direct export
+    // click handler can start in the 'suspended' state, which would leave
+    // the mixed destination stream silent for the entire recording even
+    // though every element is playing. Resume it before the recorder
+    // starts so the exported audio track actually carries sound.
+    try {
+      await audioCtx.resume();
+    } catch {
+      /* best effort — the render proceeds; the final blob-size sanity
+         check in the caller still guards against a silent output file */
+    }
 
     return new Promise<RenderResult>((resolve, reject) => {
       let aborted = false;
@@ -216,46 +279,43 @@ export class Canvas2DRenderer implements Renderer {
 
         const activeItems: TimelineItem[] = getItemsAtTime(project, t);
 
-        const activeVideo = activeItems.find((i) => i.type === 'video');
+        // v1 PiP: sync EVERY active video item (main + overlays), not just
+        // the first. Each handle gets its own trim-window seek + gain.
+        // PiP items are muted by default (gain 0), so they never fight the
+        // main video's audio unless the user explicitly unmutes them.
+        const activeVideoAssetIds = new Set<string>();
+        const videosMap = new Map<string, HTMLVideoElement>();
         let frameActiveVideo: { assetId: string; element: HTMLVideoElement } | undefined;
-        if (activeVideo && activeVideo.type === 'video') {
-          const asset = project.mediaAssets[activeVideo.mediaAssetId];
-          if (asset) {
-            const handle = getVideoHandle(asset.id, asset.storageUrl);
-            if (lastActiveVideoId !== activeVideo.id) {
-              videoHandles.forEach((h, key) => {
-                if (!key.startsWith('audio:')) h.gain.gain.value = 0;
-              });
-              const targetTime = activeVideo.trimStart + Math.max(0, t - activeVideo.startTime);
-              try {
-                (handle.element as HTMLVideoElement).currentTime = targetTime;
-              } catch {
-                /* not seekable yet */
-              }
-              lastActiveVideoId = activeVideo.id;
-            }
-            handle.element.play().catch(() => {});
-            // "Universal 30-second media standard" spec item 6 — same fix
-            // as PreviewPane.tsx's live-playback branch: a video's own
-            // embedded-audio gain must apply its own `fade` field, mirroring
-            // the standalone AudioTimelineItem branch below (which already
-            // did this). Previously this line ignored fade entirely, so a
-            // video clip's audio fade-in/fade-out had no effect in the
-            // actual exported MP4 even though the visual fade rendered
-            // correctly.
-            const videoFadeMul = computeFadeOpacity(activeVideo.fade, t - activeVideo.startTime, activeVideo.endTime - t);
-            handle.gain.gain.value = activeVideo.muted ? 0 : activeVideo.volume * videoFadeMul;
-            frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
+        for (const item of activeItems) {
+          if (item.type !== 'video') continue;
+          const asset = project.mediaAssets[item.mediaAssetId];
+          if (!asset) continue;
+          activeVideoAssetIds.add(asset.id);
+          const handle = getVideoHandle(asset.id, asset.storageUrl);
+          // Speed (Phase 2.3): mirror PreviewPane exactly — the element
+          // plays at the item's rate and timeline time maps to source
+          // time through it, so a 2x clip occupies half the timeline span
+          // in the export just as it does in the preview.
+          (handle.element as HTMLVideoElement).playbackRate = item.speed || 1;
+          const targetTime = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
+          if (Math.abs((handle.element as HTMLVideoElement).currentTime - targetTime) > 0.35) {
+            try { (handle.element as HTMLVideoElement).currentTime = targetTime; } catch { /* not seekable yet */ }
           }
-        } else {
-          videoHandles.forEach((h, key) => {
-            if (!key.startsWith('audio:')) {
-              h.element.pause();
-              h.gain.gain.value = 0;
-            }
-          });
-          lastActiveVideoId = null;
+          handle.element.play().catch(() => {});
+          const videoFadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+          handle.gain.gain.value = item.muted ? 0 : item.volume * videoFadeMul;
+          videosMap.set(asset.id, handle.element as HTMLVideoElement);
+          if (!frameActiveVideo) frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
         }
+        // Pause video handles whose items are no longer active.
+        videoHandles.forEach((h, key) => {
+          if (!key.startsWith('audio:') && !activeVideoAssetIds.has(key)) {
+            h.element.pause();
+            h.gain.gain.value = 0;
+          }
+        });
+        void lastActiveVideoId;
+        lastActiveVideoId = activeItems.find((i) => i.type === 'video')?.id ?? null;
 
         const activeAudioIds = new Set<string>();
         activeItems.forEach((item) => {
@@ -264,14 +324,31 @@ export class Canvas2DRenderer implements Renderer {
           if (!asset) return;
           activeAudioIds.add(asset.id);
           const handle = getAudioHandle(asset.id, asset.storageUrl);
+          // Looping items (tweaks round): the target wraps inside the
+          // trim window (`computeLoopedSourceTime`, the same helper the
+          // preview uses, so both wrap at the same moments). A playing
+          // element only needs a seek when it crosses a wrap — the
+          // >0.35s divergence check catches exactly that, mirroring the
+          // video branch's drift handling above. The element's own
+          // `loop` property is not used: it wraps at the file's end, not
+          // the trim window's. Non-loop items keep the original
+          // seek-on-start behavior untouched.
+          const targetTime = item.loop
+            ? computeLoopedSourceTime(item.trimStart, item.trimEnd, Math.max(0, t - item.startTime))
+            : item.trimStart + Math.max(0, t - item.startTime);
           if ((handle.element as HTMLAudioElement).paused) {
-            const targetTime = item.trimStart + Math.max(0, t - item.startTime);
             try {
               (handle.element as HTMLAudioElement).currentTime = targetTime;
             } catch {
               /* ignore */
             }
             handle.element.play().catch(() => {});
+          } else if (item.loop && Math.abs((handle.element as HTMLAudioElement).currentTime - targetTime) > 0.35) {
+            try {
+              (handle.element as HTMLAudioElement).currentTime = targetTime;
+            } catch {
+              /* ignore */
+            }
           }
           // Apply the item's own fade-in/fade-out to its gain, not just
           // mute/volume — `AudioTimelineItem.fade` previously had no effect
@@ -292,7 +369,7 @@ export class Canvas2DRenderer implements Renderer {
           }
         });
 
-        drawFrame(ctx, project, t, { images: imageEls, activeVideo: frameActiveVideo });
+        drawFrame(ctx, project, t, { images: imageEls, activeVideo: frameActiveVideo, videos: videosMap });
 
         options.onProgress?.({ fraction: Math.min(1, t / totalSeconds), renderedSeconds: t, totalSeconds });
 

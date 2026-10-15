@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem } from '../../lib/timeline/utils';
-import { computeFadeOpacity, drawFrame, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
+import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
 import { useProject } from '../../context/ProjectContext';
 
 /**
@@ -84,6 +85,54 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   isPlayingRef.current = isPlaying;
   onPlayingChangeRef.current = onPlayingChange;
 
+  // Render-loop smoothness (polish batch 2): the rAF loop below used to
+  // call `onTimeChange` — a React state setter owned by EditorShell — on
+  // EVERY frame it advanced time (~60/s), re-rendering EditorShell +
+  // TimelinePanel + this pane each frame. The authoritative clock lives
+  // in refs and is untouched by this: the loop still derives time from
+  // the video elements / wall clock exactly as before, and PiP/audio
+  // sync still reads those refs every frame. Only the STATE commit is
+  // throttled to ~10Hz (see `commitTime` inside the loop) — fast enough
+  // for the playhead line, timecode readout, scrub slider, and
+  // active-caption highlighting to track smoothly.
+  const lastTimeCommitAtRef = useRef(0);
+  // The loop's own latest playhead position, written ONLY by the loop
+  // (and by external seeks) — never re-synced from the `currentTime`
+  // prop during render the way `currentTimeRef` is. Used to flush the
+  // exact final position to state the moment playback pauses, since a
+  // throttled commit can leave state up to ~100ms behind the loop.
+  const loopTimeRef = useRef(currentTime);
+
+  // Media elements are created with crossOrigin='anonymous' because canvas
+  // export needs CORS-clean media — but if the Storage bucket has no CORS
+  // config for this app's origin, the browser refuses to load the media AT
+  // ALL (preview included): play() stalls at readyState 0, the canvas stays
+  // black, time never advances, and no sound plays, with every play() error
+  // swallowed. Fallback: on the first load error, retry the element once
+  // WITHOUT crossOrigin — plain (non-CORS) media still plays and is audible;
+  // only canvas capture is affected (tainted canvas) — and if the retry
+  // also fails, surface a visible banner instead of a silent black preview.
+  // (The durable fix remains applying `storage.cors.json` to the bucket.)
+  const corsRetriedRef = useRef<WeakSet<object>>(new WeakSet());
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  // Transport-bar master volume (polish batch): a single gain applied on
+  // top of every preview media element's own per-item volume in the tick
+  // loop below — preview-only, it never writes to the project (each item
+  // keeps its own volume/mute; export mixes from those, untouched).
+  const [masterVolume, setMasterVolume] = useState(1);
+  const masterVolumeRef = useRef(1);
+  masterVolumeRef.current = masterVolume;
+  const handleMediaLoadError = useCallback((el: HTMLMediaElement, storageUrl: string) => {
+    if (el.crossOrigin && !corsRetriedRef.current.has(el)) {
+      corsRetriedRef.current.add(el);
+      el.crossOrigin = null;
+      el.src = storageUrl;
+      el.load();
+      return;
+    }
+    setMediaError('Media failed to load — check your connection or file access, then try reloading the project.');
+  }, []);
+
   const getVideoEl = useCallback((assetId: string, storageUrl: string) => {
     let el = videoElsRef.current.get(assetId);
     if (!el) {
@@ -108,26 +157,39 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       el.style.pointerEvents = 'none';
       el.tabIndex = -1;
       document.body.appendChild(el);
+      const createdEl: HTMLVideoElement = el;
+      createdEl.addEventListener('error', () => handleMediaLoadError(createdEl, storageUrl));
       el.src = storageUrl;
       videoElsRef.current.set(assetId, el);
     }
     return el;
-  }, []);
+  }, [handleMediaLoadError]);
 
   const getImageEl = useCallback((assetId: string, storageUrl: string) => {
     let el = imageElsRef.current.get(assetId);
     if (!el) {
       el = new Image();
       el.crossOrigin = 'anonymous';
-      // Diagnostic only — this does not change what gets drawn. A failed
-      // load (network error, 404, or a Storage bucket missing CORS config
-      // for this origin) leaves `el` in the "broken" state (complete=true,
-      // naturalWidth=0); `drawFrame`'s `isImageReady` check in
-      // compositor.ts is what actually keeps a broken image out of
-      // `ctx.drawImage()`, so this handler only surfaces the failure for
-      // debugging rather than papering over it.
-      el.onerror = () => {
+      // A failed load (network error, 404, or a Storage bucket missing
+      // CORS config for this origin) leaves `el` in the "broken" state
+      // (complete=true, naturalWidth=0); `drawFrame`'s `isImageReady`
+      // check in compositor.ts keeps a broken image out of
+      // `ctx.drawImage()` — this handler first retries without CORS
+      // (see below), then surfaces the failure to the user.
+      const createdImg: HTMLImageElement = el;
+      createdImg.onerror = () => {
+        // Same CORS fallback as the media elements above: a crossOrigin
+        // image that the bucket won't serve CORS-clean is refused entirely;
+        // retry once without it (the compositor can still draw it; only
+        // canvas pixel capture is affected).
+        if (createdImg.crossOrigin && !corsRetriedRef.current.has(createdImg)) {
+          corsRetriedRef.current.add(createdImg);
+          createdImg.crossOrigin = null;
+          createdImg.src = storageUrl;
+          return;
+        }
         console.warn(`[PreviewPane] failed to load image asset "${assetId}" from ${storageUrl}`);
+        setMediaError('An image failed to load — check your connection or file access.');
       };
       el.src = storageUrl;
       imageElsRef.current.set(assetId, el);
@@ -143,15 +205,31 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       el.preload = 'auto';
       el.style.display = 'none';
       document.body.appendChild(el);
+      const createdEl: HTMLAudioElement = el;
+      createdEl.addEventListener('error', () => handleMediaLoadError(createdEl, storageUrl));
       el.src = storageUrl;
       audioElsRef.current.set(assetId, el);
     }
     return el;
-  }, []);
+  }, [handleMediaLoadError]);
 
   // Main render/clock loop. Runs continuously while mounted so the canvas
   // stays correct after edits even while paused, not just while playing.
   useEffect(() => {
+    // Throttled state commit (see the refs declared above): at most one
+    // `onTimeChange` per 100ms of wall clock while playing; `force`
+    // commits immediately regardless (end-of-project clamp). Pause is
+    // flushed separately by the [isPlaying] effect; seeks/steps/scrubs
+    // never pass through here — they set EditorShell state directly and
+    // stay immediate.
+    const commitTime = (t: number, force = false) => {
+      const now = performance.now();
+      if (force || now - lastTimeCommitAtRef.current >= 100) {
+        lastTimeCommitAtRef.current = now;
+        onTimeChange(t);
+      }
+    };
+
     const tick = (wallClockNow: number) => {
       const proj = projectRef.current;
       const canvas = canvasRef.current;
@@ -190,7 +268,10 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
             // Switching which video item is active: pause the previous one,
             // seek the new one to the correct source offset for this timeline position.
             videoElsRef.current.forEach((el) => el.pause());
-            const targetSourceTime = active.trimStart + Math.max(0, t - active.startTime);
+            // Speed (Phase 2.3): timeline seconds map to source seconds
+            // through the item's rate — source = trimStart + elapsed * speed
+            // (the inverse of the clock derivation below).
+            const targetSourceTime = active.trimStart + Math.max(0, t - active.startTime) * (active.speed || 1);
             if (Number.isFinite(targetSourceTime)) {
               try {
                 videoEl.currentTime = targetSourceTime;
@@ -209,6 +290,10 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // fields were already correctly respected by the real export
           // renderer, `canvas2dRenderer.ts`).
           videoEl.muted = active.muted;
+          // Speed (Phase 2.3): the element itself must run at the item's
+          // rate — the clock derivation below only stays truthful if the
+          // media advances `speed` source-seconds per wall-clock second.
+          videoEl.playbackRate = active.speed || 1;
           // "Universal 30-second media standard" spec item 6 — a video's
           // OWN embedded audio must respect its own `fade` field too, not
           // just the standalone AudioTimelineItem branch below (which
@@ -218,17 +303,21 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // in ItemInspector) visibly faded its picture but silently had NO
           // effect on its own audio in the live preview.
           const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, active.endTime - t);
-          videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul));
+          videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul * masterVolumeRef.current));
 
           if (isPlayingRef.current) {
             if (videoEl.paused) videoEl.play().catch(() => {});
             // Video-driven clock: derive global time from the element's own
-            // currentTime so audio and picture never drift apart.
-            const derived = active.startTime + (videoEl.currentTime - active.trimStart);
+            // currentTime so audio and picture never drift apart. Speed
+            // (Phase 2.3): divide the source offset by the item's rate —
+            // at 2x the element burns through source twice as fast, so one
+            // source second is only half a timeline second.
+            const derived = active.startTime + (videoEl.currentTime - active.trimStart) / (active.speed || 1);
             if (Number.isFinite(derived) && derived >= active.startTime) {
               t = derived;
               currentTimeRef.current = t;
-              onTimeChange(t);
+              loopTimeRef.current = t;
+              commitTime(t);
             }
             if (videoEl.currentTime >= active.trimEnd || t >= active.endTime) {
               videoEl.pause();
@@ -248,7 +337,8 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           const deltaSeconds = (wallClockNow - last) / 1000;
           t = currentTimeRef.current + deltaSeconds;
           currentTimeRef.current = t;
-          onTimeChange(t);
+          loopTimeRef.current = t;
+          commitTime(t);
         }
       }
 
@@ -270,8 +360,16 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         const audioEl = getAudioEl(asset.id, asset.storageUrl);
         const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
         audioEl.muted = item.muted;
-        audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul));
-        const targetSourceTime = item.trimStart + Math.max(0, t - item.startTime);
+        audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
+        // Looping items (tweaks round): the target wraps inside the trim
+        // window, so the drift-correction seek below fires exactly at
+        // each wrap and the element never plays past `trimEnd` into the
+        // rest of the file (its own `loop` property wraps at the file's
+        // end, not the window's, so it stays off). Non-loop items keep
+        // the plain play-once mapping, unchanged.
+        const targetSourceTime = item.loop
+          ? computeLoopedSourceTime(item.trimStart, item.trimEnd, Math.max(0, t - item.startTime))
+          : item.trimStart + Math.max(0, t - item.startTime);
         if (isPlayingRef.current) {
           // Only force-seek on a real discontinuity (item just became
           // active, or drifted noticeably) — reassigning currentTime every
@@ -318,8 +416,9 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       if (projectDuration > 0 && t >= projectDuration) {
         t = projectDuration;
         currentTimeRef.current = t;
+        loopTimeRef.current = t;
         if (isPlayingRef.current) {
-          onTimeChange(t);
+          commitTime(t, true);
           onPlayingChangeRef.current(false);
           videoElsRef.current.forEach((el) => el.pause());
         }
@@ -327,7 +426,66 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
 
       canvas.width = proj.canvasWidth;
       canvas.height = proj.canvasHeight;
+      // v1 PiP: sync EVERY active video item (main + overlays), not just
+      // the first. The clock is still driven by the first (main) video
+      // above; PiP elements are synced to their own trim window each
+      // frame so they stay in sync even when they start mid-timeline.
+      {
+        const videos = new Map<string, HTMLVideoElement>();
+        const activeVideoItems = getItemsByTrackType(proj, 'video').filter(
+          (i) => i.type === 'video' && t >= i.startTime && t < i.endTime,
+        );
+        for (const item of activeVideoItems) {
+          if (item.type !== 'video') continue;
+          const asset = proj.mediaAssets[item.mediaAssetId];
+          if (!asset) continue;
+          const el = getVideoEl(asset.id, asset.storageUrl);
+          videos.set(asset.id, el);
+          // Speed (Phase 2.3): same source-mapping as the main-video
+          // branch — elapsed timeline seconds consume `speed`x source
+          // seconds, and the element runs at the item's rate.
+          el.playbackRate = item.speed || 1;
+          const target = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
+          if (isPlayingRef.current) {
+            if (Math.abs(el.currentTime - target) > 0.35) {
+              try { el.currentTime = target; } catch { /* not seekable yet */ }
+            }
+            if (el.paused) el.play().catch(() => {});
+          } else {
+            el.pause();
+            if (Math.abs(el.currentTime - target) > 0.05) {
+              try { el.currentTime = target; } catch { /* ignore */ }
+            }
+          }
+          const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+          el.muted = item.muted;
+          el.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
+        }
+        // Pause video elements whose items are no longer active.
+        videoElsRef.current.forEach((el, assetId) => {
+          if (!videos.has(assetId) && !el.paused) el.pause();
+        });
+        frameAssets = { ...frameAssets, videos };
+      }
       drawFrame(ctx, proj, t, frameAssets);
+
+      // If the main video's media hasn't decoded a frame yet (still
+      // loading, or failed outright), paint a simple slate over the canvas
+      // so a stalled/failed load reads as feedback instead of a frozen
+      // black rectangle that looks like a hang.
+      if (active && active.type === 'video') {
+        const asset = proj.mediaAssets[active.mediaAssetId];
+        const el = asset ? videoElsRef.current.get(asset.id) : undefined;
+        if (el && el.readyState < 2) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(255,255,255,0.5)';
+          ctx.font = `${Math.max(14, Math.round(canvas.height * 0.035))}px Arial, Helvetica, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(el.error ? 'Media failed to load' : 'Loading…', canvas.width / 2, canvas.height / 2);
+          ctx.restore();
+        }
+      }
 
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -343,11 +501,20 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   useEffect(() => {
     if (!isPlaying) {
       videoElsRef.current.forEach((el) => el.pause());
+      // Flush the loop's exact final position to state (polish batch 2):
+      // the ~10Hz throttled commits can leave the state clock up to
+      // ~100ms behind the loop's refs, and paused UI (playhead, timecode)
+      // must show where playback actually stopped, not the last commit.
+      onTimeChange(loopTimeRef.current);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying]);
 
   // External seeks (scrubber drag) — force the active video element to the right source offset.
   useEffect(() => {
+    // Keep the loop's position ref in step with external seeks while
+    // paused, so a later pause-flush can't resurrect a pre-seek position.
+    loopTimeRef.current = currentTime;
     if (isPlayingRef.current) return; // playback loop owns currentTime while playing
     const videoItems = getItemsByTrackType(project, 'video').filter((i) => i.type === 'video');
     const active = videoItems.find((i) => currentTime >= i.startTime && currentTime < i.endTime) as
@@ -357,7 +524,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       const asset = project.mediaAssets[active.mediaAssetId];
       if (asset) {
         const el = getVideoEl(asset.id, asset.storageUrl);
-        const targetSourceTime = active.trimStart + Math.max(0, currentTime - active.startTime);
+        const targetSourceTime = active.trimStart + Math.max(0, currentTime - active.startTime) * (active.speed || 1);
         try {
           el.currentTime = targetSourceTime;
         } catch {
@@ -596,6 +763,27 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   );
 
   const aspect = project.canvasWidth / project.canvasHeight;
+  const projectDuration = getProjectDuration(project);
+
+  // Transport bar (polish batch): seek/skip go through the SAME
+  // `onTimeChange` path the timeline scrubber uses — no second clock.
+  const skipBy = useCallback(
+    (deltaSeconds: number) => {
+      const max = projectDuration > 0 ? projectDuration : currentTime + deltaSeconds;
+      onTimeChange(Math.max(0, Math.min(max, currentTime + deltaSeconds)));
+    },
+    [currentTime, projectDuration, onTimeChange],
+  );
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      el.requestFullscreen?.().catch(() => {});
+    }
+  }, []);
 
   // Preview sizing (full-app audit: "preview/canvas is too small") — fits
   // the canvas box to whichever of (available column width, available
@@ -656,9 +844,17 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         <div className="absolute inset-0 bg-black rounded-lg overflow-hidden border border-white/10">
           <canvas ref={canvasRef} className="w-full h-full" />
         </div>
+        {mediaError && (
+          <div className="absolute top-2 left-2 right-2 z-10 flex items-start justify-between gap-2 rounded-md bg-red-600/90 px-3 py-2 text-xs text-white shadow-lg">
+            <span>{mediaError}</span>
+            <button onClick={() => setMediaError(null)} aria-label="Dismiss" className="shrink-0 leading-none">
+              <X size={14} strokeWidth={3} />
+            </button>
+          </div>
+        )}
         {selectedBounds && (
           <div
-            className="absolute border-2 border-emerald-400 cursor-move"
+            className="absolute border-2 border-gold cursor-move"
             style={{
               left: `${selectedBounds.leftPercent}%`,
               top: `${selectedBounds.topPercent}%`,
@@ -712,19 +908,75 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
               className="absolute flex items-center justify-center w-11 h-11 cursor-nwse-resize touch-none"
               style={{ right: -22, bottom: -22 }}
             >
-              <div className="w-3.5 h-3.5 bg-emerald-400 rounded-sm pointer-events-none" />
+              <div className="w-3.5 h-3.5 bg-gold rounded-sm pointer-events-none" />
             </div>
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2">
+      {/* Transport bar (polish batch) — replaces the lone Play/Pause text
+          button + raw seconds readout: round gold play/pause, ±5s skip,
+          timecode readout, a scrub slider on the same seek path as the
+          timeline, master volume, and fullscreen. */}
+      <div className="flex items-center gap-2 sm:gap-3 w-full max-w-3xl px-1">
         <button
           onClick={() => onPlayingChange(!isPlaying)}
-          className="min-h-11 px-4 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white"
+          aria-label={isPlaying ? 'Pause' : 'Play'}
+          title={isPlaying ? 'Pause' : 'Play'}
+          className="shrink-0 w-11 h-11 rounded-full bg-gold hover:bg-gold-bright text-black flex items-center justify-center transition"
         >
-          {isPlaying ? 'Pause' : 'Play'}
+          {isPlaying ? <Pause size={18} /> : <Play size={18} className="ml-0.5" />}
         </button>
-        <span className="text-xs text-white/40 font-mono">{currentTime.toFixed(1)}s</span>
+        <button
+          onClick={() => skipBy(-5)}
+          aria-label="Back 5 seconds"
+          title="Back 5 seconds"
+          className="shrink-0 min-h-11 min-w-9 flex flex-col items-center justify-center text-white/60 hover:text-white"
+        >
+          <RotateCcw size={16} />
+          <span className="text-[8px] font-bold leading-none mt-0.5">5s</span>
+        </button>
+        <button
+          onClick={() => skipBy(5)}
+          aria-label="Forward 5 seconds"
+          title="Forward 5 seconds"
+          className="shrink-0 min-h-11 min-w-9 flex flex-col items-center justify-center text-white/60 hover:text-white"
+        >
+          <RotateCw size={16} />
+          <span className="text-[8px] font-bold leading-none mt-0.5">5s</span>
+        </button>
+        <span className="shrink-0 text-xs text-white/70 font-mono whitespace-nowrap">
+          {formatTimecode(currentTime)} <span className="text-white/30">/</span> {formatTimecode(projectDuration)}
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0.01, projectDuration)}
+          step={0.01}
+          value={Math.min(currentTime, projectDuration)}
+          onChange={(e) => onTimeChange(Number(e.target.value))}
+          aria-label="Seek"
+          className="flex-1 min-w-8"
+        />
+        <Volume2 size={16} className="shrink-0 text-white/40 hidden sm:block" />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={masterVolume}
+          onChange={(e) => setMasterVolume(Number(e.target.value))}
+          aria-label="Preview volume"
+          title="Preview volume"
+          className="w-20 shrink-0 hidden sm:block"
+        />
+        <button
+          onClick={toggleFullscreen}
+          aria-label="Fullscreen"
+          title="Fullscreen"
+          className="shrink-0 min-h-11 min-w-9 flex items-center justify-center text-white/60 hover:text-white"
+        >
+          <Maximize size={16} />
+        </button>
       </div>
     </div>
   );

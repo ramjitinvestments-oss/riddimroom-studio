@@ -91,6 +91,25 @@ export interface FadeSettings {
 }
 
 /**
+ * Phase 2.3 — keyframe-lite: the item's END transform. When present, the
+ * compositor interpolates position/scale/opacity linearly across the
+ * item's on-screen duration, from its base `Transform` to this end state
+ * (`interpolateTransform` in `lib/render/compositor.ts`, shared by preview
+ * and export). Rotation is deliberately not part of it — the base
+ * rotation holds for the whole item. Absent = static transform, exactly
+ * the pre-2.3 behavior.
+ */
+export interface EndTransformSettings {
+  position: Position2D;
+  /** 1 = natural size (same meaning as `Transform.scale`). */
+  scale: number;
+  /** 0-1. */
+  opacity: number;
+  /** True = smoothstep easing; false/absent = linear. */
+  eased?: boolean;
+}
+
+/**
  * Named animation presets. Union of BoltVideoApp's `TextOverlay.animation`
  * values and riddimroom-caption's `AnimationStyle` values, so nothing from
  * either proven source is lost. The future render engine maps these to
@@ -245,6 +264,20 @@ interface TimelineItemBase {
   locked?: boolean;
 }
 
+export type PipShape = 'circle' | 'rounded' | 'square';
+
+export interface PipSettings {
+  /** PiP shape. 'circle' = talking-head bubble, 'rounded' = rounded rect, 'square' = plain rect. */
+  shape: PipShape;
+  /** Border width in px (canvas space). 0 = no border. */
+  borderWidth: number;
+  borderColor: string;
+  /** Soft drop shadow. */
+  shadow: boolean;
+  /** True when this video item is a PiP overlay (drawn on top of the main video). */
+  isPip: boolean;
+}
+
 export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSettings {
   type: 'video';
   mediaAssetId: string;
@@ -257,9 +290,13 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
   crop?: CropSettings;
   colorGrade?: ColorGradeSettings;
   fade?: FadeSettings;
+  /** PiP overlay settings. Absent = normal full-frame video. */
+  pip?: PipSettings;
   animation?: AnimationSettings;
   /** "Final production fix" spec item 8 — see `MotionSettings`'s doc comment. Video's own motion (e.g. a subtle Ken Burns treatment layered on top of the clip's normal playback). */
   motion?: MotionSettings;
+  /** Phase 2.3 — keyframe-lite end transform; see `EndTransformSettings`. */
+  endTransform?: EndTransformSettings;
 }
 
 export interface ImageTimelineItem extends TimelineItemBase, Transform {
@@ -274,6 +311,8 @@ export interface ImageTimelineItem extends TimelineItemBase, Transform {
   motion?: MotionSettings;
   fade?: FadeSettings;
   animation?: AnimationSettings;
+  /** Phase 2.3 — keyframe-lite end transform; see `EndTransformSettings`. */
+  endTransform?: EndTransformSettings;
 }
 
 export interface TextTimelineItem extends TimelineItemBase, Transform {
@@ -319,6 +358,16 @@ export interface AudioTimelineItem extends TimelineItemBase, TrimSettings {
   volume: number;
   muted: boolean;
   fade: FadeSettings;
+  /**
+   * Tweaks round — "Loop to fill project" (see `loopAudioToProjectEnd` in
+   * `lib/timeline/utils.ts`). When true, the item's timeline span may be
+   * LONGER than its trim window: both render paths (PreviewPane,
+   * canvas2dRenderer) wrap the source position inside
+   * `[trimStart, trimEnd)` via `computeLoopedSourceTime` instead of
+   * playing the source once and falling silent. Absent/false = the
+   * pre-existing play-once behavior, so old projects need no migration.
+   */
+  loop?: boolean;
 }
 
 export type TimelineItem =
@@ -365,4 +414,19 @@ export interface Project {
   /** Epoch milliseconds. */
   createdAt: number;
   updatedAt: number;
+  /**
+   * v1 licensing: when true, the compositor draws a small "RiddimRoom Studio"
+   * watermark (free tier). Paid lifetime projects set this false.
+   * Defaults to true for backwards compat with pre-v1 projects (which have no field).
+   */
+  watermarkEnabled?: boolean;
+  /**
+   * Dashboard poster (polish batch 2): a small JPEG data URL generated at
+   * save time from the project's first video/image asset (see
+   * `lib/media/thumbnails.ts`), rendered as the project card's cover on
+   * the dashboard. Purely cosmetic — absent on projects saved before this
+   * existed, projects with no visual media, or whenever the media couldn't
+   * be decoded CORS-clean.
+   */
+  posterDataUrl?: string;
 }

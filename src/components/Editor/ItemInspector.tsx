@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, X } from 'lucide-react';
 import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -13,6 +14,10 @@ import {
   canApplyTransition,
   transitionAlreadyApplied,
   applyTransition,
+  updateItemMotion,
+  setItemSpeed,
+  SPEED_MIN,
+  SPEED_MAX,
   addCaptionWord,
   isVisualItem,
   bringForward,
@@ -21,6 +26,7 @@ import {
   sendToBack,
 } from '../../lib/timeline/utils';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
+import { isPipItem } from '../../lib/pip';
 import {
   TRANSITION_CATEGORIES,
   TRANSITION_INTENSITY_DEFAULT,
@@ -62,7 +68,13 @@ const TEXT_ONLY_ANIMATION_OPTIONS: { value: AnimationPreset; label: string }[] =
   { value: 'word-by-word', label: 'Word by word' },
 ];
 
-export function ItemInspector({ item }: { item: TimelineItem }) {
+// React.memo (polish batch 2): the only prop is the selected item object,
+// whose identity is stable across EditorShell re-renders that don't touch
+// the project (playback time commits, step/sheet changes) — memo keeps
+// those from re-rendering this large form. Real edits flow through
+// useProject() context + a new item identity, both of which still
+// re-render it as before.
+export const ItemInspector = React.memo(function ItemInspector({ item }: { item: TimelineItem }) {
   const { mutate, project } = useProject();
 
   const patch = (fields: Record<string, unknown>) => {
@@ -93,8 +105,12 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
   const hasMotion = item.type === 'video' || item.type === 'image';
   const motion = hasMotion ? ((item as any).motion as MotionSettings | undefined) : undefined;
   const motionEffectInfo = findMotionEffect(motion?.type);
+  // Writes through the shared `updateItemMotion` util (Phase 2.1) — the
+  // exact `{ type: 'none', ...current, ...fields }` merge this closure
+  // used to do inline, now shared with the first-class Effects panel so
+  // both write the one `motion` field identically.
   const patchMotion = (fields: Partial<MotionSettings>) => {
-    patch({ motion: { type: 'none', ...motion, ...fields } });
+    mutate((p) => updateItemMotion(p, item.id, fields));
   };
 
   // Cross Dissolve — only offered when there's an actual adjacent same-
@@ -132,6 +148,36 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
       {item.type === 'text' && (
         <div className="flex flex-col gap-2">
           <span className="font-bold uppercase tracking-wide text-white/40">Text</span>
+          {/* Phase 2.3 — text style presets. They set only the two fields
+              the compositor's drawTextItem actually consumes for text
+              (fontSize — multiplied by the item's scale — and color), so a
+              preset click is a real render change in preview + export,
+              never a label-only choice. */}
+          <div className="flex gap-1.5">
+            {(
+              [
+                { id: 'headline', label: 'Headline', fontSize: 76, color: '#FFD100' },
+                { id: 'subtitle', label: 'Subtitle', fontSize: 36, color: '#FFFFFF' },
+                { id: 'cta', label: 'CTA', fontSize: 48, color: '#FF5C1A' },
+              ] as const
+            ).map((preset) => {
+              const isActive = item.fontSize === preset.fontSize && item.color.toLowerCase() === preset.color.toLowerCase();
+              return (
+                <button
+                  key={preset.id}
+                  onClick={() => patch({ fontSize: preset.fontSize, color: preset.color })}
+                  aria-pressed={isActive}
+                  className={`min-h-11 flex-1 px-2 rounded-lg border text-xs font-bold transition ${
+                    isActive
+                      ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                      : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
           <label className="flex flex-col gap-1">
             Text
             <textarea
@@ -219,7 +265,107 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
 
       {item.type === 'video' && (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
-          <span className="font-bold uppercase tracking-wide text-white/40">Audio</span>
+          <span className="font-bold uppercase tracking-wide text-white/40">Video overlay (PiP)</span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => patch({ pip: { shape: (item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded', borderWidth: (item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4, borderColor: (item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF', shadow: (item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true, isPip: true } })}
+              disabled={!!(item as { pip?: { isPip?: boolean } }).pip?.isPip}
+              className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 flex items-center gap-1.5"
+            >
+              {(item as { pip?: { isPip?: boolean } }).pip?.isPip ? (<><Check size={14} strokeWidth={3} /> Is PiP overlay</>) : 'Make PiP overlay'}
+            </button>
+            {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
+              <button
+                onClick={() => patch({ pip: { shape: 'rounded', borderWidth: 0, borderColor: '#FFFFFF', shadow: false, isPip: false } })}
+                className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold"
+              >
+                Remove PiP
+              </button>
+            )}
+          </div>
+          {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
+            <>
+              <label className="flex flex-col gap-1 text-xs">
+                Shape
+                <select
+                  value={(item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded'}
+                  onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, shape: e.target.value } })}
+                  className="bg-white/10 rounded px-2 py-2 text-white min-h-11"
+                >
+                  <option value="circle">Circle</option>
+                  <option value="rounded">Rounded</option>
+                  <option value="square">Square</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs">
+                Border width ({(item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4}px)
+                <input type="range" min={0} max={12} step={1} value={(item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, borderWidth: Number(e.target.value) } })} />
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                Border color
+                <input type="color" value={(item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF'} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, borderColor: e.target.value } })} />
+              </label>
+              <label className="flex items-center gap-2 text-xs">
+                <input type="checkbox" checked={(item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, shadow: e.target.checked } })} />
+                Shadow
+              </label>
+            </>
+          )}
+        </div>
+      )}
+
+      {item.type === 'video' && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Speed</span>
+          {/* Phase 2.3 — writes through `setItemSpeed`, the one helper that
+              keeps the timeline invariant (duration = source span / speed)
+              by re-deriving endTime from the unchanged trim window; the
+              preview and export both run the element at this rate. */}
+          <div className="flex flex-wrap gap-1.5">
+            {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => {
+              const isActive = Math.abs(item.speed - rate) < 0.001;
+              return (
+                <button
+                  key={rate}
+                  onClick={() => mutate((p) => setItemSpeed(p, item.id, rate))}
+                  aria-pressed={isActive}
+                  className={`min-h-11 px-2.5 rounded-lg border text-xs font-bold transition ${
+                    isActive
+                      ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                      : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
+                  }`}
+                >
+                  {rate}x
+                </button>
+              );
+            })}
+          </div>
+          <label className="flex flex-col gap-1">
+            <span className="flex items-center justify-between">
+              <span>Playback speed</span>
+              <span className="text-white/40">{item.speed.toFixed(2)}x · clip now {duration.toFixed(1)}s</span>
+            </span>
+            <input
+              type="range"
+              min={SPEED_MIN}
+              max={SPEED_MAX}
+              step={0.05}
+              value={item.speed}
+              onChange={(e) => mutate((p) => setItemSpeed(p, item.id, Number(e.target.value)))}
+              className="w-full"
+            />
+          </label>
+        </div>
+      )}
+
+      {item.type === 'video' && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">{isPipItem(item) ? 'Overlay audio' : 'Original audio'}</span>
+          <p className="text-[11px] text-white/35 -mt-1">
+            {isPipItem(item)
+              ? 'This overlay clip’s own sound only — separate from the main video’s audio. Raise it to hear a talking head over the main clip, or mute it to keep the main audio clean.'
+              : 'This clip’s own sound only — audio tracks you add are controlled separately. Lower it or mute it to lay your own music or voiceover over the picture.'}
+          </p>
           <div className="flex items-center gap-2">
           <label className="flex flex-col gap-1 flex-1">
             Volume ({Math.round(item.volume * 100)}%)
@@ -246,30 +392,30 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
           <button
             onClick={() => mutate((p) => sendToBack(p, item.id))}
             title="Send to back"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            ⇤ Back
+            <ArrowLeftToLine size={13} /> Back
           </button>
           <button
             onClick={() => mutate((p) => sendBackward(p, item.id))}
             title="Send backward"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            ← Back
+            <ArrowLeft size={13} /> Back
           </button>
           <button
             onClick={() => mutate((p) => bringForward(p, item.id))}
             title="Bring forward"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            Fwd →
+            Fwd <ArrowRight size={13} />
           </button>
           <button
             onClick={() => mutate((p) => bringToFront(p, item.id))}
             title="Bring to front"
-            className="min-h-11 px-1.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
+            className="min-h-11 px-1.5 flex items-center justify-center gap-0.5 rounded bg-white/10 hover:bg-white/20 text-white text-[11px]"
           >
-            Front ⇥
+            Front <ArrowRightToLine size={13} />
           </button>
         </div>
       )}
@@ -446,7 +592,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                 }`}
                 title="Overlap this clip with the next one on this track and cross-fade between them"
               >
-                {dissolveApplied ? 'Cross Dissolve Applied' : 'Cross Dissolve →'}
+                {dissolveApplied ? 'Cross Dissolve Applied' : (<>Cross Dissolve <ArrowRight size={12} className="inline" /></>)}
               </button>
             </div>
           )}
@@ -477,7 +623,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
                   }`}
                   title="Overlap this clip with the next one on this track and play this transition between them — both clips draw simultaneously during the overlap, real WYSIWYG in preview and export"
                 >
-                  {transitionApplied ? 'Applied' : 'Apply →'}
+                  {transitionApplied ? 'Applied' : (<>Apply <ArrowRight size={12} className="inline" /></>)}
                 </button>
               </div>
             </div>
@@ -527,7 +673,7 @@ export function ItemInspector({ item }: { item: TimelineItem }) {
       )}
     </div>
   );
-}
+});
 
 /**
  * Audio-item-specific controls — before this pass, an imported standalone
@@ -636,20 +782,53 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
     <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
       <span className="font-bold uppercase tracking-wide text-white/40">Caption</span>
 
-      <label className="flex flex-col gap-1">
-        Style
-        <select
-          value={item.captionStyleId}
-          onChange={(e) => mutate((project) => updateItem(project, item.id, { captionStyleId: e.target.value }))}
-          className="bg-white/10 rounded px-2 py-1 text-white"
-        >
-          {CAPTION_STYLES.map((style) => (
-            <option key={style.id} value={style.id}>
-              {style.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="flex flex-col gap-1.5">
+        <span>Style</span>
+        {/* Preview chips (polish batch) — each chip renders the style's
+            REAL params (family / weight / color / stroke / background /
+            uppercase) on sample text at chip scale, so the picker shows
+            what the caption will actually look like instead of a bare
+            name in a <select>. Selected chip carries the gold ring. */}
+        <div className="grid grid-cols-2 gap-1.5">
+          {CAPTION_STYLES.map((style) => {
+            const isSelected = item.captionStyleId === style.id;
+            const chipStroke =
+              style.strokeWidth > 0 && style.strokeColor !== 'transparent'
+                ? Math.max(0.4, style.strokeWidth / 6)
+                : 0;
+            return (
+              <button
+                key={style.id}
+                onClick={() => mutate((project) => updateItem(project, item.id, { captionStyleId: style.id }))}
+                title={style.label}
+                aria-pressed={isSelected}
+                className={`rounded-lg overflow-hidden border text-left transition ${
+                  isSelected ? 'border-gold ring-1 ring-gold' : 'border-white/10 hover:border-white/30'
+                }`}
+              >
+                <span className="flex h-11 items-center justify-center overflow-hidden px-1.5" style={{ background: style.background ?? '#141414' }}>
+                  <span
+                    className="whitespace-nowrap"
+                    style={{
+                      fontFamily: style.fontFamily,
+                      fontSize: 13,
+                      fontWeight: 700,
+                      lineHeight: 1.1,
+                      color: style.color,
+                      textTransform: style.uppercase ? 'uppercase' : 'none',
+                      WebkitTextStroke: chipStroke ? `${chipStroke}px ${style.strokeColor}` : undefined,
+                      textShadow: '0 1px 2px rgba(0,0,0,0.7)',
+                    }}
+                  >
+                    Your caption
+                  </span>
+                </span>
+                <span className="block truncate bg-white/5 px-1.5 py-1 text-[10px] text-white/60">{style.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       <div className="flex flex-col gap-1 max-h-56 overflow-y-auto pr-1">
         {item.words.length === 0 && <p className="text-white/30 italic">No words in this caption.</p>}
@@ -685,9 +864,10 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
                 bare 1-char tap target. */}
             <button
               onClick={() => deleteWord(index)}
-              className="min-h-9 min-w-9 flex items-center justify-center text-red-400 hover:text-red-300 font-bold"
+              aria-label="Delete word"
+              className="min-h-9 min-w-9 flex items-center justify-center text-red-400 hover:text-red-300"
             >
-              ✕
+              <X size={14} strokeWidth={3} />
             </button>
           </div>
         ))}

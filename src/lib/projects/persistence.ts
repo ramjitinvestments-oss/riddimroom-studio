@@ -32,10 +32,12 @@ import {
   where,
   limit as fsLimit,
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { ref as storageRef, deleteObject } from 'firebase/storage';
+import { db, storage } from '../firebase';
 import { serializeProject, parseProject } from '../timeline/serialization';
 import { createEmptyProject, createTrack, addTrack } from '../timeline/utils';
 import { assertValidProject } from '../timeline/validation';
+import { collectProjectStoragePaths, computePathsToDelete } from './storagePaths';
 import type { Project } from '../../types/timeline';
 
 const PROJECTS_COLLECTION = 'projects';
@@ -47,6 +49,8 @@ export interface ProjectSummary {
   createdAt: number;
   canvasWidth: number;
   canvasHeight: number;
+  /** Dashboard card cover (see `Project.posterDataUrl`) — absent on older projects. */
+  posterDataUrl?: string;
 }
 
 /**
@@ -62,8 +66,12 @@ export interface ProjectSummary {
  * one real caller that now always passes an explicit size, chosen once at
  * creation from the 4 marketing-standard ratios.
  */
-export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Project {
+export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean }): Project {
   let project = createEmptyProject({ ownerUid, name, canvasWidth, canvasHeight });
+  // v1 free default: watermark on. Lifetime users can toggle it off per project,
+  // and callers that know the creator's tier (Dashboard) pass it so paid/owner
+  // projects start with the watermark OFF instead of needing a manual toggle.
+  project = { ...project, watermarkEnabled: opts?.watermarkEnabled ?? true };
   const trackSpecs: Array<[Project['tracks'][number]['type'], string]> = [
     ['video', 'Main Video'],
     ['image', 'Watermark'],
@@ -77,8 +85,8 @@ export function createDefaultProject(ownerUid: string, name?: string, canvasWidt
   return project;
 }
 
-export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number): Promise<Project> {
-  const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight);
+export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean }): Promise<Project> {
+  const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight, opts);
   assertValidProject(project);
   await setDoc(doc(db, PROJECTS_COLLECTION, project.id), serializeProject(project));
   return project;
@@ -138,11 +146,96 @@ export async function listProjects(ownerUid: string, max = 50): Promise<ProjectS
         createdAt: data.createdAt,
         canvasWidth: data.canvasWidth,
         canvasHeight: data.canvasHeight,
+        posterDataUrl: typeof data.posterDataUrl === 'string' ? data.posterDataUrl : undefined,
       };
     })
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
-  await deleteDoc(doc(db, PROJECTS_COLLECTION, projectId));
+  await deleteProjects([projectId]);
+}
+
+/**
+ * Deletes one or more projects owned by the same user, with best-effort
+ * Firebase Storage cleanup of the media only those projects referenced.
+ *
+ * Duplicated projects can share a single storage object (duplicate = same
+ * `storageUrl`, same underlying path), so a path is deleted only when NO
+ * project outside the batch references it — see
+ * `computePathsToDelete` in `./storagePaths`.
+ *
+ * Correctness contract (storage cleanup must never break deletion or
+ * another project):
+ * - The Firestore documents are always deleted, even if every storage
+ *   step fails.
+ * - Loading the owner's other projects failing — or any one of them
+ *   failing to parse — skips storage cleanup ENTIRELY: with an incomplete
+ *   picture of what surviving projects reference, deleting bytes is a
+ *   risk we don't take.
+ * - Individual storage deletes are swallowed (`object-not-found` on media
+ *   the rules/another client already removed is expected, not an error).
+ */
+export async function deleteProjects(projectIds: string[]): Promise<void> {
+  const ids = [...new Set(projectIds)].filter(Boolean);
+  if (ids.length === 0) return;
+  const batch = new Set(ids);
+
+  // 1. Load the target documents: collect their storage paths and find
+  //    the owner (needed to enumerate the surviving projects). A target
+  //    that fails to load contributes no paths — its bytes are orphaned,
+  //    but the document is still deleted below.
+  const batchPaths: string[] = [];
+  let ownerUid: string | undefined;
+  for (const id of ids) {
+    try {
+      const snapshot = await getDoc(doc(db, PROJECTS_COLLECTION, id));
+      if (!snapshot.exists()) continue;
+      const data = snapshot.data() as Record<string, unknown>;
+      batchPaths.push(...collectProjectStoragePaths(data));
+      if (!ownerUid && typeof data.ownerUid === 'string') ownerUid = data.ownerUid;
+    } catch {
+      // Best-effort — proceed to document deletion regardless.
+    }
+  }
+
+  // 2. Load every OTHER project the owner has and compute which of the
+  //    batch's paths are exclusive to the batch. Any failure here means
+  //    "skip cleanup", per the contract above.
+  let pathsToDelete: string[] = [];
+  if (ownerUid && batchPaths.length > 0) {
+    try {
+      const q = query(collection(db, PROJECTS_COLLECTION), where('ownerUid', '==', ownerUid));
+      const snapshot = await getDocs(q);
+      const retainedPaths: string[] = [];
+      for (const docSnap of snapshot.docs) {
+        if (batch.has(docSnap.id)) continue;
+        const { project, structuralErrors } = parseProject(docSnap.data());
+        if (!project || structuralErrors.length > 0) {
+          // Can't account for this surviving project's references — the
+          // safe move is to keep every storage object.
+          throw new Error('A surviving project could not be read; skipping storage cleanup.');
+        }
+        retainedPaths.push(...collectProjectStoragePaths(project));
+      }
+      pathsToDelete = computePathsToDelete(batchPaths, retainedPaths);
+    } catch {
+      pathsToDelete = [];
+    }
+  }
+
+  // 3. Delete the exclusive storage objects, swallowing individual
+  //    failures — the documents go next no matter what happened here.
+  for (const path of pathsToDelete) {
+    try {
+      await deleteObject(storageRef(storage, path));
+    } catch {
+      // Expected for already-missing objects; never blocks deletion.
+    }
+  }
+
+  // 4. Delete the documents themselves.
+  for (const id of ids) {
+    await deleteDoc(doc(db, PROJECTS_COLLECTION, id));
+  }
 }

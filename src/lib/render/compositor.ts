@@ -35,7 +35,7 @@
  * opposing opacity ramps.
  */
 
-import type { AnimationPreset, CaptionTimelineItem, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { getItemsAtTime } from '../timeline/utils';
 import { getCaptionStyle } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
@@ -47,6 +47,8 @@ export interface FrameAssets {
   images: Map<string, HTMLImageElement>;
   /** The currently-playing <video> element and which mediaAssetId it corresponds to, if any video item is active. */
   activeVideo?: { assetId: string; element: HTMLVideoElement } | null;
+  /** v1 PiP: all decoded <video> elements keyed by MediaAsset id. When present, drawFrame prefers this map so main + PiP videos can draw in the same frame. */
+  videos?: Map<string, HTMLVideoElement>;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +423,25 @@ export function computeFadeOpacity(
   return opacity;
 }
 
+/**
+ * Tweaks round — looping audio (`AudioTimelineItem.loop`). Maps an item's
+ * elapsed timeline seconds to the source position inside its trim window,
+ * wrapping at the window's end: a 8s window asked for 20s of timeline
+ * plays 0-8, 0-8, 0-4. Shared by PreviewPane and canvas2dRenderer so the
+ * preview and the export wrap at exactly the same moments (each caller
+ * compares its element's actual position against this target and seeks
+ * when they diverge — the element's own `loop` property is deliberately
+ * NOT used, since it wraps at the FILE's end, not the trim window's).
+ * Within the first pass (`elapsed <= span`) this is exactly
+ * `trimStart + elapsed`, i.e. identical to the non-loop mapping.
+ */
+export function computeLoopedSourceTime(trimStart: number, trimEnd: number, elapsedSeconds: number): number {
+  const span = trimEnd - trimStart;
+  const elapsed = Math.max(0, elapsedSeconds);
+  if (!(span > 0)) return trimStart + elapsed;
+  return trimStart + (elapsed % span);
+}
+
 // ---------------------------------------------------------------------------
 // Motion/zoom effects (Ken Burns family) — "final production fix" spec item
 // 8. Deliberately separate from `computeEntranceExit`: these run
@@ -659,6 +680,28 @@ function drawMotionOverlay(ctx: CanvasRenderingContext2D, halfWidthPx: number, h
   }
 }
 
+/**
+ * Phase 2.3 — keyframe-lite interpolation. Returns the item's effective
+ * transform at `progress` (0 = item start, 1 = item end) between its base
+ * `Transform` and its optional `endTransform`: position/scale/opacity
+ * lerp (smoothstep when the end settings ask for easing); rotation always
+ * holds at the base value. With no end transform this returns `base`
+ * itself, so non-animated items render exactly as before. Exported for
+ * unit tests — pure math, no canvas involved.
+ */
+export function interpolateTransform(base: Transform, end: EndTransformSettings | undefined, progress: number): Transform {
+  if (!end) return base;
+  const raw = clamp01(progress);
+  const p = end.eased ? raw * raw * (3 - 2 * raw) : raw;
+  const lerp = (a: number, b: number) => a + (b - a) * p;
+  return {
+    position: { x: lerp(base.position.x, end.position.x), y: lerp(base.position.y, end.position.y) },
+    scale: lerp(base.scale, end.scale),
+    rotation: base.rotation,
+    opacity: lerp(base.opacity, end.opacity),
+  };
+}
+
 /** Shared timing → adjustment helper for the three animatable item types (video/image/text). */
 function animationFor(
   item: {
@@ -680,33 +723,124 @@ function animationFor(
   return a;
 }
 
+/**
+ * COVER-fit source rect: the centered sub-rectangle of a (srcW × srcH)
+ * source that fills a (destW × destH) box with no distortion — the
+ * overflow dimension is cropped symmetrically. Used by drawVideoItem so a
+ * clip whose aspect differs from its target rect (e.g. a 16:9 clip on a
+ * 9:16 canvas) is cropped, never stretched/squashed.
+ */
+function coverSourceRect(
+  srcW: number,
+  srcH: number,
+  destW: number,
+  destH: number,
+): { sx: number; sy: number; sw: number; sh: number } {
+  const srcAspect = srcW / srcH;
+  const destAspect = destW / destH;
+  if (srcAspect > destAspect) {
+    // Source is wider than the box: crop left/right.
+    const sw = srcH * destAspect;
+    return { sx: (srcW - sw) / 2, sy: 0, sw, sh: srcH };
+  }
+  // Source is taller than (or equal to) the box: crop top/bottom.
+  const sh = srcW / destAspect;
+  return { sx: 0, sy: (srcH - sh) / 2, sw: srcW, sh };
+}
+
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
   timeSeconds: number,
 ) {
-  const centerX = (item.position.x / 100) * canvasWidth;
-  const centerY = (item.position.y / 100) * canvasHeight;
-  const w = canvasWidth * item.scale;
-  const h = canvasHeight * item.scale;
+  // Keyframe-lite (Phase 2.3): the frame's effective transform — base
+  // transform unless an end transform interpolates it across the item.
+  const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
+  const centerX = (effective.position.x / 100) * canvasWidth;
+  const centerY = (effective.position.y / 100) * canvasHeight;
+  const w = canvasWidth * effective.scale;
+  const h = canvasHeight * effective.scale;
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
+  const isPip = !!item.pip?.isPip;
   applyTransformedDraw(
     ctx,
     (c) => {
+      // PiP clipping: circle / rounded-rect clip + optional border + shadow.
+      // Runs inside the item's own transform context, so it tracks position/rotation/scale.
+      const pip = isPip ? item.pip! : null;
+      if (pip) {
+        c.save();
+        if (pip.shadow) { c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 18; c.shadowOffsetY = 6; }
+        c.beginPath();
+        if (pip.shape === 'circle') {
+          // Circle inscribed in the video rect (uses min side so it stays round even for 16:9 sources).
+          const r = Math.min(w, h) / 2;
+          c.arc(0, 0, r, 0, Math.PI * 2);
+        } else if (pip.shape === 'rounded') {
+          const rad = Math.min(28, Math.min(w, h) * 0.12);
+          c.roundRect(-w / 2, -h / 2, w, h, rad);
+        } else {
+          c.rect(-w / 2, -h / 2, w, h);
+        }
+        c.clip();
+      }
       try {
-        c.drawImage(videoEl, -w / 2, -h / 2, w, h);
+        // COVER fit: crop the source to the target rect's aspect (see
+        // coverSourceRect) instead of stretching the full frame into the
+        // rect, which visibly distorted any clip whose aspect differed
+        // from its box. Falls back to the plain full-frame draw while the
+        // element has no decoded dimensions yet (videoWidth/Height 0).
+        const srcW = videoEl.videoWidth;
+        const srcH = videoEl.videoHeight;
+        if (pip?.shape === 'circle') {
+          // Cover-fit inside the circle: draw so the circle is fully filled (no letterbox).
+          const r = Math.min(w, h) / 2;
+          const size = r * 2;
+          if (srcW > 0 && srcH > 0) {
+            const s = coverSourceRect(srcW, srcH, size, size);
+            c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -size / 2, -size / 2, size, size);
+          } else {
+            c.drawImage(videoEl, -size / 2, -size / 2, size, size);
+          }
+        } else if (srcW > 0 && srcH > 0) {
+          const s = coverSourceRect(srcW, srcH, w, h);
+          c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -w / 2, -h / 2, w, h);
+        } else {
+          c.drawImage(videoEl, -w / 2, -h / 2, w, h);
+        }
       } catch {
         // Video not yet seekable/decoded to this frame — skip this frame rather than throw.
+      }
+      if (pip) {
+        c.restore();
+        // Border drawn after restore (outside clip) so it is not clipped away.
+        if (pip.borderWidth > 0) {
+          c.save();
+          c.lineWidth = pip.borderWidth;
+          c.strokeStyle = pip.borderColor;
+          c.beginPath();
+          if (pip.shape === 'circle') {
+            const r = Math.min(w, h) / 2;
+            c.arc(0, 0, r, 0, Math.PI * 2);
+          } else if (pip.shape === 'rounded') {
+            const rad = Math.min(28, Math.min(w, h) * 0.12);
+            c.roundRect(-w / 2, -h / 2, w, h, rad);
+          } else {
+            c.rect(-w / 2, -h / 2, w, h);
+          }
+          c.stroke();
+          c.restore();
+        }
       }
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
       drawMotionOverlay(c, w / 2, h / 2, adjustment);
     },
-    item,
+    effective,
     centerX,
     centerY,
     adjustment,
@@ -734,9 +868,11 @@ function drawImageItem(
   canvasHeight: number,
   timeSeconds: number,
 ) {
-  const centerX = (item.position.x / 100) * canvasWidth;
-  const centerY = (item.position.y / 100) * canvasHeight;
-  const baseWidth = canvasWidth * 0.25 * item.scale;
+  // Keyframe-lite (Phase 2.3): same effective-transform treatment as video.
+  const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
+  const centerX = (effective.position.x / 100) * canvasWidth;
+  const centerY = (effective.position.y / 100) * canvasHeight;
+  const baseWidth = canvasWidth * 0.25 * effective.scale;
   const aspect = img.naturalHeight > 0 && img.naturalWidth > 0 ? img.naturalHeight / img.naturalWidth : 1;
   const w = baseWidth;
   const h = baseWidth * aspect;
@@ -757,7 +893,7 @@ function drawImageItem(
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
       drawMotionOverlay(c, w / 2, h / 2, adjustment);
     },
-    item,
+    effective,
     centerX,
     centerY,
     adjustment,
@@ -978,7 +1114,17 @@ function drawCaptionItem(
         ctx.strokeStyle = style.strokeColor;
         ctx.strokeText(word, 0, 0);
       }
-      ctx.fillStyle = isActive ? style.color : hexWithAlpha(style.color, 0.72);
+      // Karaoke styles (Phase 2.3): a style with `highlightColor` fills
+      // ONLY the active word in that color; words already spoken and words
+      // still to come stay in the base `color` at near-full strength (they
+      // are real caption text, not "upcoming" ghosts). Styles without a
+      // highlight keep the original treatment: active word at full color,
+      // the rest dimmed to 0.72 alpha.
+      ctx.fillStyle = isActive
+        ? (style.highlightColor ?? style.color)
+        : style.highlightColor
+          ? hexWithAlpha(style.color, 0.85)
+          : hexWithAlpha(style.color, 0.72);
       ctx.fillText(word, 0, 0);
       ctx.restore();
 
@@ -1013,8 +1159,11 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
     if (!item.visible) continue;
     switch (item.type) {
       case 'video': {
-        if (assets.activeVideo && assets.activeVideo.assetId === item.mediaAssetId) {
-          drawVideoItem(ctx, item, assets.activeVideo.element, canvasWidth, canvasHeight, timeSeconds);
+        const videoEl =
+          assets.videos?.get(item.mediaAssetId) ??
+          (assets.activeVideo && assets.activeVideo.assetId === item.mediaAssetId ? assets.activeVideo.element : undefined);
+        if (videoEl) {
+          drawVideoItem(ctx, item, videoEl, canvasWidth, canvasHeight, timeSeconds);
         }
         break;
       }
@@ -1040,5 +1189,52 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
       default:
         break;
     }
+  }
+
+  // v1 free-tier watermark: premium pill badge, bottom-right. Paid projects
+  // set watermarkEnabled=false. Undefined = true (pre-v1 projects default to free).
+  // Design: subtle dark pill (not a big logo), small yellow RiddimRoom dot + clean
+  // white text. Sits bottom-right so it never covers centered captions or PiP.
+  // Opacity + size kept low on purpose — free users should not hate it.
+  if (project.watermarkEnabled !== false) {
+    ctx.save();
+    const label = 'Made with RiddimRoom Studio';
+    const fontSize = Math.max(13, Math.round(canvasWidth * 0.016));
+    ctx.font = `600 ${fontSize}px Inter, Arial, Helvetica, sans-serif`;
+    const textWidth = ctx.measureText(label).width;
+    const dotRadius = Math.max(3.5, fontSize * 0.28);
+    const padX = Math.round(fontSize * 0.85);
+    const padY = Math.round(fontSize * 0.45);
+    const pillW = padX * 2 + dotRadius * 2 + 6 + textWidth;
+    const pillH = fontSize + padY * 2;
+    const margin = Math.round(canvasWidth * 0.018);
+    const x = canvasWidth - margin - pillW;
+    const y = canvasHeight - margin - pillH;
+    const radius = pillH / 2;
+    // Pill background
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(x, y, pillW, pillH, radius);
+    } else {
+      ctx.rect(x, y, pillW, pillH);
+    }
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    ctx.stroke();
+    // Yellow RiddimRoom dot
+    const dotX = x + padX + dotRadius;
+    const dotY = y + pillH / 2;
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, dotRadius, 0, Math.PI * 2);
+    ctx.fillStyle = '#FFD100';
+    ctx.fill();
+    // Label
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+    ctx.fillText(label, dotX + dotRadius + 6, dotY + 1);
+    ctx.restore();
   }
 }

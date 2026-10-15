@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, ArrowRight, ChevronRight, FolderOpen, Plus, Redo2, Settings, Undo2, X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import BrandLogo from '../BrandLogo';
 import { ProjectProvider, useProject } from '../../context/ProjectContext';
 import { PreviewPane } from './PreviewPane';
 import { TimelinePanel } from './TimelinePanel';
@@ -11,9 +13,17 @@ import { TranscribePanel } from './TranscribePanel';
 import { ExportPanel } from './ExportPanel';
 import { BackgroundRemovalButton } from './BackgroundRemovalButton';
 import { BottomSheet } from './BottomSheet';
+import { PipPanel } from './PipPanel';
+import { TemplatesPanel } from './TemplatesPanel';
+import { TransitionsPanel } from './TransitionsPanel';
+import { EffectsPanel } from './EffectsPanel';
+import { MusicPanel } from './MusicPanel';
+import { LicensingPanel } from './LicensingPanel';
+import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
+import { addPipOverlay } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
-import type { MediaAsset } from '../../types/timeline';
+import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 
 /**
  * Phase 1 Step 6 (Shared editor shell) — the actual authenticated editor
@@ -44,6 +54,9 @@ function EditorInner({ uid }: { uid: string }) {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  // v1 3-step flow: 1 Capture/Upload → 2 Edit+Captions → 3 Export.
+  // One clear action per screen; panels are grouped by step, no parallel state.
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   // Which variant (original vs background-removed) is currently selected
   // per ORIGINAL image asset id — owned here (not inside
   // BackgroundRemovalButton) because the media library row's own
@@ -88,17 +101,63 @@ function EditorInner({ uid }: { uid: string }) {
   }, [project]);
 
   const handleAssetUploaded = useCallback(
-    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number }) => {
-      mutate((p) => appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd }));
+    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; role?: AudioTimelineItem['role'] }) => {
+      // First-run flow: the moment the first clip lands in an empty
+      // project, move the user to Step 2 (Edit) instead of leaving them
+      // on the upload screen wondering what to do next.
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      mutate((p) =>
+        appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role }),
+      );
+      if (wasEmpty) setStep(2);
     },
     [mutate],
   );
 
+  // Tweaks round — "Add Overlay" uploads (MediaImportPanel purpose
+  // 'overlay'). Videos go through the SAME PiP insert path as PipPanel
+  // (bottom-right layout preset, muted by default for uploaded files —
+  // camera talking-head takes pass muted:false — draggable/resizable
+  // on canvas afterwards); images land as corner-placed overlay items on
+  // the image track, sized like an overlay rather than a full-frame
+  // photo. Either way the overlay starts at the playhead.
+  const handleOverlayAssetUploaded = useCallback(
+    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; muted?: boolean }) => {
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      if (asset.kind === 'video') {
+        mutate((p) =>
+          addPipOverlay(p, asset, {
+            layoutId: 'bottom-right',
+            atTime: currentTime,
+            trimStart: options?.trimStart,
+            trimEnd: options?.trimEnd,
+            // Camera talking-head takes arrive with muted:false (sound
+            // on); uploaded files omit it and keep the muted default.
+            muted: options?.muted,
+          }),
+        );
+      } else if (asset.kind === 'image') {
+        mutate((p) =>
+          appendMediaToTimeline(p, asset, {
+            atTime: currentTime,
+            role: 'overlay',
+            position: { x: 82, y: 78 },
+            scale: 0.32,
+          }),
+        );
+      }
+      if (wasEmpty) setStep(2);
+    },
+    [mutate, currentTime],
+  );
+
   const handleAddExistingAssetToTimeline = useCallback(
     (asset: MediaAsset) => {
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
       const selectedVariantId = bgVariantByAssetId[asset.id];
       const assetToAdd = (selectedVariantId && project?.mediaAssets[selectedVariantId]) || asset;
       mutate((p) => appendMediaToTimeline(p, assetToAdd, { atTime: currentTime }));
+      if (wasEmpty) setStep(2);
     },
     [mutate, currentTime, bgVariantByAssetId, project],
   );
@@ -156,8 +215,10 @@ function EditorInner({ uid }: { uid: string }) {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#070707] text-white/50 text-sm">
-        Loading project…
+      <div className="min-h-screen flex flex-col items-center justify-center gap-5 bg-[#070707]">
+        <BrandLogo size="lg" />
+        <div className="w-10 h-10 rounded-full border-4 border-gold/20 border-t-gold animate-spin" aria-label="Loading project" />
+        <p className="text-white/40 text-xs uppercase tracking-wide">Loading project…</p>
       </div>
     );
   }
@@ -188,12 +249,13 @@ function EditorInner({ uid }: { uid: string }) {
           canvasWidth={project.canvasWidth}
           canvasHeight={project.canvasHeight}
           onAssetUploaded={handleAssetUploaded}
+          onOverlayAssetUploaded={handleOverlayAssetUploaded}
         />
       </section>
 
       <section className="flex flex-col gap-2">
         <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Media library</h3>
-        {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/30">Nothing uploaded yet.</p>}
+        {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/30">Nothing uploaded yet — import a clip above and it lands here.</p>}
         <ul className="flex flex-col gap-1">
           {Object.values(project.mediaAssets)
             // A background-removed asset is a derivative of its original,
@@ -208,10 +270,10 @@ function EditorInner({ uid }: { uid: string }) {
                 <span className="text-white/30 uppercase text-[10px]">{asset.kind}</span>
                 <button
                   onClick={() => handleAddExistingAssetToTimeline(asset)}
-                  className="text-emerald-400 hover:text-emerald-300 font-bold min-h-11 min-w-11 flex items-center justify-center text-base"
+                  className="text-gold hover:text-gold-bright font-bold min-h-11 min-w-11 flex items-center justify-center"
                   title="Add to timeline at playhead"
                 >
-                  +
+                  <Plus size={18} strokeWidth={3} />
                 </button>
                 {asset.kind === 'image' && (
                   <BackgroundRemovalButton
@@ -230,6 +292,21 @@ function EditorInner({ uid }: { uid: string }) {
 
   const sidePanel = (
     <>
+      {/* Tweaks round — Step 2 gets the same three clear add actions as
+          Step 1's import panel (before this, adding media mid-edit meant
+          going back to Step 1). Same MediaImportPanel component and the
+          same upload handlers — never a second upload system. */}
+      <section className="flex flex-col gap-2">
+        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Add media</h3>
+        <MediaImportPanel
+          uid={uid}
+          canvasWidth={project.canvasWidth}
+          canvasHeight={project.canvasHeight}
+          onAssetUploaded={handleAssetUploaded}
+          onOverlayAssetUploaded={handleOverlayAssetUploaded}
+        />
+      </section>
+
       {selectedItem ? (
         <section>
           <h3 className="text-xs font-bold uppercase tracking-wide text-white/50 mb-2">Selected item</h3>
@@ -246,12 +323,53 @@ function EditorInner({ uid }: { uid: string }) {
         </>
       )}
 
+      {/* Phase 2.1 — Transitions + Effects as first-class Step 2 panels.
+          They act on the selected item (guided empty states when nothing
+          eligible is selected) and live in this same `sidePanel` node, so
+          they mount in the desktop aside AND the mobile BottomSheet,
+          exactly like every other panel here — never a second copy. */}
+      <section>
+        <TransitionsPanel item={selectedItem} />
+      </section>
+
+      <section>
+        <EffectsPanel item={selectedItem} />
+      </section>
+
+      {/* Phase 2.3 — Music & Audio panel, same sidePanel node/mounting
+          pattern as Transitions/Effects above. */}
+      <section>
+        <MusicPanel uid={uid} item={selectedItem} />
+      </section>
+
+      <section>
+        <PipPanel item={selectedItem} />
+      </section>
+
       <section>
         <TranscribePanel uid={uid} />
       </section>
 
       <section>
+        <CaptionsExportPanel />
+      </section>
+    </>
+  );
+
+  const exportPanel = (
+    <>
+      <section>
+        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50 mb-2">Export</h3>
         <ExportPanel />
+      </section>
+      <section>
+        <LicensingPanel />
+      </section>
+      <section className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
+        <h3 className="font-bold text-white text-sm">Project summary</h3>
+        <p>Duration: {getProjectDuration(project).toFixed(1)}s</p>
+        <p>Items: {project.items.length} · Media: {Object.keys(project.mediaAssets).length}</p>
+        <p>Watermark: {project.watermarkEnabled !== false ? 'On (free)' : 'Off (lifetime)'}</p>
       </section>
     </>
   );
@@ -264,8 +382,8 @@ function EditorInner({ uid }: { uid: string }) {
           instead of those panels being fixed side columns. */}
       <header className="flex items-center justify-between gap-2 px-3 sm:px-4 py-2 sm:py-3 border-b border-white/10 shrink-0">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <a href="/" className="text-white/40 hover:text-white text-xs shrink-0 min-h-11 flex items-center">
-            ← <span className="hidden sm:inline">Projects</span>
+          <a href="/" className="text-white/40 hover:text-white text-xs shrink-0 min-h-11 flex items-center gap-1">
+            <ArrowLeft size={16} /> <span className="hidden sm:inline">Projects</span>
           </a>
           <input
             value={project.name}
@@ -277,43 +395,43 @@ function EditorInner({ uid }: { uid: string }) {
           <button
             onClick={() => setMobileSheet('library')}
             title="Media library"
-            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-base"
+            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
           >
-            🗂
+            <FolderOpen size={18} />
           </button>
           <button
             onClick={() => setMobileSheet('panel')}
             title={selectedItem ? 'Selected item' : 'Add / Export'}
-            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-base"
+            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
           >
-            ⚙
+            <Settings size={18} />
           </button>
-          <div className="hidden sm:flex items-center gap-1">
+          <div className="flex items-center gap-1">
             <button
               onClick={undo}
               disabled={!canUndo}
               title="Undo (Ctrl/Cmd+Z)"
-              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white"
+              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center gap-1.5"
             >
-              ↺ <span className="hidden md:inline">Undo</span>
+              <Undo2 size={16} /> <span className="hidden md:inline">Undo</span>
             </button>
             <button
               onClick={redo}
               disabled={!canRedo}
               title="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
-              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white"
+              className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center gap-1.5"
             >
-              ↻ <span className="hidden md:inline">Redo</span>
+              <Redo2 size={16} /> <span className="hidden md:inline">Redo</span>
             </button>
           </div>
-          {saveError && <span className="hidden sm:inline text-red-400">{saveError}</span>}
-          <span className="hidden md:inline text-white/30">
+          {saveError && <span className="text-red-400">{saveError}</span>}
+          <span className="text-white/30">
             {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}
           </span>
           <button
             onClick={save}
             disabled={isSaving || !isDirty}
-            className="min-h-11 px-3 sm:px-4 font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-white"
+            className="min-h-11 px-3 sm:px-4 font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >
             Save
           </button>
@@ -329,44 +447,107 @@ function EditorInner({ uid }: { uid: string }) {
       {projectLimitWarning && (
         <div className="mx-3 sm:mx-4 mt-2 flex items-center justify-between gap-3 rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-xs text-amber-200">
           <span>{projectLimitWarning}</span>
-          <button onClick={dismissProjectLimitWarning} className="text-amber-200/60 hover:text-amber-100 shrink-0 min-h-8 min-w-8 flex items-center justify-center">
-            ×
+          <button onClick={dismissProjectLimitWarning} aria-label="Dismiss" className="text-amber-200/60 hover:text-amber-100 shrink-0 min-h-8 min-w-8 flex items-center justify-center">
+            <X size={14} strokeWidth={3} />
           </button>
         </div>
       )}
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
-        <aside className="hidden lg:flex flex-col gap-4">{libraryPanel}</aside>
+      {/* v1 3-step stepper — one clear action per screen */}
+      <nav className="flex items-center gap-2 px-3 sm:px-4 py-2 border-b border-white/10 shrink-0" aria-label="Editor steps">
+        {([
+          { n: 1 as const, label: 'Capture / Upload' },
+          { n: 2 as const, label: 'Edit + Captions' },
+          { n: 3 as const, label: 'Export' },
+        ]).map((s, idx) => (
+          <React.Fragment key={s.n}>
+            {idx > 0 && <ChevronRight size={14} className="text-white/20 shrink-0" />}
+            <button
+              onClick={() => setStep(s.n)}
+              aria-current={step === s.n ? 'step' : undefined}
+              className={`min-h-11 px-3 rounded-lg text-xs font-bold ${step === s.n ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'}`}
+            >
+              {s.n}. {s.label}
+            </button>
+          </React.Fragment>
+        ))}
+        <span className="ml-auto hidden sm:inline text-[11px] text-white/30">
+          {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, transitions, effects, captions, PiP' : 'Choose format and quality, export, done'}
+        </span>
+      </nav>
 
-        <main className="flex flex-col gap-4 items-center min-w-0">
-          <PreviewPane
-            project={project}
-            currentTime={currentTime}
-            isPlaying={isPlaying}
-            onTimeChange={setCurrentTime}
-            onPlayingChange={setIsPlaying}
-            selectedItemId={selectedItemId}
-            onSelectItem={setSelectedItemId}
-          />
-          <div className="w-full max-w-3xl">
-            <TimelinePanel
+      {step === 1 && (
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+          <div className="flex flex-col gap-4">{libraryPanel}</div>
+          <aside className="flex flex-col gap-4">
+            <TemplatesPanel currentTime={currentTime} />
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
+              <p className="font-bold text-white text-sm">How it works</p>
+              <p>1. Upload or record your clip.</p>
+              <p>2. Edit + add captions.</p>
+              <p>3. Export MP4 (or SRT/VTT).</p>
+            </div>
+            <button onClick={() => setStep(2)} className="min-h-11 px-4 font-bold rounded-lg bg-gold hover:bg-gold-bright text-black text-sm flex items-center justify-center gap-1.5">Continue to Edit <ArrowRight size={16} /></button>
+          </aside>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+          <main className="flex flex-col gap-4 items-center min-w-0">
+            <PreviewPane
               project={project}
               currentTime={currentTime}
-              onSeek={setCurrentTime}
+              isPlaying={isPlaying}
+              onTimeChange={setCurrentTime}
+              onPlayingChange={setIsPlaying}
               selectedItemId={selectedItemId}
               onSelectItem={setSelectedItemId}
             />
-          </div>
-        </main>
+            <div className="w-full max-w-3xl">
+              <TimelinePanel
+                project={project}
+                currentTime={currentTime}
+                onSeek={setCurrentTime}
+                selectedItemId={selectedItemId}
+                onSelectItem={setSelectedItemId}
+              />
+            </div>
+            <div className="w-full max-w-3xl flex gap-2">
+              <button onClick={() => setStep(1)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back</button>
+              <button onClick={() => setStep(3)} className="min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5">Continue to Export <ArrowRight size={16} /></button>
+            </div>
+          </main>
+          {/* Hidden below lg: on mobile this panel mounts once, inside the
+              BottomSheet below — rendering it inline too double-mounted
+              every panel (duplicate stateful widgets) on phones. */}
+          <aside className="hidden lg:flex flex-col gap-4">{sidePanel}</aside>
+        </div>
+      )}
 
-        <aside className="hidden lg:flex flex-col gap-4">{sidePanel}</aside>
-      </div>
+      {step === 3 && (
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+          <main className="flex flex-col gap-4 items-center min-w-0">
+            <PreviewPane
+              project={project}
+              currentTime={currentTime}
+              isPlaying={isPlaying}
+              onTimeChange={setCurrentTime}
+              onPlayingChange={setIsPlaying}
+              selectedItemId={selectedItemId}
+              onSelectItem={setSelectedItemId}
+            />
+            <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
+          </main>
+          <aside className="hidden lg:flex flex-col gap-4">{exportPanel}</aside>
+        </div>
+      )}
 
       <BottomSheet open={mobileSheet === 'library'} onClose={() => setMobileSheet(null)} title="Media Library">
-        {libraryPanel}
+        {step === 1 ? libraryPanel : sidePanel}
       </BottomSheet>
       <BottomSheet open={mobileSheet === 'panel'} onClose={() => setMobileSheet(null)} title={selectedItem ? 'Selected Item' : 'Add / Export'}>
-        {sidePanel}
+        {step === 3 ? exportPanel : sidePanel}
       </BottomSheet>
     </div>
   );

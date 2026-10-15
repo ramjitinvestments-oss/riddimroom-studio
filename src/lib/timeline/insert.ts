@@ -92,6 +92,15 @@ export interface AppendMediaOptions {
   atTime?: number;
   /** For image assets only — how long the image stays on screen. Defaults to 5s. */
   imageDurationSeconds?: number;
+  /**
+   * For image assets only — initial placement (percent coordinates +
+   * scale, the Transform fields' own units). Defaults to the centered,
+   * full-frame placement every image has always gotten; the "Add
+   * Overlay" upload action passes a corner position + small scale so a
+   * fresh overlay reads as an overlay, not a replacement picture.
+   */
+  position?: { x: number; y: number };
+  scale?: number;
   role?: ImageTimelineItem['role'] | AudioTimelineItem['role'];
   /**
    * Video/audio only — "universal 30-second media standard". Restricts the
@@ -158,8 +167,8 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
       visible: true,
       mediaAssetId: asset.id,
       role: (options.role as ImageTimelineItem['role']) ?? 'photo',
-      position: { x: 50, y: 50 },
-      scale: 1,
+      position: options.position ?? { x: 50, y: 50 },
+      scale: options.scale ?? 1,
       rotation: 0,
       opacity: 1,
     };

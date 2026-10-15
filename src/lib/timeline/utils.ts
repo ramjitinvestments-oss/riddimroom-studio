@@ -12,6 +12,7 @@ import type {
   AnimationSettings,
   CaptionTimelineItem,
   FadeSettings,
+  MotionSettings,
   Project,
   Track,
   TrackType,
@@ -20,7 +21,7 @@ import type {
 } from '../../types/timeline';
 import { ITEM_TYPE_TO_TRACK_TYPE, TIMELINE_SCHEMA_VERSION } from '../../types/timeline';
 import { findTransitionPreset } from '../transitions';
-import { DURATION_LIMIT_EPSILON_SECONDS, MAX_MEDIA_SECONDS } from '../media/constants';
+import { DURATION_LIMIT_EPSILON_SECONDS, MAX_FADE_SECONDS, MAX_MEDIA_SECONDS } from '../media/constants';
 
 // ---------------------------------------------------------------------------
 // ID generation
@@ -195,6 +196,22 @@ export function retargetItemsToAsset(project: Project, fromAssetId: string, toAs
 // ---------------------------------------------------------------------------
 // Timing
 // ---------------------------------------------------------------------------
+
+/**
+ * Formats a timeline position/duration as `m:ss.d` (e.g. `0:07.5`,
+ * `12:03.0`) — the ONE timecode format the editor UI uses everywhere
+ * (transport readout, timeline header), replacing the mix of raw
+ * `toFixed(1) + 's'` strings and `0:00` literals components used to
+ * hand-roll inconsistently. Negative/NaN input clamps to `0:00.0`.
+ */
+export function formatTimecode(totalSeconds: number): string {
+  const safe = Number.isFinite(totalSeconds) ? Math.max(0, totalSeconds) : 0;
+  const tenths = Math.round(safe * 10);
+  const minutes = Math.floor(tenths / 600);
+  const remTenths = tenths - minutes * 600;
+  const seconds = Math.floor(remTenths / 10);
+  return `${minutes}:${String(seconds).padStart(2, '0')}.${remTenths % 10}`;
+}
 
 /**
  * An item's duration is deliberately NOT a stored field — storing both
@@ -383,9 +400,7 @@ export function splitItemAtTime(project: Project, itemId: string, atTime: number
     let next = updateItem(project, itemId, { words: firstWords, endTime: atTime });
     next = addItem(next, newItem);
     return next;
-  }
-
-  const newItemId = generateTimelineId('item');
+  }  const newItemId = generateTimelineId('item');
   let firstPatch: Record<string, unknown> = { endTime: atTime };
   let secondExtra: Record<string, unknown> = {};
 
@@ -417,6 +432,24 @@ export function splitItemAtTime(project: Project, itemId: string, atTime: number
 
 function hasFadeField(item: TimelineItem): item is Extract<TimelineItem, { fade?: FadeSettings } | { fade: FadeSettings }> {
   return item.type === 'video' || item.type === 'image' || item.type === 'text' || item.type === 'audio';
+}
+
+/**
+ * v1 caption merge: merges two caption items into the first (words
+ * re-based to the first item's timeline, second item removed).
+ * No-op if either item is missing, not a caption, or the same item.
+ */
+export function mergeCaptionItems(project: Project, firstId: string, secondId: string): Project {
+  if (firstId === secondId) return project;
+  const first = project.items.find((i) => i.id === firstId);
+  const second = project.items.find((i) => i.id === secondId);
+  if (!first || !second || first.type !== 'caption' || second.type !== 'caption') return project;
+  const offset = second.startTime - first.startTime;
+  const mergedWords = [...first.words, ...second.words.map((w) => ({ text: w.text, start: w.start + offset, end: w.end + offset }))].sort((a, b) => a.start - b.start);
+  const newEnd = Math.max(first.endTime, second.endTime);
+  let next = updateItem(project, firstId, { words: mergedWords, endTime: newEnd });
+  next = { ...next, items: next.items.filter((i) => i.id !== secondId) };
+  return next;
 }
 
 /**
@@ -544,6 +577,169 @@ export function applyTransition(project: Project, itemId: string, preset: Animat
   next_ = updateItem(next_, item.id, { animation: { ...itemAnimation, exit: preset } });
   next_ = updateItem(next_, next.id, { animation: { ...nextAnimation, entrance: preset } });
   return next_;
+}
+
+/**
+ * The boundary transition currently applied between `itemId` and its
+ * adjacent next item, if any — the read-side companion to `applyTransition`
+ * (which is what the Transitions panel uses to highlight the active preset
+ * card). A boundary transition counts as applied only when ALL THREE hold:
+ * `itemId`'s exit preset and the next item's entrance preset are the same
+ * non-'none' preset (the pair `applyTransition` writes), AND the two items
+ * actually overlap in time (the shift `applyTransition` performs). A lone
+ * entrance/exit set by hand in the inspector — with no matching partner or
+ * no overlap — is a single-clip animation, not a boundary transition, and
+ * returns undefined here.
+ *
+ * Note there is deliberately no `removeTransition` counterpart:
+ * `applyTransition` shifts the next item earlier by the transition
+ * duration, and the item's pre-transition position/gap is not recorded
+ * anywhere, so the shift cannot be reversed safely after the fact (the
+ * original gap is unknowable — `findAdjacentNextItem` tolerates up to 2s).
+ * Undo is the supported way back.
+ */
+export function getBoundaryTransition(
+  project: Project,
+  itemId: string,
+): { preset: AnimationPreset; durationSeconds: number } | undefined {
+  const item = project.items.find((i) => i.id === itemId);
+  const next = findAdjacentNextItem(project, itemId);
+  if (!item || !next || !hasAnimationField(item) || !hasAnimationField(next)) return undefined;
+  const exit = item.animation?.exit;
+  const entrance = next.animation?.entrance;
+  if (!exit || exit === 'none' || exit !== entrance) return undefined;
+  const overlap = item.endTime - next.startTime;
+  if (overlap <= 0.05) return undefined;
+  return { preset: exit, durationSeconds: overlap };
+}
+
+/**
+ * Patches a video/image item's `motion` settings (the continuous Motion/
+ * Zoom Effects — see lib/motionEffects.ts), merging `fields` over the
+ * item's current settings exactly the way ItemInspector's motion controls
+ * always have (`{ type: 'none', ...current, ...fields }`, so a partial
+ * patch like `{ intensity }` never wipes the chosen effect). Extracted
+ * here so the first-class Effects panel and the inspector write the one
+ * same `motion` field through the one same merge — no parallel
+ * representation. No-op for items without a motion concept (text/caption/
+ * audio) or a missing item id.
+ */
+export function updateItemMotion(project: Project, itemId: string, fields: Partial<MotionSettings>): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || (item.type !== 'video' && item.type !== 'image')) return project;
+  const motion = (item as { motion?: MotionSettings }).motion;
+  return updateItem(project, itemId, { motion: { type: 'none', ...motion, ...fields } });
+}
+
+// ---------------------------------------------------------------------------
+// Playback speed (Phase 2.3) — `VideoTimelineItem.speed` has been in the
+// data model since the Bolt port and every trim/split helper already
+// converts timeline deltas to source seconds through it (`delta * speed`),
+// which fixes the invariant this setter must preserve:
+//
+//     timeline duration = (trimEnd - trimStart) / speed
+//
+// Until now nothing could CHANGE speed, so the invariant only ever held
+// trivially at speed 1. `setItemSpeed` is the one write path: it anchors
+// `startTime`, leaves the trim window untouched, and re-derives `endTime`
+// from the new rate. The per-item duration cap (`MAX_MEDIA_SECONDS`, the
+// same one `trimItemEnd` enforces) still applies, so slowing a long clip
+// far down clamps its timeline duration at the cap rather than breaking
+// the product limit (the clip then ends at the cap, before its trim
+// window finishes playing — the same trade-off the cap already imposes
+// on over-length items everywhere else).
+// ---------------------------------------------------------------------------
+
+/** Slowest/fastest rates the speed UI offers; `setItemSpeed` clamps to this range. */
+export const SPEED_MIN = 0.25;
+export const SPEED_MAX = 2;
+
+/** Sets a video item's playback speed, re-deriving its timeline `endTime` from its (unchanged) trim window. No-op for non-video items or a missing id. */
+export function setItemSpeed(project: Project, itemId: string, newSpeed: number): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || item.type !== 'video') return project;
+  const speed = Math.max(SPEED_MIN, Math.min(SPEED_MAX, Number.isFinite(newSpeed) && newSpeed > 0 ? newSpeed : 1));
+  const sourceSpan = Math.max(0.1, item.trimEnd - item.trimStart);
+  const duration = Math.max(0.1, Math.min(MAX_MEDIA_SECONDS, sourceSpan / speed));
+  return updateItem(project, itemId, { speed, endTime: item.startTime + duration });
+}
+
+// ---------------------------------------------------------------------------
+// Audio fit — "Trim to project end" / "Loop to fill project" (tweaks
+// round, MusicPanel's Fit section). Both target the end of the REST of
+// the project (every item except the audio item itself): fitting never
+// grows the project, it aligns the audio item's end edge with the
+// content it accompanies. Both also default a short fade-out at the
+// fitted end when the item has none — an abrupt cut exactly at the
+// project's last frame sounds like a bug, not an ending — while
+// respecting a fade-out the user already set.
+// ---------------------------------------------------------------------------
+
+/** Fade-out (seconds) the fit helpers default at the fitted end when the item has none. */
+export const FIT_FADE_OUT_SECONDS = 0.5;
+
+/** Latest endTime among all items except `excludeItemId` — "the end of the project this item accompanies". 0 when the item is alone on the timeline. */
+export function getContentEndTime(project: Project, excludeItemId?: string): number {
+  return project.items.reduce((max, i) => (i.id === excludeItemId ? max : Math.max(max, i.endTime)), 0);
+}
+
+function fittedFadeOut(item: { endTime: number; startTime: number; fade: FadeSettings }, newDuration: number): number {
+  if (item.fade.fadeOutDuration > 0) return Math.min(item.fade.fadeOutDuration, MAX_FADE_SECONDS, newDuration);
+  return Math.min(FIT_FADE_OUT_SECONDS, MAX_FADE_SECONDS, newDuration);
+}
+
+/**
+ * "Trim to project end": aligns an audio item's end with the end of the
+ * rest of the project, WITHOUT looping — the trim window moves 1:1 with
+ * the end edge (audio has no speed), so trimming down drops source from
+ * the tail and extending consumes source the asset actually has (never
+ * past the asset's real duration, when known, and never past the
+ * per-item cap). Clears `loop` — the two fit modes are alternatives.
+ * No-op for non-audio items, a missing id, or when there is no other
+ * content ending meaningfully after the item starts.
+ */
+export function trimAudioToProjectEnd(project: Project, itemId: string): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || item.type !== 'audio') return project;
+  const targetEnd = getContentEndTime(project, itemId);
+  if (targetEnd <= item.startTime + 0.1) return project;
+  const asset = project.mediaAssets[item.mediaAssetId];
+  const sourceAvailable =
+    asset && typeof asset.durationSeconds === 'number' && Number.isFinite(asset.durationSeconds) && asset.durationSeconds > item.trimStart
+      ? asset.durationSeconds - item.trimStart
+      : Number.POSITIVE_INFINITY;
+  const newEnd = Math.min(targetEnd, item.startTime + sourceAvailable, item.startTime + MAX_MEDIA_SECONDS);
+  if (newEnd <= item.startTime + 0.1) return project;
+  const newDuration = newEnd - item.startTime;
+  return updateItem(project, itemId, {
+    endTime: newEnd,
+    trimEnd: item.trimEnd + (newEnd - item.endTime),
+    loop: false,
+    fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: fittedFadeOut(item, newDuration) },
+  });
+}
+
+/**
+ * "Loop to fill project": stretches an audio item's timeline span to the
+ * end of the rest of the project and sets `loop` — the render paths wrap
+ * playback inside the item's (unchanged) trim window
+ * (`computeLoopedSourceTime`), so a short music bed covers the whole
+ * video. The end is capped at the per-item duration cap. No-op for
+ * non-audio items, a missing id, or when there is no other content
+ * ending meaningfully after the item starts.
+ */
+export function loopAudioToProjectEnd(project: Project, itemId: string): Project {
+  const item = project.items.find((i) => i.id === itemId);
+  if (!item || item.type !== 'audio') return project;
+  const targetEnd = getContentEndTime(project, itemId);
+  if (targetEnd <= item.startTime + 0.1) return project;
+  const newEnd = Math.min(targetEnd, item.startTime + MAX_MEDIA_SECONDS);
+  const newDuration = newEnd - item.startTime;
+  return updateItem(project, itemId, {
+    endTime: newEnd,
+    loop: true,
+    fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: fittedFadeOut(item, newDuration) },
+  });
 }
 
 // ---------------------------------------------------------------------------
