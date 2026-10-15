@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, X } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, Crop, X } from 'lucide-react';
+import { SlotTrimPicker } from './SlotTrimPicker';
+import { hasCroppableSlack, resolveSourceDuration } from '../../lib/timeline/trimWindow';
 import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -19,6 +21,7 @@ import {
   SPEED_MIN,
   SPEED_MAX,
   addCaptionWord,
+  formatTimecode,
   isVisualItem,
   bringForward,
   sendBackward,
@@ -129,6 +132,13 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
   // state — applying it is the actual project mutation.
   const transitionAvailable = hasAnimation && !!project && canApplyTransition(project, item.id);
   const [transitionPresetForBoundary, setTransitionPresetForBoundary] = useState<AnimationPreset>('fade');
+  // Templates v3 — crop picker (choose which part of the source a
+  // shortened clip keeps). Only offered when the source is longer than
+  // the item's current window — otherwise there is nothing to slide.
+  const [showCropPicker, setShowCropPicker] = useState(false);
+  const videoAsset = item.type === 'video' && project ? project.mediaAssets[item.mediaAssetId] : undefined;
+  const videoSourceDuration = item.type === 'video' ? resolveSourceDuration(item, videoAsset?.durationSeconds) : 0;
+  const canAdjustCrop = item.type === 'video' && !!videoAsset && hasCroppableSlack(item, videoSourceDuration);
   const transitionBoundaryDuration = findTransitionPreset(transitionPresetForBoundary)?.defaultDurationSeconds ?? 0.6;
   const transitionApplied =
     transitionAvailable && !!project && transitionAlreadyApplied(project, item.id, transitionBoundaryDuration);
@@ -355,6 +365,22 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               className="w-full"
             />
           </label>
+        </div>
+      )}
+
+      {item.type === 'video' && canAdjustCrop && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Source crop</span>
+          <p className="text-[11px] text-white/35 -mt-1">
+            This clip shows {formatTimecode(item.trimEnd - item.trimStart)} of its {formatTimecode(videoSourceDuration)} source — slide the
+            crop window to choose which part survives.
+          </p>
+          <button
+            onClick={() => setShowCropPicker(true)}
+            className="min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold flex items-center justify-center gap-1.5 transition"
+          >
+            <Crop size={14} /> Adjust crop
+          </button>
         </div>
       )}
 
@@ -670,6 +696,18 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
           <input type="checkbox" checked={item.visible} onChange={(e) => patch({ visible: e.target.checked })} />
           Visible
         </label>
+      )}
+
+      {showCropPicker && item.type === 'video' && videoAsset && (
+        <SlotTrimPicker
+          item={item}
+          asset={videoAsset}
+          onCancel={() => setShowCropPicker(false)}
+          onConfirm={(trimStart) => {
+            patch({ trimStart, trimEnd: trimStart + (item.trimEnd - item.trimStart) });
+            setShowCropPicker(false);
+          }}
+        />
       )}
     </div>
   );
