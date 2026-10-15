@@ -63,6 +63,7 @@ export const TRANSITION_PRESETS: TransitionPresetInfo[] = [
   { id: 'glitch', label: 'Glitch', category: 'modern', defaultDurationSeconds: 0.3 },
   { id: 'skew', label: 'Skew', category: 'modern', defaultDurationSeconds: 0.35 },
   { id: 'flip', label: 'Flip', category: 'modern', defaultDurationSeconds: 0.4 },
+  { id: 'smooth-spin', label: 'Smooth Spin', category: 'modern', defaultDurationSeconds: 0.55 },
 
   // Premium / Cinematic — slower, softer, filmic.
   { id: 'smoke', label: 'Smoke Dissolve', category: 'cinematic', defaultDurationSeconds: 0.8 },
@@ -72,6 +73,13 @@ export const TRANSITION_PRESETS: TransitionPresetInfo[] = [
   { id: 'lens-blur', label: 'Lens Blur', category: 'cinematic', defaultDurationSeconds: 0.6 },
   { id: 'whip-pan', label: 'Whip Pan', category: 'cinematic', defaultDurationSeconds: 0.3 },
   { id: 'spin', label: 'Spin', category: 'cinematic', defaultDurationSeconds: 0.6 },
+  // Templates v3 — premium build-out. All six have bespoke math in
+  // `computeEntranceExit`; preview and export share that one function
+  // (via `drawFrame`), so a preset can never exist in one path only.
+  { id: 'cross-zoom', label: 'Cross Zoom', category: 'cinematic', defaultDurationSeconds: 0.55 },
+  { id: 'mask-reveal', label: 'Mask Reveal', category: 'cinematic', defaultDurationSeconds: 0.7 },
+  { id: 'luma-fade', label: 'Luma Fade', category: 'cinematic', defaultDurationSeconds: 0.7 },
+  { id: 'film-burn', label: 'Film Burn', category: 'cinematic', defaultDurationSeconds: 0.6 },
 
   // Marketing / Advertising — attention-grabbing, energetic.
   { id: 'fire', label: 'Fire Pulse', category: 'marketing', defaultDurationSeconds: 0.4 },
@@ -81,6 +89,8 @@ export const TRANSITION_PRESETS: TransitionPresetInfo[] = [
   { id: 'fadeup', label: 'Fade Up', category: 'marketing', defaultDurationSeconds: 0.4 },
   { id: 'snap-zoom', label: 'Snap Zoom', category: 'marketing', defaultDurationSeconds: 0.25 },
   { id: 'flash', label: 'Flash', category: 'marketing', defaultDurationSeconds: 0.3 },
+  // Templates v3 (see the cinematic block above for the shared note).
+  { id: 'dip-to-gold', label: 'Dip to Gold', category: 'marketing', defaultDurationSeconds: 0.5 },
 ];
 
 export function findTransitionPreset(id: AnimationPreset | undefined): TransitionPresetInfo | undefined {
