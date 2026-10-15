@@ -26,6 +26,7 @@ import {
   sendToBack,
 } from '../../lib/timeline/utils';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
+import { isPipItem } from '../../lib/pip';
 import {
   TRANSITION_CATEGORIES,
   TRANSITION_INTENSITY_DEFAULT,
@@ -359,8 +360,12 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
 
       {item.type === 'video' && (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
-          <span className="font-bold uppercase tracking-wide text-white/40">Original audio</span>
-          <p className="text-[11px] text-white/35 -mt-1">This clip’s own sound only — audio tracks you add are controlled separately. Lower it or mute it to lay your own music or voiceover over the picture.</p>
+          <span className="font-bold uppercase tracking-wide text-white/40">{isPipItem(item) ? 'Overlay audio' : 'Original audio'}</span>
+          <p className="text-[11px] text-white/35 -mt-1">
+            {isPipItem(item)
+              ? 'This overlay clip’s own sound only — separate from the main video’s audio. Raise it to hear a talking head over the main clip, or mute it to keep the main audio clean.'
+              : 'This clip’s own sound only — audio tracks you add are controlled separately. Lower it or mute it to lay your own music or voiceover over the picture.'}
+          </p>
           <div className="flex items-center gap-2">
           <label className="flex flex-col gap-1 flex-1">
             Volume ({Math.round(item.volume * 100)}%)
