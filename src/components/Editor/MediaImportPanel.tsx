@@ -57,6 +57,13 @@ export interface AssetUploadedOptions {
   trimEnd?: number;
   /** Audio purpose only — device audio lands as a music-track item. */
   role?: AudioTimelineItem['role'];
+  /**
+   * Overlay purpose only — initial mute state for a video overlay's own
+   * audio. Camera recordings routed to the overlay track pass `false`
+   * (a talking-head take is meant to be heard); uploaded files omit it
+   * and keep the overlay insert path's muted default.
+   */
+  muted?: boolean;
 }
 
 interface UploadMeta {
@@ -130,7 +137,17 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           const purpose = meta?.purpose ?? 'main';
           const hasTrim = trimStart !== undefined || trimEnd !== undefined;
           if (purpose === 'overlay' && onOverlayAssetUploaded) {
-            onOverlayAssetUploaded(asset, hasTrim ? { trimStart, trimEnd } : undefined);
+            // A camera recording the user deliberately sent to the
+            // overlay track is a talking-head take — it starts with its
+            // audio ON (muted: false). An uploaded file keeps the
+            // overlay path's muted default (option omitted entirely).
+            const overlayOptions: AssetUploadedOptions = {};
+            if (hasTrim) {
+              overlayOptions.trimStart = trimStart;
+              overlayOptions.trimEnd = trimEnd;
+            }
+            if (meta?.isCameraCapture) overlayOptions.muted = false;
+            onOverlayAssetUploaded(asset, Object.keys(overlayOptions).length > 0 ? overlayOptions : undefined);
           } else if (purpose === 'audio') {
             onAssetUploaded(asset, { trimStart, trimEnd, role: 'music' });
           } else {
