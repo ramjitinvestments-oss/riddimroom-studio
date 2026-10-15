@@ -116,12 +116,13 @@ function EditorInner({ uid }: { uid: string }) {
 
   // Tweaks round — "Add Overlay" uploads (MediaImportPanel purpose
   // 'overlay'). Videos go through the SAME PiP insert path as PipPanel
-  // (bottom-right layout preset, muted by default, draggable/resizable
+  // (bottom-right layout preset, muted by default for uploaded files —
+  // camera talking-head takes pass muted:false — draggable/resizable
   // on canvas afterwards); images land as corner-placed overlay items on
   // the image track, sized like an overlay rather than a full-frame
   // photo. Either way the overlay starts at the playhead.
   const handleOverlayAssetUploaded = useCallback(
-    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number }) => {
+    (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; muted?: boolean }) => {
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
       if (asset.kind === 'video') {
         mutate((p) =>
@@ -130,6 +131,9 @@ function EditorInner({ uid }: { uid: string }) {
             atTime: currentTime,
             trimStart: options?.trimStart,
             trimEnd: options?.trimEnd,
+            // Camera talking-head takes arrive with muted:false (sound
+            // on); uploaded files omit it and keep the muted default.
+            muted: options?.muted,
           }),
         );
       } else if (asset.kind === 'image') {
@@ -339,7 +343,7 @@ function EditorInner({ uid }: { uid: string }) {
       </section>
 
       <section>
-        <PipPanel />
+        <PipPanel item={selectedItem} />
       </section>
 
       <section>
