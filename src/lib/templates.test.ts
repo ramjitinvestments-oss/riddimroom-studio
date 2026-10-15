@@ -1,15 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { STUDIO_TEMPLATES, getTemplate, templatesByKind } from './templates';
-import { applyHookToProject, applyTemplateToProject } from './templates/apply';
+import { applyFullTemplate, applyHookToProject, applyTemplateToProject } from './templates/apply';
+import { GRADE_PRESETS, getGradePreset } from './grades';
 import { createDefaultProject } from './projects/persistence';
-import { addCaptionItems, appendMediaToTimeline } from './timeline/insert';
-import { mergeCaptionItems, updateItem } from './timeline/utils';
+import { addCaptionItems, addTextItem, appendMediaToTimeline } from './timeline/insert';
+import { mergeCaptionItems, setItemSpeed, updateItem } from './timeline/utils';
 import { validateProject } from './timeline/validation';
 import { CAPTION_STYLES } from './captions/styles';
 import { TRANSITION_PRESETS } from './transitions';
 import { MOTION_EFFECTS } from './motionEffects';
 import { LOOP_DEFS } from './media/loops';
-import type { MediaAsset } from '../types/timeline';
+import { addPipOverlay } from './pip';
+import type { MediaAsset, Project } from '../types/timeline';
 
 const KINETIC_REVEALS = ['typewriter', 'word-by-word', 'karaoke'];
 const transitionIds = new Set<string>([...TRANSITION_PRESETS.map((p) => p.id), ...KINETIC_REVEALS, 'none']);
@@ -35,6 +37,21 @@ function videoAsset(durationSeconds: number): MediaAsset {
     sizeBytes: 1_000_000,
     mimeType: 'video/mp4',
     durationSeconds,
+    width: 1080,
+    height: 1920,
+    createdAt: 0,
+  };
+}
+
+function imageAsset(): MediaAsset {
+  return {
+    id: 'asset-image-1',
+    kind: 'image',
+    storageUrl: 'https://example.com/image.jpg',
+    fileName: 'image.jpg',
+    sizeBytes: 100_000,
+    mimeType: 'image/jpeg',
+    durationSeconds: 0,
     width: 1080,
     height: 1920,
     createdAt: 0,
@@ -127,6 +144,20 @@ describe('templates v2 — catalog integrity', () => {
   it('getTemplate returns undefined for unknown id', () => {
     expect(getTemplate('nope')).toBeUndefined();
   });
+
+  it('v3: every full template carries a cinematic grade that resolves to a preset', () => {
+    for (const t of templatesByKind('full')) {
+      expect(t.grade, t.id).toBeTruthy();
+      expect(getGradePreset(t.grade), t.id).toBeDefined();
+    }
+    // Every named grade in the catalog has concrete values for all
+    // three channels.
+    for (const preset of GRADE_PRESETS) {
+      expect(typeof preset.grade.brightness, preset.id).toBe('number');
+      expect(typeof preset.grade.contrast, preset.id).toBe('number');
+      expect(typeof preset.grade.saturation, preset.id).toBe('number');
+    }
+  });
 });
 
 describe('templates v2 — full apply', () => {
@@ -141,7 +172,9 @@ describe('templates v2 — full apply', () => {
     const video = next.items.find((i) => i.type === 'video');
     // First clip takes the first slot's motion (Intro = ken-burns) and the template transition.
     expect(video?.type === 'video' ? video.motion?.type : undefined).toBe('ken-burns');
-    expect(video?.type === 'video' ? video.animation?.entrance : undefined).toBe('whip-pan');
+    // v3 re-map: music-video's transition is now the premium film-burn
+    // (the v2 assertion pinned whip-pan; the mapping changed by design).
+    expect(video?.type === 'video' ? video.animation?.entrance : undefined).toBe('film-burn');
 
     // Placeholders: headline + sub + outro added.
     const texts = next.items.filter((i) => i.type === 'text').map((i) => (i.type === 'text' ? i.text : ''));
@@ -234,5 +267,224 @@ describe('mergeCaptionItems', () => {
     const project = createDefaultProject('uid-1');
     expect(mergeCaptionItems(project, 'a', 'a')).toBe(project);
     expect(mergeCaptionItems(project, 'missing', 'also-missing')).toBe(project);
+  });
+});
+
+// ─── Templates v3: real slot trims, music auto-fit, grades ───────────
+
+function audioLoopAsset(): MediaAsset {
+  return {
+    id: 'loop-asset-1',
+    fileName: 'soca-groove.wav',
+    storageUrl: 'https://example.com/loop.wav',
+    kind: 'audio',
+    mimeType: 'audio/wav',
+    sizeBytes: 1,
+    durationSeconds: 8,
+    createdAt: 1,
+  };
+}
+
+function byId(project: Project, id: string) {
+  return project.items.find((i) => i.id === id)!;
+}
+
+describe('templates v3 — real slot trims', () => {
+  it('video longer than its slot: window becomes the slot length, anchored at trimStart', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const video = project.items.find((i) => i.type === 'video')!;
+    const result = applyFullTemplate(project, getTemplate('music-video')!); // slots 5,7,8,6,7 = 33
+    const item = byId(result.project, video.id);
+    expect(item.type === 'video' ? item.trimStart : -1).toBe(0);
+    expect(item.type === 'video' ? item.trimEnd : -1).toBe(5);
+    expect(item.endTime - item.startTime).toBeCloseTo(5, 6);
+    expect(result.reelStartSeconds).toBe(0);
+    expect(result.reelEndSeconds).toBeCloseTo(5, 6);
+    expect(result.shortenedClips.map((c) => c.itemId)).toEqual([video.id]);
+    expect(result.musicAdded).toBe(false); // no loopAsset supplied
+    expect(validateProject(result.project).valid).toBe(true);
+  });
+
+  it('window anchored near the source end shifts back to end at the source end', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const video = project.items.find((i) => i.type === 'video')!;
+    project = updateItem(project, video.id, { trimStart: 28, trimEnd: 30, duration: 2 });
+    const result = applyFullTemplate(project, getTemplate('commercial-30')!); // slot 0 = 6s
+    const item = byId(result.project, video.id);
+    expect(item.type === 'video' ? item.trimStart : -1).toBe(24);
+    expect(item.type === 'video' ? item.trimEnd : -1).toBe(30);
+    expect(item.endTime - item.startTime).toBeCloseTo(6, 6);
+  });
+
+  it('video shorter than its slot uses the full source', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(2));
+    const video = project.items.find((i) => i.type === 'video')!;
+    const result = applyFullTemplate(project, getTemplate('product-ad-15')!); // slot 0 = 3s > 2s source
+    const item = byId(result.project, video.id);
+    expect(item.type === 'video' ? item.trimStart : -1).toBe(0);
+    expect(item.type === 'video' ? item.trimEnd : -1).toBe(2);
+    expect(item.endTime - item.startTime).toBeCloseTo(2, 6);
+    expect(result.reelEndSeconds).toBeCloseTo(2, 6);
+    expect(result.shortenedClips).toEqual([]); // nothing was shortened away
+  });
+
+  it('re-packs slotted items contiguously (gaps closed), images take the slot exactly', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(20));
+    project = appendMediaToTimeline(project, imageAsset(), { role: 'photo' });
+    project = appendMediaToTimeline(project, videoAsset(20));
+    const [v1, img, v2] = project.items.filter((i) => i.type === 'video' || i.type === 'image');
+    project = updateItem(project, v2.id, { startTime: 25, endTime: 45 }); // a gap before v2
+    const result = applyFullTemplate(project, getTemplate('commercial-30')!); // slots 6,10,8,6
+    const r1 = byId(result.project, v1.id);
+    const rImg = byId(result.project, img.id);
+    const r2 = byId(result.project, v2.id);
+    expect(r1.startTime).toBe(0);
+    expect(r1.endTime - r1.startTime).toBeCloseTo(6, 6);
+    expect(rImg.startTime).toBeCloseTo(6, 6);
+    expect(rImg.endTime - rImg.startTime).toBeCloseTo(10, 6); // image = slot exactly
+    expect(r2.startTime).toBeCloseTo(16, 6);
+    expect(r2.endTime - r2.startTime).toBeCloseTo(8, 6);
+    expect(result.reelEndSeconds).toBeCloseTo(24, 6);
+    expect(validateProject(result.project).valid).toBe(true);
+  });
+
+  it('items beyond the slot count take the LAST slot duration + treatment', () => {
+    let project = createDefaultProject('uid-1');
+    for (let k = 0; k < 6; k++) project = appendMediaToTimeline(project, videoAsset(20));
+    const result = applyFullTemplate(project, getTemplate('product-ad-15')!); // slots 3,6,4,2
+    const videos = result.project.items.filter((i) => i.type === 'video');
+    expect(videos.map((i) => Math.round((i.endTime - i.startTime) * 100) / 100)).toEqual([3, 6, 4, 2, 2, 2]);
+    expect(videos.map((i) => i.startTime)).toEqual([0, 3, 9, 13, 15, 17]);
+    expect(result.reelEndSeconds).toBeCloseTo(19, 6);
+    // The extra items still get the template grade + transition.
+    for (const v of videos) {
+      expect(v.type === 'video' ? v.colorGrade : undefined).toEqual(getGradePreset('clean-commercial')!.grade);
+      expect(v.type === 'video' ? v.animation?.entrance : undefined).toBe('dip-to-gold');
+    }
+  });
+
+  it('fewer items than slots: no placeholder media is created', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const before = project.items.filter((i) => i.type === 'video' || i.type === 'image').length;
+    const result = applyFullTemplate(project, getTemplate('commercial-30')!); // 5 slots, 1 item
+    const after = result.project.items.filter((i) => i.type === 'video' || i.type === 'image').length;
+    expect(after).toBe(before);
+  });
+
+  it('keeps speed semantics: slot window is slotDuration × speed of source time', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const video = project.items.find((i) => i.type === 'video')!;
+    project = setItemSpeed(project, video.id, 2);
+    const result = applyFullTemplate(project, getTemplate('music-video')!); // slot 0 = 5s on-timeline
+    const item = byId(result.project, video.id);
+    expect(item.type === 'video' ? item.trimEnd - item.trimStart : -1).toBeCloseTo(10, 6); // 5s × 2× speed
+    expect(item.endTime - item.startTime).toBeCloseTo(5, 6);
+  });
+
+  it('PiP, audio, captions, and user text are NOT retimed; template texts anchor to the reel', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(20)); // main clip
+    project = addPipOverlay(project, videoAsset(10), { atTime: 2 }); // PiP overlay
+    project = addCaptionItems(project, {
+      words: [{ text: 'hello', start: 1, end: 1.5 }],
+      atTime: 1,
+      captionStyleId: 'classic',
+      source: 'manual',
+    });
+    project = addTextItem(project, { text: 'My own title', atTime: 12, durationSeconds: 3 });
+    const pip = project.items.find((i) => i.type === 'video' && i.pip)!;
+    const caption = project.items.find((i) => i.type === 'caption')!;
+    const userText = project.items.find((i) => i.type === 'text' && i.text === 'My own title')!;
+    const result = applyFullTemplate(project, getTemplate('commercial-30')!);
+    const rPip = byId(result.project, pip.id);
+    expect(rPip.startTime).toBe(pip.startTime);
+    expect(rPip.endTime).toBe(pip.endTime);
+    const rCaption = byId(result.project, caption.id);
+    expect(rCaption.startTime).toBe(caption.startTime);
+    expect(rCaption.endTime).toBe(caption.endTime);
+    const rText = byId(result.project, userText.id);
+    expect(rText.startTime).toBe(12);
+    // Template headline anchors at the reel start (within the small
+    // ≤0.2s lead-in the text plan uses); CTA/outro end at the reel end.
+    const headline = result.project.items.find((i) => i.type === 'text' && i.role === 'title')!;
+    expect(headline.startTime).toBeGreaterThanOrEqual(result.reelStartSeconds);
+    expect(headline.startTime).toBeLessThanOrEqual(result.reelStartSeconds + 0.2);
+    // CTA/outro texts carry role 'overlay' and are found by content:
+    // the outro must END at the reel end.
+    const outro = result.project.items.find((i) => i.type === 'text' && i.text === 'YOUR BRAND — SHOP TODAY')!;
+    expect(outro.endTime).toBeCloseTo(result.reelEndSeconds, 6);
+    expect(validateProject(result.project).valid).toBe(true);
+  });
+
+  it('applies the template grade to slotted items only', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(20));
+    project = addPipOverlay(project, videoAsset(10), { atTime: 1 });
+    const result = applyFullTemplate(project, getTemplate('music-video')!); // grade: moody-noir
+    const main = result.project.items.find((i) => i.type === 'video' && !i.pip)!;
+    const pip = result.project.items.find((i) => i.type === 'video' && i.pip)!;
+    expect(main.type === 'video' ? main.colorGrade : undefined).toEqual(getGradePreset('moody-noir')!.grade);
+    expect(pip.type === 'video' ? pip.colorGrade : undefined).toBeUndefined();
+  });
+});
+
+describe('templates v3 — music auto-fit', () => {
+  it('adds the suggested loop fitted to the reel when the project has no music', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const loop = audioLoopAsset(); // 8s source
+    const result = applyFullTemplate(project, getTemplate('viral-hook-story')!, { loopAsset: loop });
+    // Single clip → slot 0 = 3s reel; the 8s loop is longer → trim mode.
+    expect(result.musicAdded).toBe(true);
+    expect(result.reelEndSeconds).toBeCloseTo(3, 6);
+    const music = result.project.items.find((i) => i.type === 'audio' && i.role === 'music')!;
+    expect(music.startTime).toBeCloseTo(result.reelStartSeconds, 6);
+    expect(music.endTime).toBeCloseTo(result.reelEndSeconds, 6);
+    expect(music.type === 'audio' ? music.loop : undefined).toBeFalsy();
+    expect(music.type === 'audio' ? music.trimEnd : -1).toBeCloseTo(3, 6);
+    expect(music.type === 'audio' ? music.fade?.fadeOutDuration : -1).toBeCloseTo(0.5, 6);
+    expect(result.project.mediaAssets[loop.id]).toBeDefined(); // asset registered, no dangling ref
+    expect(validateProject(result.project).valid).toBe(true);
+  });
+
+  it('loops the music when the reel is longer than the loop source', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const loop = audioLoopAsset(); // 8s
+    const result = applyFullTemplate(project, getTemplate('viral-hook-story')!, { loopAsset: loop });
+    // Reel = 3 + 6 = 9s > 8s source → loop mode, full source window.
+    expect(result.reelEndSeconds).toBeCloseTo(9, 6);
+    const music = result.project.items.find((i) => i.type === 'audio' && i.role === 'music')!;
+    expect(music.type === 'audio' ? music.loop : undefined).toBe(true);
+    expect(music.type === 'audio' ? music.trimEnd : -1).toBeCloseTo(8, 6);
+    expect(music.endTime - music.startTime).toBeCloseTo(9, 6);
+  });
+
+  it('never touches existing music, even when a loop asset is supplied', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    project = appendMediaToTimeline(project, audioLoopAsset(), { role: 'music' });
+    const existing = project.items.find((i) => i.type === 'audio')!;
+    const result = applyFullTemplate(project, getTemplate('viral-hook-story')!, { loopAsset: audioLoopAsset() });
+    expect(result.musicAdded).toBe(false);
+    const audios = result.project.items.filter((i) => i.type === 'audio');
+    expect(audios).toHaveLength(1);
+    expect(byId(result.project, existing.id).startTime).toBe(existing.startTime);
+    expect(byId(result.project, existing.id).endTime).toBe(existing.endTime);
+  });
+
+  it('adds no music without a supplied loop asset (pure apply stays asset-free)', () => {
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, videoAsset(30));
+    const result = applyFullTemplate(project, getTemplate('viral-hook-story')!);
+    expect(result.musicAdded).toBe(false);
+    expect(result.project.items.some((i) => i.type === 'audio')).toBe(false);
   });
 });
