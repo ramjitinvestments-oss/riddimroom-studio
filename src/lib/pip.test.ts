@@ -45,6 +45,48 @@ describe('addPipOverlay', () => {
   });
 });
 
+describe('addPipOverlay audio defaults (overlay volume parity)', () => {
+  const findPip = (items: ReturnType<typeof createDefaultProject>['items']) =>
+    items.find((i) => i.type === 'video' && (i as { pip?: { isPip?: boolean } }).pip?.isPip);
+
+  it('uploaded-file overlays start muted at full volume (default, option omitted)', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right' });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.muted).toBe(true);
+    expect(pip.volume).toBe(1);
+  });
+
+  it('camera overlays (muted: false) start UNMUTED at full volume — the talking-head case', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right', muted: false });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.muted).toBe(false);
+    expect(pip.volume).toBe(1);
+  });
+
+  it('explicit muted: true keeps the overlay muted', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { muted: true });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.muted).toBe(true);
+    expect(pip.volume).toBe(1);
+  });
+
+  it('the mute option composes with a trim window (camera flow with defensive clamp)', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { muted: false, trimStart: 1, trimEnd: 6 });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.muted).toBe(false);
+    expect(pip.trimStart).toBe(1);
+    expect(pip.trimEnd).toBe(6);
+  });
+});
+
 describe('addPipOverlay with a trim window (Add Overlay upload flow)', () => {
   it('plays the supplied source window instead of the asset’s head', () => {
     const project = createDefaultProject('uid-1');
