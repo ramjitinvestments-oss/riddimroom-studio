@@ -1,22 +1,41 @@
 import React, { useState } from 'react';
+import { Volume2, VolumeX } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
-import { addPipOverlay, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
-import type { MediaAsset } from '../../types/timeline';
+import { addPipOverlay, isPipItem, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
+import { updateItem } from '../../lib/timeline/utils';
+import type { MediaAsset, TimelineItem, VideoTimelineItem } from '../../types/timeline';
 
 /**
  * v1 PiP panel — talking-head / explainer overlays.
  * One tap: pick a video from the library, pick a layout, it drops in as a
- * PiP overlay (muted, circled/rounded, on top). Drag/resize on canvas to fine-tune.
+ * PiP overlay (circled/rounded, on top). Drag/resize on canvas to fine-tune.
  * Screen recording is NOT here (deferred) — this is overlay only.
+ *
+ * Overlay audio: an overlay video carries its OWN volume/mute, independent
+ * of the main clip — preview and export both mix it with those settings.
+ * Uploaded overlays start muted (the main video stays primary); camera
+ * talking-head takes start with sound on. When a PiP video clip is
+ * selected, its controls live right here under "Overlay audio" (the
+ * inspector shows the same fields, and the timeline clip has a quick-mute
+ * button).
  */
-export function PipPanel() {
+export function PipPanel({ item }: { item?: TimelineItem | null }) {
   const { project, mutate } = useProject();
   const [layoutId, setLayoutId] = useState<PipLayoutId>('bottom-right');
   const [error, setError] = useState<string | null>(null);
 
   if (!project) return null;
   const videoAssets: MediaAsset[] = Object.values(project.mediaAssets).filter((a) => a.kind === 'video');
-  const pipCount = project.items.filter((i) => i.type === 'video' && (i as { pip?: { isPip?: boolean } }).pip?.isPip).length;
+  const pipCount = project.items.filter((i) => isPipItem(i)).length;
+
+  // The selected overlay's audio controls apply only when the selection
+  // IS a PiP video item — image overlays have no audio to control.
+  const selectedPip: VideoTimelineItem | null =
+    item && item.type === 'video' && isPipItem(item) ? item : null;
+  const patchSelectedPip = (patch: Partial<VideoTimelineItem>) => {
+    if (!selectedPip) return;
+    mutate((p) => updateItem(p, selectedPip.id, patch));
+  };
 
   const handleAdd = (asset: MediaAsset) => {
     setError(null);
@@ -48,7 +67,41 @@ export function PipPanel() {
           </li>
         ))}
       </ul>
-      <p className="text-[10px] text-white/30">Tip: PiP audio is muted by default. Select the PiP clip → unmute in the inspector if you want to hear it.</p>
+
+      {/* Overlay audio — the selected PiP video's own volume/mute, the
+          same fields the inspector edits and both render paths honor.
+          Only rendered for a selected PiP *video*; image overlays have
+          no audio section anywhere, by design. */}
+      {selectedPip ? (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40 text-xs flex items-center gap-1.5">
+            {selectedPip.muted ? <VolumeX size={13} className="text-gold" /> : <Volume2 size={13} />} Overlay audio
+          </span>
+          <p className="text-[11px] text-white/35 -mt-1">This overlay clip’s own sound only — separate from the main video’s audio. Raise it to hear a talking head over the main clip.</p>
+          <div className="flex items-center gap-2 text-xs text-white/60">
+            <label className="flex flex-col gap-1 flex-1">
+              Volume ({Math.round(selectedPip.volume * 100)}%)
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={selectedPip.volume}
+                onChange={(e) => patchSelectedPip({ volume: Number(e.target.value) })}
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={selectedPip.muted} onChange={(e) => patchSelectedPip({ muted: e.target.checked })} />
+              Mute
+            </label>
+          </div>
+        </div>
+      ) : (
+        pipCount > 0 && (
+          <p className="text-[10px] text-white/30">Select a PiP clip on the timeline to set its volume here — each overlay has its own sound level. Uploaded overlays start muted; camera overlays start with sound on.</p>
+        )
+      )}
+      <p className="text-[10px] text-white/30">Tip: overlays keep their own volume in preview and export — set it under Overlay audio above, in the inspector, or with the mute button on the timeline clip.</p>
     </div>
   );
 }
