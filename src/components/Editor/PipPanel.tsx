@@ -48,7 +48,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Video overlay (PiP)</h3>
+      <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Video overlay (PiP)</h3>
       <p className="text-[11px] text-white/40">Talking-head / explainer: overlay a video on top of your main video. Drag + resize on canvas.</p>
       {pipCount > 0 && <p className="text-[11px] text-emerald-400">{pipCount} overlay{pipCount === 1 ? '' : 's'} on timeline</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
