@@ -46,13 +46,25 @@ export interface AddPipOptions {
    */
   trimStart?: number;
   trimEnd?: number;
+  /**
+   * Initial mute state for the overlay's own audio. Defaults to `true` —
+   * an uploaded overlay stays silent so the main video's audio remains
+   * primary. The camera "Use as Overlay (PiP)" flow passes `false`:
+   * a talking-head recording IS the sound the user wants, so it starts
+   * audible at full volume. Either way the user can change it afterwards
+   * (PiP panel "Overlay audio", the inspector, or the timeline clip's
+   * quick-mute button — all write the same `muted`/`volume` fields).
+   */
+  muted?: boolean;
 }
 
 /**
  * Adds a video asset as a PiP overlay on the video track, starting at
  * `atTime` (default 0) and lasting up to the asset duration (capped at
  * MAX_MEDIA_SECONDS). The overlay's audio is muted by default — the main
- * video's audio stays primary; the user can unmute in the inspector.
+ * video's audio stays primary; the user can set the overlay's own volume
+ * in the PiP panel / inspector. Pass `muted: false` (camera recordings)
+ * to start with the overlay's audio on.
  */
 export function addPipOverlay(project: Project, asset: MediaAsset, options: AddPipOptions = {}): Project {
   const layout = getPipLayout(options.layoutId ?? 'bottom-right');
@@ -88,7 +100,7 @@ export function addPipOverlay(project: Project, asset: MediaAsset, options: AddP
     speed: 1,
     reverse: false,
     volume: 1,
-    muted: true,
+    muted: options.muted ?? true,
     pip: { shape, borderWidth: options.borderWidth ?? 4, borderColor: '#FFFFFF', shadow: true, isPip: true },
   };
   return addItem(next, item);
