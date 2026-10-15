@@ -9,7 +9,8 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prebuild": "node scripts/decode-logo.mjs"
   },
   "dependencies": {
     "@ffmpeg/ffmpeg": "^0.12.15",
