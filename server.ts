@@ -163,7 +163,7 @@ async function createServer() {
   // v1 hardening: CORS allowlist from env (APP_URL + localhost), not open cors().
   const allowedOrigins = new Set(
     (process.env.APP_URL ? [process.env.APP_URL] : [])
-      .concat(['http://localhost:5173', 'http://localhost:3000', 'https://studio.riddimroom.com', 'https://riddimroom.com']),
+      .concat(['http://localhost:5173', 'http://localhost:3000', 'https://studio.riddimroom.com', 'https://riddimroom.com', 'https://riddimroom-studio.vercel.app', 'https://riddimroom-studio-git-preview-v1-riddimroom-s-projects.vercel.app']),
   );
   app.use(cors({
     origin: (origin, cb) => {
