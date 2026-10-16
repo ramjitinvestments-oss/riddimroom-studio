@@ -6,7 +6,7 @@ services:
     name: riddimroom-studio-api
     runtime: docker
     branch: preview/v1
-    plan: starter
+    plan: free
     envVars:
       - key: NODE_ENV
         value: production
