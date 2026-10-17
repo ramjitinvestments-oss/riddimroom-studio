@@ -13,7 +13,7 @@
 import { initializeApp, getApps, applicationDefault, cert, type App } from 'firebase-admin/app';
 import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
-import type { UserProfile } from '../src/types/user';
+import type { UserProfile } from '../src/types/user.js';
 
 let cachedApp: App | null = null;
 let cachedDb: Firestore | null = null;
