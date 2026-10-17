@@ -7,9 +7,9 @@ import {
   LIFETIME_DAILY_QUOTA,
   type ApiRequest,
   type ApiResponse,
-} from './_lib';
-import { getTranscriptionProvider, TranscriptionConfigurationError } from '../src/lib/transcription';
-import type { UserProfile } from '../src/types/user';
+} from './_lib.js';
+import { getTranscriptionProvider, TranscriptionConfigurationError } from '../src/lib/transcription/index.js';
+import type { UserProfile } from '../src/types/user.js';
 
 // Transcription can wait on Gemini file processing; give the function the
 // longest window that deploys on any Vercel plan. Typical short clips
