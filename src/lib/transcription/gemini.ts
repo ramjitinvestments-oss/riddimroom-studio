@@ -15,7 +15,7 @@
  */
 
 import { GoogleGenAI, createPartFromUri, createPartFromText, createUserContent, Type } from '@google/genai';
-import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types';
+import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types.js';
 
 const MODEL = 'gemini-2.5-flash';
 const FILE_READY_POLL_INTERVAL_MS = 1500;
