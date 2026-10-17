@@ -1,4 +1,4 @@
-import type { ApiRequest, ApiResponse } from '../_lib';
+import type { ApiRequest, ApiResponse } from '../_lib.js';
 
 // v1 Licensing: POST /api/webhook/stripe — Stripe webhook stub (mirrors
 // server.ts). Signature verification + license writes land with the Stripe
