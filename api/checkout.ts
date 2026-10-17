@@ -1,4 +1,4 @@
-import { verifyRequest, getLicenseTier, type ApiRequest, type ApiResponse } from './_lib';
+import { verifyRequest, getLicenseTier, type ApiRequest, type ApiResponse } from './_lib.js';
 
 // v1 Licensing: POST /api/checkout — Stripe Checkout stub (mirrors
 // server.ts). Until Stripe keys + session creation are wired, this returns
