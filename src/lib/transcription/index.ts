@@ -1,8 +1,8 @@
-import { GeminiTranscriptionProvider } from './gemini';
-import { WhisperTranscriptionProvider } from './whisper';
-import type { TranscriptionProvider } from './types';
+import { GeminiTranscriptionProvider } from './gemini.js';
+import { WhisperTranscriptionProvider } from './whisper.js';
+import type { TranscriptionProvider } from './types.js';
 
-export * from './types';
+export * from './types.js';
 
 const providers: Record<string, () => TranscriptionProvider> = {
   gemini: () => new GeminiTranscriptionProvider(),
