@@ -7,8 +7,8 @@ import {
   toClientUser,
   type ApiRequest,
   type ApiResponse,
-} from '../_lib';
-import type { UserProfile } from '../../src/types/user';
+} from '../_lib.js';
+import type { UserProfile } from '../../src/types/user.js';
 
 // Session check + unified user document upsert. Mirrors server.ts
 // GET /api/user/status, including the global kill-switch and the daily
