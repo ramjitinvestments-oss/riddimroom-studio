@@ -1,4 +1,4 @@
-import { verifyRequest, getLicenseTier, type ApiRequest, type ApiResponse } from './_lib';
+import { verifyRequest, getLicenseTier, type ApiRequest, type ApiResponse } from './_lib.js';
 
 // v1 Licensing: GET /api/license — tier + whether checkout is configured.
 // Mirrors server.ts.
