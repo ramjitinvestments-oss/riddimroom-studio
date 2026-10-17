@@ -18,6 +18,55 @@ import type { UserProfile } from '../src/types/user.js';
 let cachedApp: App | null = null;
 let cachedDb: Firestore | null = null;
 
+/**
+ * Parse the service-account credential from the env var, tolerating the
+ * forms it can realistically arrive in: the raw JSON document, the whole
+ * JSON base64-encoded, or a larger pasted blob (e.g. an IAM API response)
+ * that contains the base64-encoded document as its longest base64 run
+ * (the `privateKeyData` field). Falls back to a plain JSON.parse so a
+ * genuinely malformed value throws the original parse error.
+ */
+function parseServiceAccount(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  const looksLikeServiceAccount = (v: unknown): v is Record<string, unknown> =>
+    !!v &&
+    typeof v === 'object' &&
+    typeof (v as Record<string, unknown>).private_key === 'string' &&
+    typeof (v as Record<string, unknown>).client_email === 'string';
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    parsed = undefined;
+  }
+  if (looksLikeServiceAccount(parsed)) return parsed;
+  // A pasted IAM API response: the document is in its privateKeyData field.
+  if (parsed && typeof parsed === 'object') {
+    const keyData = (parsed as Record<string, unknown>).privateKeyData;
+    if (typeof keyData === 'string') {
+      try {
+        const inner = JSON.parse(Buffer.from(keyData, 'base64').toString('utf8'));
+        if (looksLikeServiceAccount(inner)) return inner;
+      } catch {
+        // fall through
+      }
+    }
+  }
+  const candidates = [trimmed, ...(trimmed.match(/[A-Za-z0-9+/=]{100,}/g) ?? [])];
+  for (const candidate of candidates) {
+    try {
+      const decoded = JSON.parse(Buffer.from(candidate, 'base64').toString('utf8'));
+      if (looksLikeServiceAccount(decoded)) return decoded;
+    } catch {
+      // try the next candidate
+    }
+  }
+  // Nothing matched: re-run the plain parse so a malformed value throws
+  // the original error (or returns whatever it parsed to).
+  return JSON.parse(trimmed);
+}
+
 function initFirebaseAdmin(): App {
   if (getApps().length) return getApps()[0];
 
@@ -25,7 +74,7 @@ function initFirebaseAdmin(): App {
     process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'riddimroom-studio';
 
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    const serviceAccount = parseServiceAccount(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
     return initializeApp({ credential: cert(serviceAccount), projectId });
   }
 
