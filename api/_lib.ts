@@ -29,12 +29,22 @@
  *
  * Files prefixed with "_" are not routes on Vercel.
  */
-import firebaseConfig from '../firebase-applet-config.json';
 import type { UserProfile } from '../src/types/user.js';
 
+// The project's PUBLIC web config (the same values ship in the client
+// bundle from firebase-applet-config.json — a web API key is an
+// identifier, not a secret). Inlined rather than imported: the Vercel
+// Node ESM runtime refuses a bare JSON module import and the function
+// crashed at load. Keep in sync with firebase-applet-config.json; either
+// value can be overridden by env var.
+const FIREBASE_WEB_CONFIG = {
+  projectId: 'riddimroom-studio',
+  apiKey: 'AIzaSyAhayje6Rz_ZZZArhgqBw8ejX-8qZ6oxpU',
+};
+
 const PROJECT_ID =
-  process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || firebaseConfig.projectId;
-const WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || firebaseConfig.apiKey;
+  process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || FIREBASE_WEB_CONFIG.projectId;
+const WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || FIREBASE_WEB_CONFIG.apiKey;
 const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
 const IDENTITY_BASE = 'https://identitytoolkit.googleapis.com/v1';
 
