@@ -6,7 +6,7 @@ import { verifyRequest, getLicenseTier, type ApiRequest, type ApiResponse } from
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   const decoded = await verifyRequest(req, res);
   if (!decoded) return;
-  const tier = await getLicenseTier(decoded.uid);
+  const tier = await getLicenseTier(decoded.uid, decoded.idToken);
   if (tier === 'lifetime') {
     res.status(200).json({ success: true, tier, message: 'Already lifetime.' });
     return;
