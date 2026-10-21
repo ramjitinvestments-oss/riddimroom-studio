@@ -1,7 +1,8 @@
-import { FieldValue } from 'firebase-admin/firestore';
 import {
   verifyRequest,
-  getDb,
+  fsGetDoc,
+  fsPatchDoc,
+  SERVER_TIMESTAMP,
   getLicenseTier,
   DEFAULT_DAILY_QUOTA,
   LIFETIME_DAILY_QUOTA,
@@ -16,8 +17,9 @@ import type { UserProfile } from '../src/types/user.js';
 // finish well inside this. (Express/server.ts has no such cap.)
 export const config = { maxDuration: 60 };
 
-// AI transcription + server-side quota enforcement. Mirrors server.ts
-// POST /api/transcribe, including the media-ownership check.
+// AI transcription + quota enforcement (read-modify-write as the calling
+// user — see api/_lib.ts header). Mirrors server.ts POST /api/transcribe,
+// including the media-ownership check.
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, error: 'Method not allowed.' });
@@ -26,6 +28,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   const decoded = await verifyRequest(req, res);
   if (!decoded) return;
   const uid = decoded.uid;
+  const idToken = decoded.idToken;
   const body = (req.body || {}) as { storageUrl?: unknown; mimeType?: unknown; durationSeconds?: unknown };
   const { storageUrl, mimeType, durationSeconds } = body;
 
@@ -44,19 +47,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   }
 
   const todayStr = new Date().toISOString().split('T')[0];
-  const db = getDb();
 
   try {
-    const userRef = db.collection('users').doc(uid);
-    const userDoc = await userRef.get();
+    const userDoc = await fsGetDoc(`users/${uid}`, idToken);
     if (!userDoc.exists) {
       res.status(404).json({ success: false, error: 'User profile not found — call /api/user/status first.' });
       return;
     }
-    const data = userDoc.data() as UserProfile;
+    const data = userDoc.data as unknown as UserProfile;
     const dailyCount = data.lastTranscribeDate === todayStr ? data.dailyCount || 0 : 0;
     // v1: quota by license tier (free 2/day, lifetime 10/day).
-    const licenseTier = await getLicenseTier(uid);
+    const licenseTier = await getLicenseTier(uid, idToken);
     const maxDaily = licenseTier === 'lifetime' ? LIFETIME_DAILY_QUOTA : DEFAULT_DAILY_QUOTA;
 
     if (dailyCount >= maxDaily) {
@@ -95,12 +96,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
 
     const newDailyCount = dailyCount + 1;
-    await userRef.update({
-      dailyCount: newDailyCount,
-      lastTranscribeDate: todayStr,
-      totalTranscribes: FieldValue.increment(1),
-      lastUpdated: FieldValue.serverTimestamp(),
-    });
+    await fsPatchDoc(
+      `users/${uid}`,
+      {
+        dailyCount: newDailyCount,
+        lastTranscribeDate: todayStr,
+        totalTranscribes: (data.totalTranscribes || 0) + 1,
+        lastUpdated: SERVER_TIMESTAMP,
+      },
+      idToken,
+    );
 
     res.status(200).json({ success: true, words: result.words, provider: result.provider, dailyCount: newDailyCount, maxFree: maxDaily });
   } catch (err: any) {
