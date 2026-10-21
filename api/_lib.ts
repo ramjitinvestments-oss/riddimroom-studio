@@ -1,104 +1,42 @@
 /**
  * RiddimRoom Studio — shared helpers for the Vercel serverless API.
  *
- * These functions mirror server.ts (the Express backend) exactly — same
- * Firebase Admin initialization, same token verification behavior, same
- * license-tier resolution and quota constants — so the /api/* surface
- * behaves identically whether it is served by the Express app (Cloud Run /
- * Render) or by these Vercel functions. server.ts remains the reference
- * implementation; keep the two in sync when route logic changes.
+ * AUTH/DATA MODEL (changed 2026-10-21): these functions deliberately do
+ * NOT use the Firebase Admin SDK. There is no service-account key to
+ * configure — an earlier rollout stalled for days because the key's value
+ * could not be pasted into the Vercel dashboard reliably. Instead:
+ *
+ *  - ID tokens are verified with the Identity Toolkit REST API
+ *    (accounts:lookup), authorized by the project's public web API key —
+ *    the same key that ships in the client bundle (firebase-applet-config.json).
+ *  - All Firestore access goes through the Firestore REST API *as the
+ *    calling user* (the request's own ID token is the credential), so
+ *    firestore.rules is the enforcement layer: users can only read/write
+ *    their own users/{uid} document, and privileged fields on it (role,
+ *    status, subscription, plan) are frozen by rule. License/admin checks
+ *    read licenses/{uid} and admins/{uid}, both owner-readable, never
+ *    client-writable.
+ *
+ * Trade-offs vs the Admin model, accepted for the personal-first v1:
+ *  - Quota counters are read-modify-write (not atomic increments) and a
+ *    determined user could reset their own counter with a hand-crafted
+ *    client write; the daily limit is a soft gate until the sellable
+ *    phase hardens it (server-held credential / App Check).
+ *  - server.ts (the Express backend) still uses the Admin SDK and remains
+ *    the reference for self-hosting with a service account; behavior of
+ *    the /api/* surface (routes, status codes, response shapes, quota
+ *    constants) is kept identical to it.
  *
  * Files prefixed with "_" are not routes on Vercel.
  */
-import { initializeApp, getApps, applicationDefault, cert, type App } from 'firebase-admin/app';
-import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
-import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import firebaseConfig from '../firebase-applet-config.json';
 import type { UserProfile } from '../src/types/user.js';
 
-let cachedApp: App | null = null;
-let cachedDb: Firestore | null = null;
-
-/**
- * Parse the service-account credential from the env var, tolerating the
- * forms it can realistically arrive in: the raw JSON document, the whole
- * JSON base64-encoded, or a larger pasted blob (e.g. an IAM API response)
- * that contains the base64-encoded document as its longest base64 run
- * (the `privateKeyData` field). Falls back to a plain JSON.parse so a
- * genuinely malformed value throws the original parse error.
- */
-function parseServiceAccount(raw: string): Record<string, unknown> {
-  const trimmed = raw.trim();
-  const looksLikeServiceAccount = (v: unknown): v is Record<string, unknown> =>
-    !!v &&
-    typeof v === 'object' &&
-    typeof (v as Record<string, unknown>).private_key === 'string' &&
-    typeof (v as Record<string, unknown>).client_email === 'string';
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch {
-    parsed = undefined;
-  }
-  if (looksLikeServiceAccount(parsed)) return parsed;
-  // A pasted IAM API response: the document is in its privateKeyData field.
-  if (parsed && typeof parsed === 'object') {
-    const keyData = (parsed as Record<string, unknown>).privateKeyData;
-    if (typeof keyData === 'string') {
-      try {
-        const inner = JSON.parse(Buffer.from(keyData, 'base64').toString('utf8'));
-        if (looksLikeServiceAccount(inner)) return inner;
-      } catch {
-        // fall through
-      }
-    }
-  }
-  const candidates = [trimmed, ...(trimmed.match(/[A-Za-z0-9+/=]{100,}/g) ?? [])];
-  for (const candidate of candidates) {
-    try {
-      const decoded = JSON.parse(Buffer.from(candidate, 'base64').toString('utf8'));
-      if (looksLikeServiceAccount(decoded)) return decoded;
-    } catch {
-      // try the next candidate
-    }
-  }
-  // Nothing matched: re-run the plain parse so a malformed value throws
-  // the original error (or returns whatever it parsed to).
-  return JSON.parse(trimmed);
-}
-
-function initFirebaseAdmin(): App {
-  if (getApps().length) return getApps()[0];
-
-  const projectId =
-    process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || 'riddimroom-studio';
-
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    const serviceAccount = parseServiceAccount(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    return initializeApp({ credential: cert(serviceAccount), projectId });
-  }
-
-  try {
-    return initializeApp({ projectId, credential: applicationDefault() });
-  } catch {
-    return initializeApp({ projectId });
-  }
-}
-
-export function getDb(): Firestore {
-  if (!cachedDb) {
-    cachedApp = initFirebaseAdmin();
-    cachedDb = getFirestore(cachedApp);
-  }
-  return cachedDb;
-}
-
-export function getAuthAdmin() {
-  if (!cachedApp) {
-    cachedApp = initFirebaseAdmin();
-  }
-  return getAuth(cachedApp);
-}
+const PROJECT_ID =
+  process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || firebaseConfig.projectId;
+const WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || firebaseConfig.apiKey;
+const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
+const IDENTITY_BASE = 'https://identitytoolkit.googleapis.com/v1';
 
 /** Minimal request/response shapes (Vercel Node runtime provides these). */
 export interface ApiRequest {
@@ -111,12 +49,23 @@ export interface ApiResponse {
   json: (body: unknown) => void;
 }
 
+/** The verified caller, resolved from their Firebase ID token. */
+export interface AuthedUser {
+  uid: string;
+  email: string;
+  name?: string;
+  picture?: string;
+  provider: string;
+  /** The caller's ID token — the credential for all Firestore REST calls. */
+  idToken: string;
+}
+
 /**
- * Verify the Firebase ID token from the Authorization header, mirroring
- * server.ts's verifyFirebaseToken middleware: on failure this writes the
- * same 401 response and returns null.
+ * Verify the Firebase ID token from the Authorization header: on failure
+ * this writes the same 401 responses server.ts's middleware writes and
+ * returns null.
  */
-export async function verifyRequest(req: ApiRequest, res: ApiResponse): Promise<DecodedIdToken | null> {
+export async function verifyRequest(req: ApiRequest, res: ApiResponse): Promise<AuthedUser | null> {
   const authHeader = req.headers.authorization;
   if (!authHeader || typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
     res.status(401).json({ success: false, error: 'Missing or malformed Authorization header' });
@@ -124,28 +73,157 @@ export async function verifyRequest(req: ApiRequest, res: ApiResponse): Promise<
   }
   const idToken = authHeader.slice('Bearer '.length);
   try {
-    return await getAuthAdmin().verifyIdToken(idToken);
+    const resp = await fetch(`${IDENTITY_BASE}/accounts:lookup?key=${WEB_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    if (!resp.ok) {
+      const detail = (await resp.json().catch(() => null)) as { error?: { message?: string } } | null;
+      console.warn('[auth] Token verification failed:', detail?.error?.message || resp.status);
+      res.status(401).json({ success: false, error: 'Invalid or expired authentication token' });
+      return null;
+    }
+    const data = (await resp.json()) as {
+      users?: Array<{
+        localId: string;
+        email?: string;
+        displayName?: string;
+        photoUrl?: string;
+        providerUserInfo?: Array<{ providerId?: string }>;
+      }>;
+    };
+    const user = data.users?.[0];
+    if (!user?.localId) {
+      res.status(401).json({ success: false, error: 'Invalid or expired authentication token' });
+      return null;
+    }
+    return {
+      uid: user.localId,
+      email: user.email || '',
+      name: user.displayName,
+      picture: user.photoUrl,
+      provider: user.providerUserInfo?.[0]?.providerId || 'password',
+      idToken,
+    };
   } catch (err: any) {
-    console.warn('[auth] Token verification failed:', err?.code || err?.message);
+    console.warn('[auth] Token verification failed:', err?.message || err);
     res.status(401).json({ success: false, error: 'Invalid or expired authentication token' });
     return null;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Firestore REST access, always as the calling user.
+// ---------------------------------------------------------------------------
+
+type FirestoreValue =
+  | { nullValue: null }
+  | { stringValue: string }
+  | { integerValue: string }
+  | { doubleValue: number }
+  | { booleanValue: boolean }
+  | { timestampValue: string }
+  | { arrayValue: { values: FirestoreValue[] } }
+  | { mapValue: { fields: Record<string, FirestoreValue> } };
+
+/** Marker: write the current time as a Firestore timestamp. */
+export const SERVER_TIMESTAMP = '__SERVER_TIMESTAMP__';
+
+function toFirestoreValue(value: unknown): FirestoreValue {
+  if (value === SERVER_TIMESTAMP) return { timestampValue: new Date().toISOString() };
+  if (value === null || value === undefined) return { nullValue: null };
+  if (typeof value === 'string') return { stringValue: value };
+  if (typeof value === 'boolean') return { booleanValue: value };
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  }
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(toFirestoreValue) } };
+  if (typeof value === 'object') {
+    const fields: Record<string, FirestoreValue> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) fields[k] = toFirestoreValue(v);
+    return { mapValue: { fields } };
+  }
+  return { stringValue: String(value) };
+}
+
+function fromFirestoreValue(value: FirestoreValue): unknown {
+  if ('stringValue' in value) return value.stringValue;
+  if ('integerValue' in value) return Number(value.integerValue);
+  if ('doubleValue' in value) return value.doubleValue;
+  if ('booleanValue' in value) return value.booleanValue;
+  if ('timestampValue' in value) return value.timestampValue;
+  if ('arrayValue' in value) return (value.arrayValue.values || []).map(fromFirestoreValue);
+  if ('mapValue' in value) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value.mapValue.fields || {})) out[k] = fromFirestoreValue(v);
+    return out;
+  }
+  return null;
+}
+
+export interface FsDoc {
+  exists: boolean;
+  data: Record<string, unknown>;
+}
+
+/** Read one document as the calling user. 404 → { exists: false }. */
+export async function fsGetDoc(path: string, idToken: string): Promise<FsDoc> {
+  const resp = await fetch(`${FIRESTORE_BASE}/${path}`, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (resp.status === 404) return { exists: false, data: {} };
+  if (!resp.ok) {
+    throw new Error(`Firestore GET ${path} failed: ${resp.status} ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+  }
+  const doc = (await resp.json()) as { fields?: Record<string, FirestoreValue> };
+  const data: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(doc.fields || {})) data[k] = fromFirestoreValue(v);
+  return { exists: true, data };
+}
+
+/**
+ * Create-or-update selected fields of one document as the calling user
+ * (Firestore REST PATCH upserts when the document does not exist yet).
+ */
+export async function fsPatchDoc(
+  path: string,
+  fields: Record<string, unknown>,
+  idToken: string,
+): Promise<void> {
+  const mask = Object.keys(fields)
+    .map((f) => `updateMask.fieldPaths=${encodeURIComponent(f)}`)
+    .join('&');
+  const body = {
+    fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, toFirestoreValue(v)])),
+  };
+  const resp = await fetch(`${FIRESTORE_BASE}/${path}?${mask}`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    throw new Error(`Firestore PATCH ${path} failed: ${resp.status} ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// License tier + kill-switch (same semantics as the Admin implementation).
+// ---------------------------------------------------------------------------
+
 export const DEFAULT_DAILY_QUOTA = 2;
 export const LIFETIME_DAILY_QUOTA = 10;
 
-export async function getLicenseTier(uid: string): Promise<'free' | 'lifetime'> {
+export async function getLicenseTier(uid: string, idToken: string): Promise<'free' | 'lifetime'> {
   try {
-    const db = getDb();
-    const doc = await db.collection('licenses').doc(uid).get();
-    if (doc.exists) {
-      const data = doc.data() as { tier?: string; active?: boolean };
+    const license = await fsGetDoc(`licenses/${uid}`, idToken);
+    if (license.exists) {
+      const data = license.data as { tier?: string; active?: boolean };
       if (data.tier === 'lifetime' && data.active !== false) return 'lifetime';
     }
     // Admin/owner grant: admins/{uid} resolves to the lifetime tier so the
     // studio owner is never bitten by free-tier gates.
-    const adminDoc = await db.collection('admins').doc(uid).get();
+    const adminDoc = await fsGetDoc(`admins/${uid}`, idToken);
     if (adminDoc.exists) return 'lifetime';
     return 'free';
   } catch {
@@ -153,10 +231,10 @@ export async function getLicenseTier(uid: string): Promise<'free' | 'lifetime'> 
   }
 }
 
-export async function isGlobalDisabled(): Promise<boolean> {
+export async function isGlobalDisabled(idToken: string): Promise<boolean> {
   try {
-    const doc = await getDb().collection('config').doc('global').get();
-    return doc.exists && (doc.data() as { disabled?: boolean }).disabled === true;
+    const doc = await fsGetDoc('config/global', idToken);
+    return doc.exists && (doc.data as { disabled?: boolean }).disabled === true;
   } catch {
     return false;
   }
@@ -164,8 +242,8 @@ export async function isGlobalDisabled(): Promise<boolean> {
 
 export function toClientUser(data: UserProfile, licenseTier: 'free' | 'lifetime' = 'free') {
   // Server is the single source of truth for role/status/quota — the client
-  // never sets these directly (firestore.rules: users/{uid} is not
-  // client-writable).
+  // never sets these directly (firestore.rules freezes the privileged
+  // fields on users/{uid}).
   return {
     uid: data.uid,
     email: data.email,
