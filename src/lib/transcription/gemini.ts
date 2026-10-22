@@ -17,7 +17,14 @@
 import { GoogleGenAI, createPartFromUri, createPartFromText, createUserContent, Type } from '@google/genai';
 import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types.js';
 
-const MODEL = 'gemini-2.5-flash';
+/**
+ * Model candidates, tried in order. Google gates models by account
+ * vintage: a key from a brand-new (free-tier) project gets 404
+ * "models/gemini-2.5-flash is no longer available to new users" and is
+ * directed to the newer flash model, while older paid projects still
+ * serve 2.5-flash. Trying both keeps one build working with either key.
+ */
+const MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash'];
 const FILE_READY_POLL_INTERVAL_MS = 1500;
 const FILE_READY_TIMEOUT_MS = 120_000;
 
@@ -90,14 +97,32 @@ export class GeminiTranscriptionProvider implements TranscriptionProvider {
     try {
       await waitUntilActive(ai, uploaded.name);
 
-      const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: createUserContent([createPartFromUri(uploaded.uri, uploaded.mimeType || request.mimeType), createPartFromText(PROMPT)]),
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
+      // Try each candidate model; a 404 / NOT_FOUND just means this key's
+      // account can't use that model — fall through to the next one. Any
+      // other error (quota, billing, bad media) is real and propagates.
+      let response;
+      let lastModelError: unknown;
+      for (const model of MODELS) {
+        try {
+          response = await ai.models.generateContent({
+            model,
+            contents: createUserContent([createPartFromUri(uploaded.uri, uploaded.mimeType || request.mimeType), createPartFromText(PROMPT)]),
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: RESPONSE_SCHEMA,
+            },
+          });
+          break;
+        } catch (err: any) {
+          const msg = String(err?.message || err);
+          if (/404|NOT_FOUND|no longer available|not found/i.test(msg)) {
+            lastModelError = err;
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (!response) throw lastModelError;
 
       const text = response.text;
       if (!text) {
