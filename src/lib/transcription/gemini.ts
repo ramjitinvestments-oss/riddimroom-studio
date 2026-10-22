@@ -15,11 +15,23 @@
  */
 
 import { GoogleGenAI, createPartFromUri, createPartFromText, createUserContent, Type } from '@google/genai';
-import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types';
+import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types.js';
 
-const MODEL = 'gemini-2.5-flash';
-const FILE_READY_POLL_INTERVAL_MS = 1500;
-const FILE_READY_TIMEOUT_MS = 120_000;
+/**
+ * Model candidates, tried in order. Google gates models by account
+ * vintage: a key from a brand-new (free-tier) project gets 404
+ * "models/gemini-2.5-flash is no longer available to new users" and is
+ * directed to the newer flash model, while older paid projects still
+ * serve 2.5-flash. Trying both keeps one build working with either key.
+ */
+const MODELS = ['gemini-3.8-flash', 'gemini-2.5-flash'];
+const FILE_READY_POLL_INTERVAL_MS = 1000;
+// The serverless host kills invocations at 60s, so every internal wait
+// lives well inside that: file processing gets 30s, generation attempts
+// stop by ~50s wall clock, and the endpoint returns a clean JSON error
+// instead of dying as a platform timeout.
+const FILE_READY_TIMEOUT_MS = 30_000;
+const GENERATE_DEADLINE_MS = 50_000;
 
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
@@ -90,14 +102,42 @@ export class GeminiTranscriptionProvider implements TranscriptionProvider {
     try {
       await waitUntilActive(ai, uploaded.name);
 
-      const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: createUserContent([createPartFromUri(uploaded.uri, uploaded.mimeType || request.mimeType), createPartFromText(PROMPT)]),
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
+      // Model strategy, bounded by GENERATE_DEADLINE_MS:
+      // - 404 / NOT_FOUND: this key's account can't use that model —
+      //   fall through to the next candidate.
+      // - 503 / UNAVAILABLE: free-tier demand spike — retry the same model
+      //   once after a short pause, then fall through.
+      // - anything else (quota, billing, bad media) is real: propagate.
+      const generateStartedAt = Date.now();
+      let response;
+      let lastModelError: unknown;
+      outer: for (const model of MODELS) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (Date.now() - generateStartedAt > GENERATE_DEADLINE_MS) break outer;
+          try {
+            response = await ai.models.generateContent({
+              model,
+              contents: createUserContent([createPartFromUri(uploaded.uri, uploaded.mimeType || request.mimeType), createPartFromText(PROMPT)]),
+              config: {
+                responseMimeType: 'application/json',
+                responseSchema: RESPONSE_SCHEMA,
+              },
+            });
+            break outer;
+          } catch (err: any) {
+            const msg = String(err?.message || err);
+            lastModelError = err;
+            if (/404|NOT_FOUND|no longer available|not found/i.test(msg)) break; // next model
+            if (/503|UNAVAILABLE|high demand/i.test(msg) && attempt === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              continue; // one retry on this model
+            }
+            if (/503|UNAVAILABLE|high demand/i.test(msg)) break; // next model after retry
+            throw err;
+          }
+        }
+      }
+      if (!response) throw lastModelError;
 
       const text = response.text;
       if (!text) {

@@ -18,18 +18,34 @@ service cloud.firestore {
     // status/usage fields — see src/types/user.ts and
     // riddimroom-studio-phase0-plan.md section 4.2).
     //
-    // All writes to this collection happen server-side via the Firebase
-    // Admin SDK (server.ts /api/user/status), which bypasses these rules
-    // entirely. Clients only ever read their own document — role, status,
-    // and quota are never client-writable, per the Phase 1 security
-    // requirement that all privileged data changes go through an
-    // authenticated backend route. This is a deliberate tightening versus
-    // riddimroom-caption, which allowed the client to directly update a
-    // handful of fields (email/displayName/photoURL/dailyCount/etc) on its
-    // own user document.
+    // Write model (changed 2026-10-21): the Vercel API no longer holds a
+    // Firebase Admin service-account key — it reads/writes Firestore via
+    // the REST API *as the calling user*, so these rules are the write
+    // gate. Only /api/user/status (create/upsert + login stamps + daily
+    // quota reset) and /api/transcribe (quota counters) ever write here,
+    // always scoped to the caller's own document. The privileged fields
+    // (uid, role, status, subscription, plan) are frozen by rule: set
+    // once at create to the safe defaults, never changeable afterwards —
+    // so no client (or API call) can self-grant admin, un-suspend itself,
+    // or fake a paid plan. Quota counters stay writable on the owner's
+    // own doc (the daily limit is a soft gate in v1 — see api/_lib.ts).
+    // The Express backend (server.ts, Admin SDK) bypasses rules entirely
+    // and is unaffected.
     match /users/{userId} {
       allow read: if isOwner(userId);
-      allow write: if false;
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.role == 'user'
+        && request.resource.data.status == 'approved'
+        && request.resource.data.subscription == 'free'
+        && request.resource.data.plan == 'free';
+      allow update: if isOwner(userId)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.subscription == resource.data.subscription
+        && request.resource.data.plan == resource.data.plan;
+      allow delete: if false;
     }
 
     // Admin trust-root — console/backend managed only (ported from

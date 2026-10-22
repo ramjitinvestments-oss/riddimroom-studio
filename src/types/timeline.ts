@@ -127,7 +127,12 @@ export type AnimationPreset =
   // (plus every preset above) has bespoke, distinct math in
   // `computeEntranceExit`, not a shared fallback.
   | 'dip-to-black' | 'dip-to-white' | 'light-leak' | 'film-dissolve'
-  | 'lens-blur' | 'whip-pan' | 'snap-zoom' | 'flash';
+  | 'lens-blur' | 'whip-pan' | 'snap-zoom' | 'flash'
+  // Templates v3 — premium transition build-out. Every one has bespoke
+  // math in `computeEntranceExit` (compositor.ts), rendered identically
+  // by preview and export since both call the same `drawFrame`.
+  | 'cross-zoom' | 'mask-reveal' | 'luma-fade' | 'film-burn'
+  | 'dip-to-gold' | 'smooth-spin';
 
 export interface AnimationSettings {
   entrance?: AnimationPreset;
@@ -308,6 +313,14 @@ export interface ImageTimelineItem extends TimelineItemBase, Transform {
    * a track named "Watermark", never a special-cased global setting.
    */
   role: 'overlay' | 'watermark' | 'logo' | 'sticker' | 'photo' | 'graphic';
+  /**
+   * Templates v3 — same `ColorGradeSettings` shape video items have
+   * always carried (see `VideoTimelineItem.colorGrade`); templates apply
+   * named grades to slotted photos as well as clips. Consumed by the
+   * shared compositor (`colorGradeToFilter` in `lib/grades.ts`) in both
+   * preview and export. Absent = ungraded, exactly the pre-v3 behavior.
+   */
+  colorGrade?: ColorGradeSettings;
   motion?: MotionSettings;
   fade?: FadeSettings;
   animation?: AnimationSettings;

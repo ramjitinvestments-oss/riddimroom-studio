@@ -9,13 +9,16 @@
  *   frame. A hook never creates a project and never touches media the user
  *   already placed (beyond the documented motion/PiP touches).
  * - `full` (10) — 15–45s edit blueprints. Each declares named media slots
- *   whose durations sum to the target length; applying one to a project
- *   restyles captions, gives the project's clips (in timeline order) the
- *   per-slot motion effects, sets the template transition on clip
- *   entrances/exits, and drops in headline / sub / CTA / outro placeholder
- *   text (only for roles the project doesn't already have). A suggested
- *   built-in loop is named for musical formats — it is a suggestion shown
- *   in the panel, never auto-added audio.
+ *   whose durations sum to the target length. Templates v3: the slots are
+ *   REAL — applying one reduces each main-track clip/image to its slot's
+ *   size and re-packs them back-to-back into the reel (see
+ *   `templates/apply.ts`), restyles captions, gives the clips the
+ *   per-slot motion effects and the template's cinematic grade, sets the
+ *   template transition on clip entrances/exits, drops in headline / sub
+ *   / CTA / outro placeholder text anchored to the new reel timing (only
+ *   for roles the project doesn't already have), and — when the project
+ *   has no music yet and the caller supplies the rendered loop asset —
+ *   auto-adds the template's suggested built-in loop fitted to the reel.
  *
  * Placeholder copy rendered INTO projects is brand-neutral ("YOUR TITLE")
  * and never uses the word "fete" (video-rendering rule) — Caribbean flavor
@@ -90,6 +93,8 @@ export interface StudioTemplate {
   thumbnail?: string;
   // — Full edits only —
   slots?: TemplateSlot[];
+  /** Cinematic grade preset id from `lib/grades.ts` (Templates v3) — applied as `colorGrade` values to the slotted items on apply. Absent = leave colors ungraded. */
+  grade?: string;
   headlineText?: string;
   subText?: string;
   ctaText?: string;
@@ -206,7 +211,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'letterbox-reveal', name: 'Letterbox Reveal', kind: 'hook', category: 'YouTube',
     description: 'A cinematic title dissolving in over a slow Ken Burns drift. Film energy, instantly.',
     durationSeconds: 4, aspectRatios: ['16:9'],
-    captionStyleId: 'cinema', transition: 'film-dissolve', motion: 'ken-burns', accentColor: '#FFE9A8',
+    captionStyleId: 'cinema', transition: 'luma-fade', motion: 'ken-burns', accentColor: '#FFE9A8',
     thumbnail: `${CDN}/109aa936a39686d3c5dbfea0296847264c470e5a.jpg`,
     elements: [
       { text: 'YOUR TITLE', role: 'title', offsetSeconds: 0, durationSeconds: 4, fontSize: 68, color: '#FFE9A8', position: { x: 50, y: 48 }, entrance: 'film-dissolve' },
@@ -219,9 +224,10 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'viral-hook-story', name: 'Viral Hook Story', kind: 'full', category: 'Viral Social',
     description: 'The 30-second retention arc: hook, setup, build, payoff, CTA. For Reels, TikTok, Shorts.',
     durationSeconds: 30, aspectRatios: ['9:16'],
-    captionStyleId: 'viral', transition: 'pop', motion: 'dynamic-zoom', accentColor: '#FFD100',
+    captionStyleId: 'viral', transition: 'cross-zoom', motion: 'dynamic-zoom', accentColor: '#FFD100',
     thumbnail: `${CDN}/7ffcc59451e5629f27adad968af3b7291895fa4f.jpg`,
     suggestedLoopId: 'dancehall-riddim',
+    grade: 'vivid-party',
     slots: [
       { name: 'Hook', durationSeconds: 3, motion: 'punch-zoom' },
       { name: 'Setup', durationSeconds: 6, motion: 'dynamic-zoom' },
@@ -235,8 +241,9 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'music-video', name: 'Music Video', kind: 'full', category: 'Music Video',
     description: 'A full 45-second music-video cut: wide intro, verse, chorus, bridge, vignette outro.',
     durationSeconds: 45, aspectRatios: ['16:9', '9:16'],
-    captionStyleId: 'karaoke-gold', transition: 'whip-pan', motion: 'parallax', accentColor: '#FFD100',
+    captionStyleId: 'karaoke-gold', transition: 'film-burn', motion: 'parallax', accentColor: '#FFD100',
     suggestedLoopId: 'soca-groove',
+    grade: 'moody-noir',
     slots: [
       { name: 'Intro', durationSeconds: 5, motion: 'ken-burns' },
       { name: 'Verse', durationSeconds: 12, motion: 'parallax' },
@@ -250,8 +257,9 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'product-ad-15', name: 'Product Ad 15', kind: 'full', category: 'Ad',
     description: 'A tight 15-second product ad: problem, hero shot, offer, CTA. Feed-ready.',
     durationSeconds: 15, aspectRatios: ['1:1', '9:16'],
-    captionStyleId: 'tiktok-premium', transition: 'snap-zoom', motion: 'product-focus', accentColor: '#FFD100',
+    captionStyleId: 'tiktok-premium', transition: 'dip-to-gold', motion: 'product-focus', accentColor: '#FFD100',
     suggestedLoopId: 'chill-island',
+    grade: 'clean-commercial',
     slots: [
       { name: 'Problem', durationSeconds: 3, motion: 'subtle-shake' },
       { name: 'Product Hero', durationSeconds: 6, motion: 'product-focus' },
@@ -264,9 +272,10 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'commercial-30', name: 'Commercial 30', kind: 'full', category: 'Commercial',
     description: 'A polished 30-second brand commercial with a film dissolve and a clean end card.',
     durationSeconds: 30, aspectRatios: ['16:9'],
-    captionStyleId: 'gold-premium', transition: 'film-dissolve', motion: 'ken-burns', accentColor: '#FFE9A8',
+    captionStyleId: 'gold-premium', transition: 'luma-fade', motion: 'ken-burns', accentColor: '#FFE9A8',
     thumbnail: `${CDN}/109aa936a39686d3c5dbfea0296847264c470e5a.jpg`,
     suggestedLoopId: 'chill-island',
+    grade: 'cinematic-warm',
     slots: [
       { name: 'Open', durationSeconds: 6, motion: 'ken-burns' },
       { name: 'Story', durationSeconds: 10, motion: 'parallax' },
@@ -279,9 +288,10 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'event-promo', name: 'Event Promo', kind: 'full', category: 'Event Promo',
     description: 'A 20-second party promo: hype open, lineup, details, ticket CTA. Heartbeat energy.',
     durationSeconds: 20, aspectRatios: ['9:16'],
-    captionStyleId: 'fire', transition: 'heartbeat', motion: 'dynamic-zoom', accentColor: '#FF8A00',
+    captionStyleId: 'fire', transition: 'mask-reveal', motion: 'dynamic-zoom', accentColor: '#FF8A00',
     thumbnail: `${CDN}/6e8bb861ef276d4c38e2d2344726150144709e22.jpg`,
     suggestedLoopId: 'soca-groove',
+    grade: 'vivid-party',
     slots: [
       { name: 'Hype Open', durationSeconds: 4, motion: 'dynamic-zoom' },
       { name: 'Lineup', durationSeconds: 6, motion: 'punch-zoom' },
@@ -296,6 +306,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     durationSeconds: 30, aspectRatios: ['9:16', '16:9'],
     captionStyleId: 'podcast', transition: 'fadeup', motion: 'slow-zoom-in', accentColor: '#FFFFFF',
     thumbnail: `${CDN}/52c6ef0b8c1181fce0ab781e8f95f731a21cf46b.jpg`,
+    grade: 'soft-podcast',
     slots: [
       { name: 'Cold Open', durationSeconds: 5, motion: 'slow-zoom-in' },
       { name: 'Conversation', durationSeconds: 15, motion: 'spotlight' },
@@ -310,6 +321,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     durationSeconds: 20, aspectRatios: ['16:9'],
     captionStyleId: 'minimal-clean', transition: 'light-leak', motion: 'slow-zoom-in', accentColor: '#FFD100',
     suggestedLoopId: 'chill-island',
+    grade: 'clean-commercial',
     slots: [
       { name: 'Channel Ident', durationSeconds: 4, motion: 'light-sweep' },
       { name: 'Title Card', durationSeconds: 6, motion: 'slow-zoom-in' },
@@ -323,6 +335,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     description: 'A 15-second transformation ad with a slide-split reveal and a product-focus finish.',
     durationSeconds: 15, aspectRatios: ['9:16'],
     captionStyleId: 'bold-outline', transition: 'slideSplit', motion: 'product-focus', accentColor: '#FFFFFF',
+    grade: 'clean-commercial',
     slots: [
       { name: 'Before', durationSeconds: 5, motion: 'vignette' },
       { name: 'Transform', durationSeconds: 2, motion: 'flash' },
@@ -337,6 +350,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     durationSeconds: 25, aspectRatios: ['4:5', '9:16'],
     captionStyleId: 'heartbeat', transition: 'fade', motion: 'slow-zoom-in', accentColor: '#FF8A5C',
     suggestedLoopId: 'chill-island',
+    grade: 'cinematic-warm',
     slots: [
       { name: 'Quote Open', durationSeconds: 5, motion: 'slow-zoom-in' },
       { name: 'Story', durationSeconds: 12, motion: 'ken-burns' },
@@ -351,6 +365,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     durationSeconds: 30, aspectRatios: ['9:16', '16:9'],
     captionStyleId: 'rainbow', transition: 'smoke', motion: 'parallax', accentColor: '#FFD100',
     suggestedLoopId: 'dancehall-riddim',
+    grade: 'moody-noir',
     slots: [
       { name: 'Intro', durationSeconds: 4, motion: 'vignette' },
       { name: 'Verse Visual', durationSeconds: 10, motion: 'parallax' },

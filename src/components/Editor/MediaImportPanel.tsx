@@ -288,21 +288,21 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
       <div className="flex flex-col gap-2">
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="min-h-12 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center justify-center gap-2 transition"
+          className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-[13px] font-bold flex items-center justify-center gap-2 transition"
         >
           <Clapperboard size={18} /> Add Video / Image
         </button>
         <div className="flex gap-2">
           <button
             onClick={() => overlayInputRef.current?.click()}
-            className="min-h-12 flex-1 px-3 rounded-xl border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-sm font-bold flex items-center justify-center gap-2 transition"
+            className="min-h-11 flex-1 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[13px] font-bold flex items-center justify-center gap-2 transition"
             title="Add a video or image ON TOP of your main video (talking-head, logo, reaction clip)"
           >
             <PictureInPicture2 size={17} /> Add Overlay
           </button>
           <button
             onClick={() => audioInputRef.current?.click()}
-            className="min-h-12 flex-1 px-3 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 text-white text-sm font-bold flex items-center justify-center gap-2 transition"
+            className="min-h-11 flex-1 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-white text-[13px] font-bold flex items-center justify-center gap-2 transition"
             title="Add music, voiceover, or sound effects from your device — lands on the music track"
           >
             <AudioLines size={17} /> Add Audio
@@ -357,7 +357,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           e.preventDefault();
           handleFiles(e.dataTransfer.files, 'main');
         }}
-        className="border border-dashed border-white/15 rounded-lg px-4 py-6 text-center text-xs text-white/40"
+        className="border border-dashed border-white/15 rounded-lg px-4 py-4 text-center text-xs text-white/40"
       >
         Drag and drop video, image, or audio files here
       </div>

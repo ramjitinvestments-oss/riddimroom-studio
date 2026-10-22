@@ -243,7 +243,7 @@ function EditorInner({ uid }: { uid: string }) {
   const libraryPanel = (
     <>
       <section className="flex flex-col gap-2">
-        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Import media</h3>
+        <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Import media</h3>
         <MediaImportPanel
           uid={uid}
           canvasWidth={project.canvasWidth}
@@ -254,7 +254,7 @@ function EditorInner({ uid }: { uid: string }) {
       </section>
 
       <section className="flex flex-col gap-2">
-        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Media library</h3>
+        <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Media library</h3>
         {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/30">Nothing uploaded yet — import a clip above and it lands here.</p>}
         <ul className="flex flex-col gap-1">
           {Object.values(project.mediaAssets)
@@ -297,7 +297,7 @@ function EditorInner({ uid }: { uid: string }) {
           going back to Step 1). Same MediaImportPanel component and the
           same upload handlers — never a second upload system. */}
       <section className="flex flex-col gap-2">
-        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Add media</h3>
+        <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Add media</h3>
         <MediaImportPanel
           uid={uid}
           canvasWidth={project.canvasWidth}
@@ -309,7 +309,7 @@ function EditorInner({ uid }: { uid: string }) {
 
       {selectedItem ? (
         <section>
-          <h3 className="text-xs font-bold uppercase tracking-wide text-white/50 mb-2">Selected item</h3>
+          <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50 mb-1.5">Selected item</h3>
           <ItemInspector item={selectedItem} />
         </section>
       ) : (
@@ -359,7 +359,7 @@ function EditorInner({ uid }: { uid: string }) {
   const exportPanel = (
     <>
       <section>
-        <h3 className="text-xs font-bold uppercase tracking-wide text-white/50 mb-2">Export</h3>
+        <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50 mb-1.5">Export</h3>
         <ExportPanel />
       </section>
       <section>
@@ -480,7 +480,7 @@ function EditorInner({ uid }: { uid: string }) {
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
           <div className="flex flex-col gap-4">{libraryPanel}</div>
           <aside className="flex flex-col gap-4">
-            <TemplatesPanel currentTime={currentTime} />
+            <TemplatesPanel currentTime={currentTime} uid={uid} />
             <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
               <p className="font-bold text-white text-sm">How it works</p>
               <p>1. Upload or record your clip.</p>

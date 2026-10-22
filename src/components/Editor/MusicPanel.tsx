@@ -55,7 +55,7 @@ export function MusicPanel({ uid, item }: { uid: string; item: TimelineItem | nu
   };
 
   const header = (
-    <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-white/50">
+    <h3 className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-white/50">
       <Music size={14} className="text-gold" /> Music & Audio
     </h3>
   );

@@ -97,7 +97,12 @@ export class Canvas2DRenderer implements Renderer {
         const element = document.createElement('video');
         element.crossOrigin = 'anonymous';
         element.preload = 'auto';
-        element.muted = true; // audio is routed through the Web Audio graph instead of the element's own output
+        // Do NOT mute the element: in Chrome a muted element also feeds
+        // silence into createMediaElementSource, which silently dropped
+        // the main clip's voice from exports (music elements, unmuted,
+        // came through). Attaching the source already reroutes the
+        // element's audio exclusively into the graph, so nothing plays
+        // aloud from the element itself.
         element.playsInline = true;
         attachOffscreen(element);
         element.src = storageUrl;

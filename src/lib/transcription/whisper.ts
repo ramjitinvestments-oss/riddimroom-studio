@@ -15,7 +15,7 @@
  * immediately rather than silently no-op'ing or faking a transcript.
  */
 
-import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types';
+import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types.js';
 
 export class WhisperTranscriptionProvider implements TranscriptionProvider {
   readonly name = 'whisper';

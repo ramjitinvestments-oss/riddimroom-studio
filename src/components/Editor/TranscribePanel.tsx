@@ -13,6 +13,24 @@ import type { VideoTimelineItem, AudioTimelineItem } from '../../types/timeline'
  * via `addCaptionItems`, positioned to line up with that item's place on
  * the timeline.
  */
+/**
+ * Provider errors sometimes arrive as a stringified JSON body (e.g. the
+ * Gemini API's `{error:{code,message,status}}`). Pull the readable
+ * message out so the panel shows the actual cause — "prepayment credits
+ * are depleted" — instead of a wall of escaped JSON.
+ */
+function humanizeApiError(raw: unknown): string | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const msg = parsed?.error?.message;
+    if (typeof msg === 'string' && msg) return msg;
+  } catch {
+    // not JSON — use the string as-is
+  }
+  return raw;
+}
+
 export function TranscribePanel({ uid }: { uid: string }) {
   const { idToken, userProfile, refreshUserProfile } = useAuth();
   const { project, mutate } = useProject();
@@ -42,15 +60,18 @@ export function TranscribePanel({ uid }: { uid: string }) {
       // Static preview builds have no /api routes at all — the response is
       // an HTML 404 page, and res.json() on it throws a raw SyntaxError
       // ("Unexpected token '<'…") that reads like a crash to the user.
-      // Check status + content-type first and give a human answer instead.
+      // So: if the body parses as JSON, surface the API's real error (an
+      // earlier version masked EVERY non-200 — including quota and
+      // provider errors — behind the "preview build" text, which hid the
+      // actual cause of a transcription outage for days).
       const isJson = (res.headers.get('content-type') || '').includes('application/json');
-      if (!res.ok || !isJson) {
+      if (!isJson) {
         setError("Transcription isn't available on this preview build yet.");
         return;
       }
       const data = await res.json();
-      if (!data.success) {
-        setError(data.error || `Transcription failed (HTTP ${res.status}).`);
+      if (!res.ok || !data.success) {
+        setError(humanizeApiError(data.error) || `Transcription failed (HTTP ${res.status}).`);
         return;
       }
       if (!data.words || data.words.length === 0) {

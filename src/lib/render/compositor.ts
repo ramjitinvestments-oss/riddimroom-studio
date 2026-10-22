@@ -35,8 +35,9 @@
  * opposing opacity ramps.
  */
 
-import type { AnimationPreset, CaptionTimelineItem, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { getItemsAtTime } from '../timeline/utils';
+import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
 import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
@@ -125,6 +126,19 @@ export interface AnimatedAdjustment {
   sweepAlpha: number;
   /** 0-1, where along the item's own width the sweep band currently sits. */
   sweepPositionPercent: number;
+  /**
+   * Templates v3 additions — OPTIONAL on purpose: they are absent (not
+   * merely identity-valued) unless a v3 preset sets them, so the exact
+   * shape of adjustments for every pre-v3 preset is unchanged.
+   * `brightnessMul`: 1 = unchanged; folded into the same `ctx.filter` as
+   * blur/hue-rotate by `applyTransformedDraw` (luma-fade's sweep).
+   * `maskProgress`: 1 = fully revealed; < 1 clips the item to a circle
+   * of that fraction of its bounding diagonal, feathered at the edge
+   * (mask-reveal) — applied by `applyTransformedDraw` when the caller
+   * supplies the item's half-extents.
+   */
+  brightnessMul?: number;
+  maskProgress?: number;
 }
 
 const IDENTITY_ADJUSTMENT: AnimatedAdjustment = {
@@ -226,13 +240,15 @@ export function computeEntranceExit(
       if (inExit) a.offsetXPx += (1 - exitP) * canvasWidth * 0.22 * k;
       break;
     case 'dip-to-black':
-    case 'dip-to-white': {
+    case 'dip-to-white':
+    case 'dip-to-gold': {
       // The item itself stays fully opaque and un-transformed — the "dip"
       // is entirely the overlay wash covering it, ramping from opaque
       // color (hiding the item at the very edge of the window) to
       // transparent (revealing it), and back on exit. A real cut-through-
-      // color, not a disguised fade.
-      a.overlayColor = preset === 'dip-to-black' ? '#000000' : '#ffffff';
+      // color, not a disguised fade. 'dip-to-gold' (v3) is the same
+      // mechanism through the brand gold #FFD100.
+      a.overlayColor = preset === 'dip-to-black' ? '#000000' : preset === 'dip-to-white' ? '#ffffff' : '#FFD100';
       if (inEnter) a.overlayAlpha = Math.max(a.overlayAlpha, 1 - enterLinear);
       if (inExit) a.overlayAlpha = Math.max(a.overlayAlpha, 1 - exitLinear);
       break;
@@ -331,6 +347,53 @@ export function computeEntranceExit(
       applyEnterExitOpacity();
       if (inEnter) { a.rotationDeltaDeg += (1 - enterP) * 360 * k; a.scaleMul *= 0.7 + 0.3 * enterP; }
       if (inExit) a.rotationDeltaDeg -= (1 - exitP) * 360 * k;
+      break;
+    // --- Templates v3 premium build-out --------------------------------
+    case 'cross-zoom':
+      // Scale + blur crossfade: the item arrives oversized and blurred,
+      // settling into focus (the "through the lens" punch), mirrored out.
+      applyEnterExitOpacity();
+      if (inEnter) { a.scaleMul *= 1 + (1 - enterP) * 0.6 * k; a.blurPx = Math.max(a.blurPx, (1 - enterP) * 16 * k); }
+      if (inExit) { a.scaleMul *= 1 + (1 - exitP) * 0.6 * k; a.blurPx = Math.max(a.blurPx, (1 - exitP) * 16 * k); }
+      break;
+    case 'mask-reveal': {
+      // Feathered circular reveal: `maskProgress` sweeps 0→1 (the clip
+      // circle grows to cover the item's diagonal) with a slight scale
+      // settle underneath; `applyTransformedDraw` renders the clip +
+      // feather. Exit shrinks the circle back down.
+      applyEnterExitOpacity();
+      let maskProgress = 1;
+      if (inEnter) maskProgress = Math.min(maskProgress, enterLinear);
+      if (inExit) maskProgress = Math.min(maskProgress, exitLinear);
+      a.maskProgress = maskProgress;
+      if (inEnter) a.scaleMul *= 1 + (1 - enterP) * 0.06 * k;
+      if (inExit) a.scaleMul *= 1 + (1 - exitP) * 0.06 * k;
+      break;
+    }
+    case 'luma-fade':
+      // Brightness-swept dissolve: the item materializes out of a blown-
+      // out bright ghost (brightnessMul > 1) as its opacity ramps in —
+      // highlights arrive first, like a film printer fade-in — and
+      // dissolves back out through the same bright sweep.
+      applyEnterExitOpacity();
+      if (inEnter) a.brightnessMul = Math.max(a.brightnessMul ?? 1, 1 + (1 - enterLinear) * 1.6 * k);
+      if (inExit) a.brightnessMul = Math.max(a.brightnessMul ?? 1, 1 + (1 - exitLinear) * 1.6 * k);
+      break;
+    case 'film-burn':
+      // Warm additive burn: a deep-orange wash swells to a peak mid-
+      // window and recedes (a smooth sine, distinct from light-leak's
+      // pale wash and fire's flicker), with a gentle push-in underneath.
+      a.overlayColor = '#ff7a1a';
+      if (inEnter) { a.overlayAlpha = Math.max(a.overlayAlpha, Math.sin(enterLinear * Math.PI) * 0.85 * k); a.scaleMul *= 1 + (1 - enterP) * 0.08 * k; a.blurPx = Math.max(a.blurPx, (1 - enterP) * 4 * k); }
+      if (inExit) { a.overlayAlpha = Math.max(a.overlayAlpha, Math.sin(exitLinear * Math.PI) * 0.85 * k); a.scaleMul *= 1 + (1 - exitP) * 0.08 * k; }
+      applyEnterExitOpacity();
+      break;
+    case 'smooth-spin':
+      // A gentle eased tilt-and-settle (±28°), the refined cousin of
+      // 'spin''s full 360° — rotation stays small enough for footage.
+      applyEnterExitOpacity();
+      if (inEnter) { a.rotationDeltaDeg += (1 - enterP) * 28 * k; a.scaleMul *= 0.92 + 0.08 * enterP; }
+      if (inExit) { a.rotationDeltaDeg -= (1 - exitP) * 28 * k; a.scaleMul *= 0.92 + 0.08 * exitP; }
       break;
 
     // --- Marketing / Advertising ----------------------------------------
@@ -573,7 +636,7 @@ export function computeMotionAdjustment(
  * combine sub-effects internally.
  */
 export function combineAdjustments(transition: AnimatedAdjustment, motion: AnimatedAdjustment): AnimatedAdjustment {
-  return {
+  const combined: AnimatedAdjustment = {
     opacityMul: transition.opacityMul * motion.opacityMul,
     offsetXPx: transition.offsetXPx + motion.offsetXPx,
     offsetYPx: transition.offsetYPx + motion.offsetYPx,
@@ -593,6 +656,18 @@ export function combineAdjustments(transition: AnimatedAdjustment, motion: Anima
     sweepAlpha: Math.max(transition.sweepAlpha, motion.sweepAlpha),
     sweepPositionPercent: motion.sweepAlpha >= transition.sweepAlpha ? motion.sweepPositionPercent : transition.sweepPositionPercent,
   };
+  // Templates v3 optional fields: brightness multiplies like the other
+  // gain fields; the mask takes whichever side reveals LESS (the more
+  // closed mask wins, mirroring opacity's "most restrictive" rule). Keys
+  // are only present when an input carried them, preserving the pre-v3
+  // adjustment shape otherwise.
+  if (transition.brightnessMul !== undefined || motion.brightnessMul !== undefined) {
+    combined.brightnessMul = (transition.brightnessMul ?? 1) * (motion.brightnessMul ?? 1);
+  }
+  if (transition.maskProgress !== undefined || motion.maskProgress !== undefined) {
+    combined.maskProgress = Math.min(transition.maskProgress ?? 1, motion.maskProgress ?? 1);
+  }
+  return combined;
 }
 
 function applyTransformedDraw(
@@ -602,12 +677,23 @@ function applyTransformedDraw(
   centerXPx: number,
   centerYPx: number,
   adjustment: AnimatedAdjustment = IDENTITY_ADJUSTMENT,
+  options: {
+    /** Item half-extents in draw space — required for the mask-reveal clip (v3); without them a mask adjustment degrades to its opacity ramp alone. */
+    halfWidthPx?: number;
+    halfHeightPx?: number;
+    /** Extra `ctx.filter` fragment appended after blur/hue/brightness — the item's color grade (v3, `colorGradeToFilter`). */
+    extraFilter?: string;
+  } = {},
 ) {
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, transform.opacity * adjustment.opacityMul));
   const filters: string[] = [];
   if (adjustment.blurPx > 0.05) filters.push(`blur(${adjustment.blurPx.toFixed(2)}px)`);
   if (Math.abs(adjustment.hueRotateDeg) > 0.5) filters.push(`hue-rotate(${adjustment.hueRotateDeg.toFixed(1)}deg)`);
+  if (adjustment.brightnessMul !== undefined && Math.abs(adjustment.brightnessMul - 1) > 0.01) {
+    filters.push(`brightness(${adjustment.brightnessMul.toFixed(3)})`);
+  }
+  if (options.extraFilter) filters.push(options.extraFilter);
   if (filters.length > 0) ctx.filter = filters.join(' ');
   ctx.translate(centerXPx + adjustment.offsetXPx, centerYPx + adjustment.offsetYPx);
   const totalRotationDeg = (transform.rotation || 0) + adjustment.rotationDeltaDeg;
@@ -616,7 +702,44 @@ function applyTransformedDraw(
   const scaleX = adjustment.scaleMul * adjustment.scaleXMul;
   const scaleY = adjustment.scaleMul * adjustment.scaleYMul;
   if (scaleX !== 1 || scaleY !== 1) ctx.scale(scaleX, scaleY);
-  draw(ctx);
+  const maskProgress = adjustment.maskProgress;
+  if (
+    maskProgress !== undefined &&
+    maskProgress < 0.999 &&
+    options.halfWidthPx !== undefined &&
+    options.halfHeightPx !== undefined
+  ) {
+    // Mask reveal (v3): clip to a circle of `maskProgress` × the item's
+    // half-diagonal, then feather the rim — a `destination-out` radial
+    // gradient erases progressively across a band just inside the clip
+    // edge, so the reveal edge is soft instead of a hard circle cut.
+    // (On the shared canvas the feather band fades toward whatever is
+    // beneath the item — over the usual black frame that reads as a
+    // soft dissolve rim, the standard canvas approximation of a
+    // feathered mask.) Runs entirely inside this item's transform
+    // context, so it tracks position/rotation/scale like every overlay.
+    const hw = options.halfWidthPx;
+    const hh = options.halfHeightPx;
+    const halfDiagonal = Math.hypot(hw, hh);
+    const feather = Math.max(4, halfDiagonal * 0.1);
+    const r = clamp01(maskProgress) * (halfDiagonal + feather);
+    ctx.beginPath();
+    ctx.arc(0, 0, r + feather, 0, Math.PI * 2);
+    ctx.clip();
+    draw(ctx);
+    ctx.save();
+    ctx.filter = 'none';
+    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, r + feather);
+    const bandStart = r + feather > 0 ? Math.max(0, Math.min(1, r / (r + feather))) : 0;
+    gradient.addColorStop(bandStart, 'rgba(0,0,0,0)');
+    gradient.addColorStop(1, 'rgba(0,0,0,1)');
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = gradient;
+    ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+    ctx.restore();
+  } else {
+    draw(ctx);
+  }
   ctx.restore();
 }
 
@@ -750,7 +873,7 @@ function coverSourceRect(
 
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -844,6 +967,7 @@ function drawVideoItem(
     centerX,
     centerY,
     adjustment,
+    { halfWidthPx: w / 2, halfHeightPx: h / 2, extraFilter: colorGradeToFilter(item.colorGrade) || undefined },
   );
 }
 
@@ -897,6 +1021,7 @@ function drawImageItem(
     centerX,
     centerY,
     adjustment,
+    { halfWidthPx: w / 2, halfHeightPx: h / 2, extraFilter: colorGradeToFilter(item.colorGrade) || undefined },
   );
 }
 
@@ -951,6 +1076,10 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
     centerX,
     centerY,
     adjustment,
+    // Estimated text box (drawTextItem has no fixed draw box — see the
+    // overlay note above) so a mask-reveal on a text item clips around
+    // roughly the glyphs instead of skipping the mask entirely.
+    { halfWidthPx: (displayText || ' ').length * effectiveFontSize * 0.32 + effectiveFontSize * 0.3, halfHeightPx: effectiveFontSize * 0.7 },
   );
 }
 
