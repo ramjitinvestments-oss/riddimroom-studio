@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getAuth, GoogleAuthProvider, connectAuthEmulator } from 'firebase/auth';
+import { getFirestore, connectFirestoreEmulator } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 
@@ -22,5 +22,20 @@ const auth = getAuth(app);
 const googleProvider = new GoogleAuthProvider();
 const db = getFirestore(app);
 const storage = getStorage(app);
+
+// Local emulator support (Plan v5 Phase 3L): ONLY active when the build
+// sets VITE_FIREBASE_EMULATOR=true (e.g. a local proof build against a
+// demo project). Unset — every normal build — this block never runs and
+// behavior is exactly as before.
+if (metaEnv.VITE_FIREBASE_EMULATOR === 'true') {
+  connectAuthEmulator(auth, metaEnv.VITE_FIREBASE_AUTH_EMULATOR_URL || 'http://127.0.0.1:9099', {
+    disableWarnings: true,
+  });
+  connectFirestoreEmulator(
+    db,
+    metaEnv.VITE_FIREBASE_FIRESTORE_EMULATOR_HOST || '127.0.0.1',
+    Number(metaEnv.VITE_FIREBASE_FIRESTORE_EMULATOR_PORT || 8080),
+  );
+}
 
 export { app, auth, googleProvider, db, storage };
