@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useProject } from '../../context/ProjectContext';
 import { addCaptionItems } from '../../lib/timeline/insert';
+import { messageForNonJsonTranscribeResponse, messageForTranscribeFetchFailure } from '../../lib/transcription/clientErrors';
 import { getItemsByTrackType } from '../../lib/timeline/utils';
 import type { VideoTimelineItem, AudioTimelineItem } from '../../types/timeline';
 
@@ -57,16 +58,17 @@ export function TranscribePanel({ uid }: { uid: string }) {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({ storageUrl: asset.storageUrl, mimeType: asset.mimeType, durationSeconds: asset.durationSeconds }),
       });
-      // Static preview builds have no /api routes at all — the response is
-      // an HTML 404 page, and res.json() on it throws a raw SyntaxError
-      // ("Unexpected token '<'…") that reads like a crash to the user.
-      // So: if the body parses as JSON, surface the API's real error (an
+      // If the body parses as JSON, surface the API's real error (an
       // earlier version masked EVERY non-200 — including quota and
-      // provider errors — behind the "preview build" text, which hid the
-      // actual cause of a transcription outage for days).
+      // provider errors — behind a "preview build" claim, which hid the
+      // actual cause of a transcription outage for days). A non-JSON
+      // response on production is not a "preview build" either: it's
+      // what the serverless host returns when the function times out
+      // (an HTML error page) — so name that failure class honestly and
+      // tell the user to retry (see lib/transcription/clientErrors.ts).
       const isJson = (res.headers.get('content-type') || '').includes('application/json');
       if (!isJson) {
-        setError("Transcription isn't available on this preview build yet.");
+        setError(messageForNonJsonTranscribeResponse());
         return;
       }
       const data = await res.json();
@@ -82,8 +84,10 @@ export function TranscribePanel({ uid }: { uid: string }) {
       }
       await refreshUserProfile();
     } catch (err: any) {
-      // Never surface a raw parser/network exception message to the user.
-      setError(err instanceof SyntaxError ? "Transcription isn't available on this preview build yet." : err?.message || 'Transcription request failed.');
+      // Never surface a raw parser/network exception message to the
+      // user — map it to its failure class (unreadable response vs.
+      // unreachable service vs. the error's own readable message).
+      setError(messageForTranscribeFetchFailure(err));
     } finally {
       setIsTranscribing(null);
     }
