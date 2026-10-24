@@ -24,9 +24,9 @@ export function ProtectedRoute({ requiredRole, redirectTo, children }: Protected
   if (isAuthLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-[#070707] text-white">
-        <div className="w-12 h-12 rounded-full border-4 border-emerald-500/20 border-t-emerald-500 animate-spin"></div>
-        <p className="mt-4 text-xs font-semibold text-white/50 tracking-wider uppercase font-mono animate-pulse">
-          Synchronizing Secure Protocol...
+        <div className="w-12 h-12 rounded-full border-4 border-gold/20 border-t-gold animate-spin"></div>
+        <p className="mt-4 text-xs font-semibold text-white/50 tracking-wider uppercase animate-pulse">
+          Loading…
         </p>
       </div>
     );
