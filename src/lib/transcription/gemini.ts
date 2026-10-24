@@ -16,6 +16,7 @@
 
 import { GoogleGenAI, createPartFromUri, createPartFromText, createUserContent, Type } from '@google/genai';
 import { TranscriptionConfigurationError, type TranscriptionProvider, type TranscriptionRequest, type TranscriptionResult } from './types.js';
+import { summarizeModelFailures, type ModelAttemptFailure } from './errors.js';
 
 /**
  * Model candidates, tried in order. Google gates models by account
@@ -110,7 +111,11 @@ export class GeminiTranscriptionProvider implements TranscriptionProvider {
       // - anything else (quota, billing, bad media) is real: propagate.
       const generateStartedAt = Date.now();
       let response;
-      let lastModelError: unknown;
+      // Per-model failures, in the order the models were tried. If every
+      // candidate fails, the thrown error summarizes ALL of them with
+      // the primary first (see errors.ts) — never just the last model's
+      // message, which misattributes the failure to the fallback.
+      const modelFailures: ModelAttemptFailure[] = [];
       outer: for (const model of MODELS) {
         for (let attempt = 0; attempt < 2; attempt++) {
           if (Date.now() - generateStartedAt > GENERATE_DEADLINE_MS) break outer;
@@ -126,18 +131,23 @@ export class GeminiTranscriptionProvider implements TranscriptionProvider {
             break outer;
           } catch (err: any) {
             const msg = String(err?.message || err);
-            lastModelError = err;
-            if (/404|NOT_FOUND|no longer available|not found/i.test(msg)) break; // next model
+            if (/404|NOT_FOUND|no longer available|not found/i.test(msg)) {
+              modelFailures.push({ model, message: msg });
+              break; // next model
+            }
             if (/503|UNAVAILABLE|high demand/i.test(msg) && attempt === 0) {
               await new Promise((resolve) => setTimeout(resolve, 3000));
               continue; // one retry on this model
             }
-            if (/503|UNAVAILABLE|high demand/i.test(msg)) break; // next model after retry
+            if (/503|UNAVAILABLE|high demand/i.test(msg)) {
+              modelFailures.push({ model, message: msg });
+              break; // next model after retry
+            }
             throw err;
           }
         }
       }
-      if (!response) throw lastModelError;
+      if (!response) throw new Error(summarizeModelFailures(modelFailures));
 
       const text = response.text;
       if (!text) {
