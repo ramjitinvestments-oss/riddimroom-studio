@@ -10,6 +10,7 @@ import { MediaImportPanel } from './MediaImportPanel';
 import { AddTextPanel } from './AddTextPanel';
 import { WatermarkPanel } from './WatermarkPanel';
 import { TranscribePanel } from './TranscribePanel';
+import { AddCaptionPanel } from './AddCaptionPanel';
 import { ExportPanel } from './ExportPanel';
 import { BackgroundRemovalButton } from './BackgroundRemovalButton';
 import { BottomSheet } from './BottomSheet';
@@ -351,6 +352,10 @@ function EditorInner({ uid }: { uid: string }) {
       </section>
 
       <section>
+        <AddCaptionPanel currentTime={currentTime} />
+      </section>
+
+      <section>
         <CaptionsExportPanel />
       </section>
     </>
@@ -537,7 +542,15 @@ function EditorInner({ uid }: { uid: string }) {
               selectedItemId={selectedItemId}
               onSelectItem={setSelectedItemId}
             />
-            <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
+            <div className="flex gap-2">
+              <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
+              {/* Phone-width dead-end fix (five-star audit): below lg the
+                  export controls live only in the BottomSheet — without
+                  this CTA the Export step's main pane offered no visible
+                  path to them at all (just a header icon). Same sheet,
+                  same panel node — never a second export UI. */}
+              <button onClick={() => setMobileSheet('panel')} className="lg:hidden min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5">Export options <ArrowRight size={16} /></button>
+            </div>
           </main>
           <aside className="hidden lg:flex flex-col gap-4">{exportPanel}</aside>
         </div>
