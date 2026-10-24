@@ -346,7 +346,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
           <button
             onClick={startRecording}
             disabled={!isReady}
-            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 rounded-lg text-white"
+            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >
             Record
           </button>
