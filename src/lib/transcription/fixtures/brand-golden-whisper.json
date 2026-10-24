@@ -1,0 +1,62 @@
+{
+  "promo-line1": {
+    "category": "brand",
+    "ground_truth": "Your brand has three seconds to stop the scroll, or it is gone forever.",
+    "whisper_small_en": "Your brand has 3 seconds to stop the scroll or it is gone forever."
+  },
+  "promo-line3": {
+    "category": "brand",
+    "ground_truth": "RiddimRoom creates cinematic brand films and premium Caribbean style people remember.",
+    "whisper_small_en": "Rhythm Room creates cinematic brand films and premium Caribbean-style people remember."
+  },
+  "promo-line4": {
+    "category": "brand",
+    "ground_truth": "Go to riddimroom.com and get created different today. Your brand deserves it.",
+    "whisper_small_en": "Go to Rhythm Room, come and get created different today, your brand deserves it."
+  },
+  "film-line1-control": {
+    "category": "brand",
+    "ground_truth": "This is not fast fashion, this is Caribbean culture worn with pride.",
+    "whisper_small_en": "This is not fast fashion, this is Caribbean culture worn with pride."
+  },
+  "film-line2": {
+    "category": "brand",
+    "ground_truth": "From Trinidad and Tobago to the world, RiddimRoom carries the sound, the colour, and the soul of home.",
+    "whisper_small_en": "from Trinidad and Tobago to the world. Rhythm Room carries the sound of the color and the soul of home."
+  },
+  "film-line3": {
+    "category": "brand",
+    "ground_truth": "Every design begins with the riddim, the heartbeat you feel before the music even starts.",
+    "whisper_small_en": "Every D sound begins with the rhythm, the heartbeat you feel before the music even starts."
+  },
+  "film-line7": {
+    "category": "brand",
+    "ground_truth": "Put on RiddimRoom and home is never far, the people, the party, the culture that raised you.",
+    "whisper_small_en": "put on written room, and home is never far.  The people, the party, the culture that raised you."
+  },
+  "film-line8": {
+    "category": "brand",
+    "ground_truth": "RiddimRoom is Caribbean culture, created different, and this is only the beginning of the story.",
+    "whisper_small_en": "rhythm room this caribbean culture created different and this is already beginning of a story"
+  },
+  "skit-chunk1": {
+    "category": "patois",
+    "ground_truth": "Town ride. Come come. Plenty room in here still.",
+    "whisper_small_en": "tone right. Come, come. Plenty room in here still."
+  },
+  "skit-chunk2": {
+    "category": "patois",
+    "ground_truth": "Small up yuhself. Breathe in. Two more could fit easy.",
+    "whisper_small_en": "small up yourself, breathe in, tomorrow could fit easy."
+  },
+  "skit-chunk3": {
+    "category": "patois",
+    "ground_truth": "You small. You could fit in de glove compartment.",
+    "whisper_small_en": "You're small, you can fit in the glove compartment."
+  },
+  "skit-chunk4": {
+    "category": "patois",
+    "ground_truth": "See. Everybody reach. Nobody get left behind.",
+    "whisper_small_en": "See, everybody rich, nobody get left behind."
+  }
+}
