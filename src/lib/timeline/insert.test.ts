@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createEmptyProject, createTrack, addTrack } from './utils';
-import { appendMediaToTimeline } from './insert';
+import { appendMediaToTimeline, addCaptionItems, addManualCaptionCue } from './insert';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
 import type { MediaAsset } from '../../types/timeline';
 
@@ -146,5 +146,61 @@ describe('appendMediaToTimeline image placement (Add Overlay upload flow)', () =
     expect(item.position).toEqual({ x: 82, y: 78 });
     expect(item.scale).toBeCloseTo(0.32, 5);
     expect(item.role).toBe('overlay');
+  });
+});
+
+describe('addManualCaptionCue — hand-typed caption creation (five-star audit fix)', () => {
+  function projectWithCaptionTrack() {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    project = addTrack(project, createTrack('caption', 'Captions', 0));
+    return project;
+  }
+
+  it('creates a manual cue at the playhead: one word spanning the cue, classic style, input unmutated', () => {
+    const project = projectWithCaptionTrack();
+    const next = addManualCaptionCue(project, { text: 'Small up yuhself', atTime: 3.5 });
+    expect(project.items).toHaveLength(0);
+    expect(next.items).toHaveLength(1);
+    const item = next.items[0];
+    if (item.type !== 'caption') throw new Error('expected a caption item');
+    expect(item.source).toBe('manual');
+    expect(item.editable).toBe(true);
+    expect(item.startTime).toBeCloseTo(3.5, 5);
+    expect(item.endTime).toBeCloseTo(5.5, 5); // 2s default
+    expect(item.words).toEqual([{ text: 'Small up yuhself', start: 0, end: 2 }]);
+    expect(item.captionStyleId).toBe('classic');
+    expect(item.trackId).toBe(project.tracks[0].id);
+  });
+
+  it('inherits the style of the most recent existing cue instead of resetting the look', () => {
+    let project = projectWithCaptionTrack();
+    project = addCaptionItems(project, {
+      words: [
+        { text: 'first', start: 0, end: 0.5 },
+        { text: 'cue', start: 0.5, end: 1 },
+      ],
+      atTime: 0,
+      captionStyleId: 'bold-yellow',
+      source: 'ai',
+    });
+    const next = addManualCaptionCue(project, { text: 'by hand', atTime: 2 });
+    const manual = next.items.find((i) => i.type === 'caption' && i.source === 'manual');
+    if (!manual || manual.type !== 'caption') throw new Error('expected a manual caption item');
+    expect(manual.captionStyleId).toBe('bold-yellow');
+    // An explicit style choice still wins over inheritance.
+    const explicit = addManualCaptionCue(project, { text: 'styled', atTime: 4, captionStyleId: 'cinema' });
+    const styled = explicit.items.find((i) => i.type === 'caption' && i.source === 'manual');
+    if (!styled || styled.type !== 'caption') throw new Error('expected a manual caption item');
+    expect(styled.captionStyleId).toBe('cinema');
+  });
+
+  it('clamps a negative playhead to 0 and enforces the minimum cue duration', () => {
+    const project = projectWithCaptionTrack();
+    const next = addManualCaptionCue(project, { text: 'clamped', atTime: -2, durationSeconds: 0.1 });
+    const item = next.items[0];
+    if (item.type !== 'caption') throw new Error('expected a caption item');
+    expect(item.startTime).toBe(0);
+    expect(item.endTime).toBeCloseTo(0.5, 5);
+    expect(item.words[0].end).toBeCloseTo(0.5, 5);
   });
 });
