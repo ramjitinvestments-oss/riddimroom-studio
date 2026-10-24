@@ -324,3 +324,47 @@ export function addCaptionItems(project: Project, options: AddCaptionsOptions): 
   }
   return next;
 }
+
+export interface AddManualCaptionCueOptions {
+  /** The cue's text — stored as a single word timing spanning the whole cue; the caption inspector's word editor refines it from there. */
+  text: string;
+  /** Timeline position (seconds) for the cue's start — typically the playhead. Clamped to >= 0. */
+  atTime: number;
+  /** Defaults to 2s — long enough to read a short line, short enough not to swallow a neighbouring cue. Minimum 0.5s. */
+  durationSeconds?: number;
+  /** Defaults to the style of the project's most recent caption cue, else 'classic' — a hand-added cue matches the captions already on screen instead of resetting the look. */
+  captionStyleId?: string;
+}
+
+/**
+ * Adds ONE hand-typed caption cue (`source: 'manual'`) at `atTime`
+ * (five-star surface audit, pre-live build 4). Before this helper, cues
+ * could only come from AI transcription or subtitle import — a user who
+ * wanted one line of their own (a hook, a name, a patois line spelled
+ * their way) had no way to create it, even though every existing cue was
+ * fully editable. This is the creation path that editing promise needs:
+ * same item shape `addCaptionItems` writes, one word spanning the cue,
+ * refined afterwards in the CaptionInspector like any other cue.
+ */
+export function addManualCaptionCue(project: Project, options: AddManualCaptionCueOptions): Project {
+  const track = firstTrackOfType(project, 'caption');
+  const startTime = Math.max(0, options.atTime);
+  const duration = Math.max(0.5, options.durationSeconds ?? 2);
+  const lastCue = project.items
+    .filter((i): i is CaptionTimelineItem => i.type === 'caption')
+    .reduce<CaptionTimelineItem | null>((latest, i) => (!latest || i.endTime > latest.endTime ? i : latest), null);
+  const item: CaptionTimelineItem = {
+    id: generateTimelineId('item'),
+    type: 'caption',
+    trackId: track.id,
+    startTime,
+    endTime: startTime + duration,
+    zIndex: nextZIndex(project),
+    visible: true,
+    words: [{ text: options.text, start: 0, end: duration }],
+    captionStyleId: options.captionStyleId ?? lastCue?.captionStyleId ?? 'classic',
+    source: 'manual',
+    editable: true,
+  };
+  return addItem(project, item);
+}
