@@ -11,11 +11,12 @@ export type UserRole = 'user' | 'admin';
 
 /**
  * EventCam's four-state onboarding gate, carried into the unified schema.
- * Phase 1 has no admin approval queue yet (that ships in a later phase per
- * the approved Phase 1 plan), so new users are initialized as 'approved'
- * rather than EventCam's original default of 'pending' — otherwise every
- * new signup would be locked out with no admin panel available yet to
- * unlock them. See PROGRESS.md "Source-of-feature log" for the full note.
+ * Phase 1 initialized new users as 'approved' because no admin approval
+ * queue existed yet. Phase 2 (Plan v5 toggle access) built that queue —
+ * the in-app Admin screen backed by /api/admin/* — so new signups now
+ * initialize as 'pending' and an admin toggles them to 'approved'
+ * (which also grants the lifetime license; see api/_lib.ts
+ * applyAccessToggle). Admins (admins/{uid}) are never gated by status.
  */
 export type UserStatus = 'pending' | 'approved' | 'denied' | 'suspended';
 
@@ -46,6 +47,13 @@ export interface UserProfile {
   // shipped these fields with no billing integration behind them).
   subscription: string;
   plan: string;
+
+  // Marketing consent (Phase 2, Plan v5): set by the user themselves from
+  // the pending screen via a direct client write to their own doc (the
+  // one non-privileged field the client may change — firestore.rules
+  // freezes only uid/role/status/subscription/plan on update). Absent on
+  // pre-Phase-2 documents; treat as false.
+  marketingOptIn?: boolean;
 }
 
 export const DEFAULT_DAILY_QUOTA = 2;
@@ -78,4 +86,8 @@ export interface ClientUserProfile {
   plan: string;
   /** v1 licensing tier (free | lifetime). Defaults to 'free' when absent (pre-v1 profiles). */
   licenseTier?: 'free' | 'lifetime';
+  /** Phase 2 (Plan v5): true when admins/{uid} exists — drives the Admin screen's visibility. */
+  isAdmin?: boolean;
+  /** Phase 2 (Plan v5): the user's stored marketing consent (see UserProfile.marketingOptIn). */
+  marketingOptIn?: boolean;
 }
