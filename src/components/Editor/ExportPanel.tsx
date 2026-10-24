@@ -1,10 +1,10 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useProject } from '../../context/ProjectContext';
 import { useAuth } from '../../context/AuthContext';
-import { Canvas2DRenderer } from '../../lib/export/canvas2dRenderer';
 import { validateRenderResult } from '../../lib/export/validate';
 import type { RenderProgress } from '../../lib/export/renderer';
 import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
+import { createExportRenderer, getConfiguredExportEngine } from '../../lib/export/mediabunnyExporter';
 import {
   EXPORT_FRAME_RATES,
   EXPORT_QUALITY_TIERS,
@@ -19,13 +19,23 @@ import { useLicenseTier } from '../../hooks/useLicenseTier';
 
 /**
  * Phase 1 Step 12 (Export engine), extended for genuine MP4 output. Drives
- * the `Renderer` abstraction (currently `Canvas2DRenderer`) end to end
- * exactly as before — action -> progress -> a validated WebM recording —
- * then feeds that finished, validated WebM blob into `transcodeWebmToMp4`
- * (ffmpeg.wasm) to produce a real MP4 container. The rendering stage itself
- * is untouched; only a conversion stage was added after it. Never reports
+ * the `Renderer` abstraction end to end — action -> progress -> a
+ * validated recording — then, on the default 'ffmpeg' engine, feeds that
+ * finished, validated WebM blob into `transcodeWebmToMp4` (ffmpeg.wasm)
+ * to produce a real MP4 container. The rendering stage itself is
+ * untouched; only a conversion stage was added after it. Never reports
  * success without both `validateRenderResult` and the MP4 conversion
  * itself succeeding.
+ *
+ * Pre-live build 2: the renderer comes from `createExportRenderer()`.
+ * The default build still selects 'ffmpeg' (Canvas2DRenderer + the
+ * transcode stage above, byte-for-byte the old flow). A build with
+ * VITE_EXPORT_ENGINE=mediabunny selects the Mediabunny/WebCodecs
+ * engine, whose `render()` returns the finished MP4 directly — the
+ * transcode stage is skipped for it (there is no WebM to convert), and
+ * its capability failures surface through this panel's existing error
+ * path. Engine selection never falls back at runtime: a selected
+ * engine that cannot run fails the export honestly.
  */
 export function ExportPanel() {
   const { project } = useProject();
@@ -79,7 +89,8 @@ export function ExportPanel() {
     });
 
     try {
-      const renderer = new Canvas2DRenderer();
+      const engine = getConfiguredExportEngine();
+      const renderer = createExportRenderer(engine);
       const result = await renderer.render(project, {
         signal: controller.signal,
         onProgress: setProgress,
@@ -92,17 +103,23 @@ export function ExportPanel() {
         return;
       }
 
-      setStatus('converting');
       let mp4Blob: Blob;
-      try {
-        mp4Blob = await transcodeWebmToMp4(result.blob, output.frameRate, ({ ratio }) => setConvertRatio(ratio), {
-          crf: output.crf,
-          audioBitrateKbps: output.audioBitsPerSecond / 1000,
-        });
-      } catch (convertErr: any) {
-        setError(convertErr?.message || 'Could not convert the export to MP4.');
-        setStatus('error');
-        return;
+      if (engine === 'mediabunny') {
+        // The Mediabunny engine's render() output IS the finished MP4 —
+        // no conversion stage exists for it.
+        mp4Blob = result.blob;
+      } else {
+        setStatus('converting');
+        try {
+          mp4Blob = await transcodeWebmToMp4(result.blob, output.frameRate, ({ ratio }) => setConvertRatio(ratio), {
+            crf: output.crf,
+            audioBitrateKbps: output.audioBitsPerSecond / 1000,
+          });
+        } catch (convertErr: any) {
+          setError(convertErr?.message || 'Could not convert the export to MP4.');
+          setStatus('error');
+          return;
+        }
       }
 
       setDownloadUrl(URL.createObjectURL(mp4Blob));
