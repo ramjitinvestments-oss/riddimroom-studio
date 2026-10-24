@@ -15,6 +15,7 @@ import { getAuth, type DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import type { UserProfile } from './src/types/user';
 import { getTranscriptionProvider, TranscriptionConfigurationError } from './src/lib/transcription';
+import { applyBrandGlossary } from './src/lib/transcription/brandGlossary';
 
 dotenv.config();
 
@@ -392,6 +393,19 @@ async function createServer() {
         }
       }
 
+      // Brand-glossary correction layer — same single convergence point as
+      // api/transcribe.ts (both provider paths assign `result` above):
+      // runs once on fresh provider output, before the response; shadow
+      // entries are log-only. See src/lib/transcription/brandGlossary.ts.
+      const glossary = applyBrandGlossary(result.words);
+      if (glossary.corrections.length > 0) {
+        console.info('[transcribe] brand glossary corrections applied:', JSON.stringify(glossary.corrections));
+      }
+      if (glossary.shadowHits.length > 0) {
+        console.warn('[transcribe] brand glossary SHADOW hits (log-only, NOT applied):', JSON.stringify(glossary.shadowHits));
+      }
+      result = { ...result, words: glossary.words };
+
       const newDailyCount = dailyCount + 1;
       await userRef.update({
         dailyCount: newDailyCount,
@@ -400,7 +414,7 @@ async function createServer() {
         lastUpdated: FieldValue.serverTimestamp(),
       });
 
-      return res.json({ success: true, words: result.words, provider: result.provider, dailyCount: newDailyCount, maxFree: maxDaily });
+      return res.json({ success: true, words: result.words, provider: result.provider, corrections: glossary.corrections, dailyCount: newDailyCount, maxFree: maxDaily });
     } catch (err: any) {
       console.error('[transcribe] failed:', err?.message || err);
       return res.status(500).json({ success: false, error: err?.message || 'Transcription failed.' });
