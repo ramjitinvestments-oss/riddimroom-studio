@@ -162,11 +162,11 @@ export function LoginPage() {
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => setRememberMe(e.target.checked)}
-                  className="accent-emerald-500"
+                  className="accent-[#ffd100]"
                 />
                 Remember me
               </label>
-              <button type="button" onClick={() => setMode('forgot')} className="text-emerald-400 hover:underline">
+              <button type="button" onClick={() => setMode('forgot')} className="text-gold hover:underline">
                 Forgot password?
               </button>
             </div>
@@ -175,7 +175,7 @@ export function LoginPage() {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full py-3 bg-emerald-500 text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
+            className="w-full py-3 bg-gold hover:bg-gold-bright text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
           >
             {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset email'}
             {mode === 'forgot' ? <KeyRound className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
@@ -186,7 +186,7 @@ export function LoginPage() {
           {mode === 'login' && (
             <>
               No account?{' '}
-              <button onClick={() => setMode('signup')} className="text-emerald-400 hover:underline">
+              <button onClick={() => setMode('signup')} className="text-gold hover:underline">
                 Create one
               </button>
             </>
@@ -194,13 +194,13 @@ export function LoginPage() {
           {mode === 'signup' && (
             <>
               Already have an account?{' '}
-              <button onClick={() => setMode('login')} className="text-emerald-400 hover:underline">
+              <button onClick={() => setMode('login')} className="text-gold hover:underline">
                 Sign in
               </button>
             </>
           )}
           {mode === 'forgot' && (
-            <button onClick={() => setMode('login')} className="text-emerald-400 hover:underline">
+            <button onClick={() => setMode('login')} className="text-gold hover:underline">
               Back to sign in
             </button>
           )}
