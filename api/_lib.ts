@@ -45,8 +45,14 @@ const FIREBASE_WEB_CONFIG = {
 const PROJECT_ID =
   process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || FIREBASE_WEB_CONFIG.projectId;
 const WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY || FIREBASE_WEB_CONFIG.apiKey;
-const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
-const IDENTITY_BASE = 'https://identitytoolkit.googleapis.com/v1';
+// Service base URLs default to the production Google endpoints. They can
+// be overridden wholesale by env var (full base URL, same shape as the
+// default) — used only to point local test harnesses at the Firebase
+// emulators; production never sets these.
+const FIRESTORE_BASE =
+  process.env.FIREBASE_FIRESTORE_BASE ||
+  `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
+const IDENTITY_BASE = process.env.FIREBASE_IDENTITY_BASE || 'https://identitytoolkit.googleapis.com/v1';
 
 /** Minimal request/response shapes (Vercel Node runtime provides these). */
 export interface ApiRequest {
@@ -217,6 +223,63 @@ export async function fsPatchDoc(
   }
 }
 
+export interface FsListedDoc extends FsDoc {
+  id: string;
+}
+
+/**
+ * List every document in a collection as the calling user (Firestore REST
+ * list, following nextPageToken to the end). Used by the admin endpoints —
+ * firestore.rules is what actually lets an admin read other users' docs;
+ * a non-admin caller simply gets a rules-denied error from Firestore.
+ */
+export async function fsListDocs(collection: string, idToken: string): Promise<FsListedDoc[]> {
+  const out: FsListedDoc[] = [];
+  let pageToken: string | undefined;
+  do {
+    const params = new URLSearchParams({ pageSize: '300' });
+    if (pageToken) params.set('pageToken', pageToken);
+    const resp = await fetch(`${FIRESTORE_BASE}/${collection}?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
+    if (!resp.ok) {
+      throw new Error(`Firestore LIST ${collection} failed: ${resp.status} ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+    }
+    const page = (await resp.json()) as {
+      documents?: Array<{ name: string; fields?: Record<string, FirestoreValue> }>;
+      nextPageToken?: string;
+    };
+    for (const doc of page.documents || []) {
+      const data: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(doc.fields || {})) data[k] = fromFirestoreValue(v);
+      out.push({ id: doc.name.split('/').pop() || '', exists: true, data });
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+/** Create a document with a Firestore-generated id; returns the new id. */
+export async function fsCreateDoc(
+  collection: string,
+  fields: Record<string, unknown>,
+  idToken: string,
+): Promise<string> {
+  const body = {
+    fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, toFirestoreValue(v)])),
+  };
+  const resp = await fetch(`${FIRESTORE_BASE}/${collection}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    throw new Error(`Firestore POST ${collection} failed: ${resp.status} ${(await resp.text().catch(() => '')).slice(0, 200)}`);
+  }
+  const doc = (await resp.json()) as { name?: string };
+  return (doc.name || '').split('/').pop() || '';
+}
+
 // ---------------------------------------------------------------------------
 // License tier + kill-switch (same semantics as the Admin implementation).
 // ---------------------------------------------------------------------------
@@ -250,7 +313,169 @@ export async function isGlobalDisabled(idToken: string): Promise<boolean> {
   }
 }
 
-export function toClientUser(data: UserProfile, licenseTier: 'free' | 'lifetime' = 'free') {
+// ---------------------------------------------------------------------------
+// Phase 2 (Plan v5) — owner toggle access. An admin flips a pending signup
+// to approved from the in-app Admin screen; approving writes the SAME
+// entitlement records a Stripe webhook writes later (licenses/{uid} with
+// tier 'lifetime'), plus the users/{uid} status flag and an approvals log
+// entry, so manual access and paid access are indistinguishable to the app.
+// ---------------------------------------------------------------------------
+
+/** True when admins/{uid} exists for this caller. */
+export async function isAdminUser(uid: string, idToken: string): Promise<boolean> {
+  try {
+    return (await fsGetDoc(`admins/${uid}`, idToken)).exists;
+  } catch {
+    return false;
+  }
+}
+
+export class AccessToggleError extends Error {
+  code: 'NOT_ADMIN' | 'USER_NOT_FOUND';
+  constructor(code: 'NOT_ADMIN' | 'USER_NOT_FOUND', message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+export interface AccessToggleWrites {
+  licensePath: string;
+  licenseFields: Record<string, unknown>;
+  userPath: string;
+  userFields: Record<string, unknown>;
+  logCollection: string;
+  logFields: Record<string, unknown>;
+}
+
+/**
+ * The exact writes a toggle performs (pure — unit-tested in
+ * src/lib/adminAccess.test.ts). Approving grants the lifetime license;
+ * revoking only deactivates it (the document and its tier stay, so a
+ * later re-approval is a flag flip, and the record of the grant survives).
+ */
+export function buildAccessToggleWrites(
+  targetUid: string,
+  targetEmail: string,
+  approved: boolean,
+  callerUid: string,
+): AccessToggleWrites {
+  return {
+    licensePath: `licenses/${targetUid}`,
+    licenseFields: approved
+      ? {
+          tier: 'lifetime',
+          active: true,
+          source: 'manual-toggle',
+          grantedBy: callerUid,
+          updatedAt: SERVER_TIMESTAMP,
+        }
+      : {
+          active: false,
+          source: 'manual-toggle',
+          updatedAt: SERVER_TIMESTAMP,
+        },
+    userPath: `users/${targetUid}`,
+    userFields: { status: approved ? 'approved' : 'pending' },
+    logCollection: 'approvals',
+    logFields: {
+      uid: targetUid,
+      email: targetEmail,
+      action: approved ? 'approved' : 'revoked',
+      by: callerUid,
+      at: SERVER_TIMESTAMP,
+    },
+  };
+}
+
+export interface AdminUserSummary {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string | null;
+  createdAt: string | null;
+  status: string;
+  plan: string;
+  subscription: string;
+  marketingOptIn: boolean;
+  licenseTier: 'free' | 'lifetime';
+}
+
+function toAdminUserSummary(data: Record<string, unknown>, licenseTier: 'free' | 'lifetime'): AdminUserSummary {
+  return {
+    uid: String(data.uid || ''),
+    email: String(data.email || ''),
+    displayName: String(data.displayName || ''),
+    photoURL: (data.photoURL as string | null) ?? null,
+    createdAt: (data.createdAt as string | null) ?? null,
+    status: String(data.status || ''),
+    plan: String(data.plan || ''),
+    subscription: String(data.subscription || ''),
+    marketingOptIn: data.marketingOptIn === true,
+    licenseTier,
+  };
+}
+
+/**
+ * Every signup, newest first, with each user's license tier resolved from
+ * licenses/{uid} (and the admins grant). Admin-gated: throws
+ * AccessToggleError('NOT_ADMIN') before reading anything when the caller
+ * has no admins/{uid} doc.
+ */
+export async function fetchAdminUsers(callerUid: string, idToken: string): Promise<AdminUserSummary[]> {
+  if (!(await isAdminUser(callerUid, idToken))) {
+    throw new AccessToggleError('NOT_ADMIN', 'Admin access required.');
+  }
+  const [userDocs, licenseDocs, adminDocs] = await Promise.all([
+    fsListDocs('users', idToken),
+    fsListDocs('licenses', idToken),
+    fsListDocs('admins', idToken),
+  ]);
+  const licenseByUid = new Map(licenseDocs.map((d) => [d.id, d.data]));
+  const adminIds = new Set(adminDocs.map((d) => d.id));
+  const summaries = userDocs.map((doc) => {
+    const license = licenseByUid.get(doc.id) as { tier?: string; active?: boolean } | undefined;
+    const tier: 'free' | 'lifetime' =
+      (license && license.tier === 'lifetime' && license.active !== false) || adminIds.has(doc.id)
+        ? 'lifetime'
+        : 'free';
+    return toAdminUserSummary({ ...doc.data, uid: doc.data.uid || doc.id }, tier);
+  });
+  // Newest signup first; undated docs (pre-schema) sink to the end.
+  summaries.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return summaries;
+}
+
+/**
+ * Perform one toggle: verify the caller is an admin (throws NOT_ADMIN and
+ * writes NOTHING otherwise), resolve the target's email for the approvals
+ * log, then license write → status write → log entry, in that order.
+ * Returns the target's post-toggle summary.
+ */
+export async function applyAccessToggle(
+  callerUid: string,
+  targetUid: string,
+  approved: boolean,
+  idToken: string,
+): Promise<AdminUserSummary> {
+  if (!(await isAdminUser(callerUid, idToken))) {
+    throw new AccessToggleError('NOT_ADMIN', 'Admin access required.');
+  }
+  const target = await fsGetDoc(`users/${targetUid}`, idToken);
+  if (!target.exists) {
+    throw new AccessToggleError('USER_NOT_FOUND', 'User not found.');
+  }
+  const writes = buildAccessToggleWrites(targetUid, String(target.data.email || ''), approved, callerUid);
+  await fsPatchDoc(writes.licensePath, writes.licenseFields, idToken);
+  await fsPatchDoc(writes.userPath, writes.userFields, idToken);
+  await fsCreateDoc(writes.logCollection, writes.logFields, idToken);
+  const licenseTier = await getLicenseTier(targetUid, idToken);
+  return toAdminUserSummary(
+    { ...target.data, uid: targetUid, status: writes.userFields.status },
+    licenseTier,
+  );
+}
+
+export function toClientUser(data: UserProfile, licenseTier: 'free' | 'lifetime' = 'free', isAdmin = false) {
   // Server is the single source of truth for role/status/quota — the client
   // never sets these directly (firestore.rules freezes the privileged
   // fields on users/{uid}).
@@ -271,5 +496,7 @@ export function toClientUser(data: UserProfile, licenseTier: 'free' | 'lifetime'
     subscription: data.subscription,
     plan: data.plan,
     licenseTier,
+    isAdmin,
+    marketingOptIn: data.marketingOptIn === true,
   };
 }
