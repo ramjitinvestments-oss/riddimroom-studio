@@ -41,7 +41,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         photoURL: decoded.picture || null,
         provider: decoded.provider || 'password',
         role: 'user',
-        status: 'approved',
+        // Phase 2 (Plan v5): signups start pending; an admin toggles them
+        // on from the Admin screen (see api/admin/set-access.ts). Pending
+        // users still get a 200 profile below — the client renders the
+        // pending screen from it — but paid capabilities stay gated.
+        status: 'pending',
         createdAt: SERVER_TIMESTAMP,
         lastLogin: SERVER_TIMESTAMP,
         lastUpdated: SERVER_TIMESTAMP,
@@ -53,9 +57,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
         videoCount: 0,
         subscription: 'free',
         plan: 'free',
+        marketingOptIn: false,
       };
       await fsPatchDoc(`users/${uid}`, { ...newUser }, idToken);
-      res.status(200).json({ success: true, user: toClientUser(newUser, 'free') });
+      // Resolve the tier for THIS response too — hardcoding 'free' here
+      // (F1) made a brand-new account's first status response misreport
+      // free/maxFree 2 even for admins and Lifetime license holders,
+      // while every later call (the branch below) reported correctly.
+      const licenseTier = await getLicenseTier(uid, idToken);
+      res.status(200).json({ success: true, user: toClientUser(newUser, licenseTier, isAdmin) });
       return;
     }
 
@@ -74,13 +84,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     }
     await fsPatchDoc(`users/${uid}`, updates, idToken);
 
-    if (data.status === 'suspended' || data.status === 'denied') {
+    // Hard guard: an admin is NEVER gated by their users/{uid} status —
+    // the owner must not be able to lock himself out, whatever state a
+    // toggle or console edit left that document in.
+    if (!isAdmin && (data.status === 'suspended' || data.status === 'denied')) {
       res.status(403).json({ success: false, error: 'Account access restricted' });
       return;
     }
 
     const licenseTier = await getLicenseTier(uid, idToken);
-    res.status(200).json({ success: true, user: toClientUser({ ...data, dailyCount }, licenseTier) });
+    res.status(200).json({ success: true, user: toClientUser({ ...data, dailyCount }, licenseTier, isAdmin) });
   } catch (err: any) {
     console.error('[user/status] Firestore operation failed:', err?.message || err);
     res.status(500).json({ success: false, error: 'Failed to load user profile' });
