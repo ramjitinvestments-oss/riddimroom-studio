@@ -15,9 +15,11 @@ import { useLicenseTier } from '../hooks/useLicenseTier';
 
 interface DashboardProps {
   onOpenProject: (projectId: string) => void;
+  /** Phase 2 (Plan v5): opens the Admin screen; the button renders only for admins. */
+  onOpenAdmin?: () => void;
 }
 
-export function Dashboard({ onOpenProject }: DashboardProps) {
+export function Dashboard({ onOpenProject, onOpenAdmin }: DashboardProps) {
   const { currentUser, userProfile, signOut } = useAuth();
   const { tier } = useLicenseTier();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -108,10 +110,18 @@ export function Dashboard({ onOpenProject }: DashboardProps) {
       <header className="flex items-center justify-between px-6 py-4 border-b border-white/10">
         <BrandLogo size="sm" />
         <div className="flex items-center gap-3 text-xs text-white/50">
-          <span>{userProfile?.email || currentUser?.email}</span>
-          <span className="text-emerald-400">
+          <span className="hidden sm:inline">{userProfile?.email || currentUser?.email}</span>
+          <span className="text-gold/90">
             {userProfile ? `${userProfile.dailyCount}/${userProfile.maxFree} today` : '…'}
           </span>
+          {userProfile?.isAdmin && onOpenAdmin && (
+            <button
+              onClick={onOpenAdmin}
+              className="px-3 py-1.5 bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg font-bold uppercase"
+            >
+              Admin
+            </button>
+          )}
           <button onClick={signOut} className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg font-bold uppercase">
             Sign out
           </button>
