@@ -13,6 +13,7 @@
     "prebuild": "node scripts/decode-logo.mjs"
   },
   "dependencies": {
+    "@ffmpeg/core": "0.12.10",
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@google/genai": "^2.17.1",
@@ -23,6 +24,7 @@
     "firebase": "^12.15.0",
     "firebase-admin": "^14.1.0",
     "lucide-react": "^0.546.0",
+    "mediabunny": "1.62.1",
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1"
