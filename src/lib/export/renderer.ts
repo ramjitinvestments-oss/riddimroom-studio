@@ -37,10 +37,29 @@ export interface RenderOptions {
   output?: ResolvedExportSettings;
 }
 
+/**
+ * Optional facts about how a render was produced, when the renderer
+ * knows them (Pre-live build 2). Purely additive: renderers that have
+ * nothing to report omit it, and callers must not require it.
+ */
+export interface RenderResultMetadata {
+  /** Engine that produced the file ('ffmpeg' pipeline stage vs 'mediabunny'). */
+  engine?: string;
+  /** Container-level video codec family actually encoded (e.g. 'avc'). */
+  videoCodec?: string;
+  /** Full WebCodecs codec string the encoder negotiated (e.g. 'avc1.640028'). */
+  videoCodecString?: string;
+  /** Audio codec actually encoded (e.g. 'aac', 'opus'), or null when the output has no audio track. */
+  audioCodec?: string | null;
+  /** Full WebCodecs codec string for the audio encoder (e.g. 'mp4a.40.2', 'opus'). */
+  audioCodecString?: string;
+}
+
 export interface RenderResult {
   blob: Blob;
   mimeType: string;
   durationSeconds: number;
+  metadata?: RenderResultMetadata;
 }
 
 export interface Renderer {
