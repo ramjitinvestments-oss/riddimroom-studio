@@ -10,6 +10,7 @@ import {
   type ApiResponse,
 } from './_lib.js';
 import { getTranscriptionProvider, TranscriptionConfigurationError } from '../src/lib/transcription/index.js';
+import { applyBrandGlossary } from '../src/lib/transcription/brandGlossary.js';
 import type { UserProfile } from '../src/types/user.js';
 
 // Transcription can wait on Gemini file processing; give the function the
@@ -55,6 +56,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
     const data = userDoc.data as unknown as UserProfile;
+    // Phase 2 (Plan v5) access gate: transcription is a paid capability,
+    // so it requires an approved account. Admins are never gated by
+    // status (the owner can't lock himself out). Pending is the normal
+    // pre-approval state for every new signup — say so plainly.
+    const callerIsAdmin = (await fsGetDoc(`admins/${uid}`, idToken)).exists;
+    if (!callerIsAdmin && data.status !== 'approved') {
+      if (data.status === 'pending') {
+        res.status(403).json({
+          success: false,
+          error: "Your access isn't switched on yet — transcription is available once the owner approves your account.",
+        });
+      } else {
+        res.status(403).json({ success: false, error: 'Account access restricted' });
+      }
+      return;
+    }
     const dailyCount = data.lastTranscribeDate === todayStr ? data.dailyCount || 0 : 0;
     // v1: quota by license tier (free 2/day, lifetime 10/day).
     const licenseTier = await getLicenseTier(uid, idToken);
@@ -88,12 +105,35 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
             });
             return;
           }
-          throw fallbackErr;
+          // Attribute honestly: the primary provider's failure leads and
+          // the fallback's is labeled as the fallback's — never surface
+          // the fallback's error alone as if it were the whole story.
+          throw new Error(`Primary transcription provider failed: ${err?.message || err} Fallback (whisper) also failed: ${fallbackErr?.message || fallbackErr}`);
         }
       } else {
         throw err;
       }
     }
+
+    // Brand-glossary correction layer — THE single convergence point: both
+    // the Gemini chain and the Whisper fallback above assign `result`, so
+    // every provider path passes through here exactly once, on fresh
+    // provider output only, before the response is returned. The client
+    // stores these words as the canonical captions (exports inherit the
+    // fixes); user-edited captions never flow back through this handler, so
+    // the layer cannot touch them. Spec:
+    // rea-product-line/phase4l/captions/CORRECTION-SPEC.md (§a/§c/§e).
+    const glossary = applyBrandGlossary(result.words);
+    if (glossary.corrections.length > 0) {
+      console.info('[transcribe] brand glossary corrections applied:', JSON.stringify(glossary.corrections));
+    }
+    if (glossary.shadowHits.length > 0) {
+      // Shadow entries (G3) are log-only: they record what WOULD change
+      // and change nothing — visible here for QC, never applied, never
+      // sent to the client as corrections.
+      console.warn('[transcribe] brand glossary SHADOW hits (log-only, NOT applied):', JSON.stringify(glossary.shadowHits));
+    }
+    result = { ...result, words: glossary.words };
 
     const newDailyCount = dailyCount + 1;
     await fsPatchDoc(
@@ -107,7 +147,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       idToken,
     );
 
-    res.status(200).json({ success: true, words: result.words, provider: result.provider, dailyCount: newDailyCount, maxFree: maxDaily });
+    res.status(200).json({ success: true, words: result.words, provider: result.provider, corrections: glossary.corrections, dailyCount: newDailyCount, maxFree: maxDaily });
   } catch (err: any) {
     console.error('[transcribe] failed:', err?.message || err);
     res.status(500).json({ success: false, error: err?.message || 'Transcription failed.' });
