@@ -14,6 +14,18 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    // Phase 2 (Plan v5): an admin is a signed-in user with a document in
+    // the console-managed admins/ trust-root. This is what lets the owner
+    // run the toggle system (read the signup list, write licenses and
+    // other users' status, write the approvals log) from the in-app Admin
+    // screen, with the API acting as the owner — no one else gains any
+    // access from these branches, and a user can never create their own
+    // admins doc (admins writes stay console/backend only, below).
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
     // Unified user schema (merges caption's quota fields + EventCam's
     // status/usage fields — see src/types/user.ts and
     // riddimroom-studio-phase0-plan.md section 4.2).
@@ -31,36 +43,62 @@ service cloud.firestore {
     // own doc (the daily limit is a soft gate in v1 — see api/_lib.ts).
     // The Express backend (server.ts, Admin SDK) bypasses rules entirely
     // and is unaffected.
+    //
+    // Phase 2 (Plan v5) adds the ONE exception to "own document only":
+    // an admin (see isAdmin above) may read every users doc (the Admin
+    // screen's signup list) and update them — the /api/admin/set-access
+    // toggle flips status between 'pending' and 'approved'. uid stays
+    // immutable on the admin branch too. New signups now start 'pending'
+    // at create (the approval queue exists now; in v1 they started
+    // 'approved' because there was no way to approve anyone).
     match /users/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create: if isOwner(userId)
         && request.resource.data.uid == userId
         && request.resource.data.role == 'user'
-        && request.resource.data.status == 'approved'
+        && request.resource.data.status == 'pending'
         && request.resource.data.subscription == 'free'
         && request.resource.data.plan == 'free';
-      allow update: if isOwner(userId)
-        && request.resource.data.uid == resource.data.uid
-        && request.resource.data.role == resource.data.role
-        && request.resource.data.status == resource.data.status
-        && request.resource.data.subscription == resource.data.subscription
-        && request.resource.data.plan == resource.data.plan;
+      allow update: if (isOwner(userId)
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.subscription == resource.data.subscription
+          && request.resource.data.plan == resource.data.plan)
+        || (isAdmin()
+          && request.resource.data.uid == resource.data.uid);
       allow delete: if false;
     }
 
     // Admin trust-root — console/backend managed only (ported from
     // EventCam's /admins/{uid} model). v1 hardening: owner-only read
-    // (was: any signed-in user could read any admin doc).
+    // (was: any signed-in user could read any admin doc). Phase 2: an
+    // admin may also read the collection (the toggle API lists it to
+    // resolve owner grants); writes remain console/backend only, always —
+    // nobody can mint an admin from a client or the API.
     match /admins/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow write: if false;
     }
 
-    // v1 licensing — written ONLY by the Stripe webhook handler in
-    // server.ts (Admin SDK bypasses rules). Clients read only their own.
+    // v1 licensing — originally written ONLY by the Stripe webhook
+    // handler in server.ts (Admin SDK bypasses rules). Phase 2 (Plan v5)
+    // adds the manual equivalent: an admin may write licenses (the
+    // /api/admin/set-access toggle writes tier 'lifetime' on approve —
+    // the exact record the webhook will write later when Stripe lands).
+    // Clients read only their own license, or any license as an admin.
     match /licenses/{userId} {
-      allow read: if isOwner(userId);
-      allow write: if false;
+      allow read: if isOwner(userId) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Phase 2 (Plan v5) approvals audit log — one document per toggle
+    // (uid, email, action approved|revoked, by, at), created and read by
+    // admins only (via the API acting as the admin). Append-only in
+    // practice: no update/delete path exists for anyone here.
+    match /approvals/{approvalId} {
+      allow read, create: if isAdmin();
+      allow update, delete: if false;
     }
 
     // v1 global config (kill-switch) — read by any signed-in user so the
