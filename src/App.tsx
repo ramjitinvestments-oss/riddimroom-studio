@@ -3,6 +3,8 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './components/LoginPage';
 import { Dashboard } from './components/Dashboard';
+import { PendingScreen } from './components/PendingScreen';
+import { AdminPanel } from './components/AdminPanel';
 import { EditorShell } from './components/Editor/EditorShell';
 import { useRouter } from './lib/router';
 
@@ -17,7 +19,7 @@ import { useRouter } from './lib/router';
  */
 function AppShell() {
   const { currentPath, navigateTo } = useRouter();
-  const { currentUser, isAuthLoading, isAccountDisabled } = useAuth();
+  const { currentUser, userProfile, isAuthLoading, isAccountDisabled } = useAuth();
 
   // Redirect unauthenticated users to /login; redirect authenticated users
   // away from /login — same behavior as riddimroom-caption's two
@@ -49,6 +51,29 @@ function AppShell() {
     return <LoginPage />;
   }
 
+  // Phase 2 (Plan v5) toggle gate: a signed-in user whose profile is
+  // still 'pending' gets the waiting screen instead of the product, on
+  // every route. Admins are exempt — the owner is never gated by status
+  // (and his own profile may predate the status field entirely).
+  if (currentUser && userProfile && userProfile.status === 'pending' && !userProfile.isAdmin) {
+    return <PendingScreen />;
+  }
+
+  if (currentPath === '/admin') {
+    return (
+      <ProtectedRoute redirectTo={navigateTo}>
+        {userProfile?.isAdmin ? (
+          <AdminPanel onBack={() => navigateTo('/')} />
+        ) : (
+          <Dashboard
+            onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
+            onOpenAdmin={() => navigateTo('/admin')}
+          />
+        )}
+      </ProtectedRoute>
+    );
+  }
+
   const editorMatch = currentPath.match(/^\/editor\/([^/]+)$/);
 
   return (
@@ -56,7 +81,10 @@ function AppShell() {
       {editorMatch ? (
         <EditorShell projectId={decodeURIComponent(editorMatch[1])} />
       ) : (
-        <Dashboard onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)} />
+        <Dashboard
+          onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
+          onOpenAdmin={() => navigateTo('/admin')}
+        />
       )}
     </ProtectedRoute>
   );
