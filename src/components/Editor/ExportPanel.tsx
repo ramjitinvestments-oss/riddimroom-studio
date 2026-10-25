@@ -16,6 +16,45 @@ import {
 } from '../../lib/export/quality';
 import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
+import { buildProducerReport, type LoudnessReading } from '../../lib/export/producerReport';
+import { buildSocialPosts, type SocialPlatform } from '../../lib/export/socialPosts';
+import { AlertTriangle, Check, Info, X } from 'lucide-react';
+
+/**
+ * Measures the finished file's audio level (best-effort): decode the
+ * MP4's audio and compute RMS + peak in dBFS for the producer's report.
+ * Returns null when the browser can't decode it — the report then
+ * simply omits the measurement rather than guessing.
+ */
+async function measureLoudness(blob: Blob): Promise<LoudnessReading | null> {
+  try {
+    const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return null;
+    const ctx = new Ctor();
+    try {
+      const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+      let peak = 0;
+      let sumSq = 0;
+      let count = 0;
+      for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+        const data = buf.getChannelData(ch);
+        for (let i = 0; i < data.length; i += 16) {
+          const v = data[i];
+          const a = Math.abs(v);
+          if (a > peak) peak = a;
+          sumSq += v * v;
+          count++;
+        }
+      }
+      if (count === 0 || peak === 0) return null;
+      return { rmsDbfs: 20 * Math.log10(Math.sqrt(sumSq / count)), peakDbfs: 20 * Math.log10(peak) };
+    } finally {
+      void ctx.close().catch(() => undefined);
+    }
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Phase 1 Step 12 (Export engine), extended for genuine MP4 output. Drives
@@ -49,6 +88,9 @@ export function ExportPanel() {
   // phone's share sheet (WhatsApp / TikTok / gallery) without a re-export.
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
   const [captionCopied, setCaptionCopied] = useState(false);
+  const [loudness, setLoudness] = useState<LoudnessReading | null>(null);
+  const [postPlatform, setPostPlatform] = useState<SocialPlatform>('tiktok');
+  const [postCopied, setPostCopied] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const busy = status === 'rendering' || status === 'converting';
   // Effective tier (server profile when the API answered; admin-grant
@@ -81,6 +123,8 @@ export function ExportPanel() {
     setDownloadUrl(null);
     setLastBlob(null);
     setCaptionCopied(false);
+    setLoudness(null);
+    setPostCopied(false);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -131,6 +175,7 @@ export function ExportPanel() {
       setDownloadUrl(URL.createObjectURL(mp4Blob));
       setLastBlob(mp4Blob);
       setStatus('done');
+      void measureLoudness(mp4Blob).then(setLoudness);
       if (user) recordExport(user.uid);
     } catch (err: any) {
       if (err?.name === 'RenderAbortedError') {
@@ -186,6 +231,27 @@ export function ExportPanel() {
       setCaptionCopied(true);
     } catch {
       setCaptionCopied(false);
+    }
+  };
+
+  const producerReport = status === 'done' && project ? buildProducerReport(project, loudness) : null;
+  const socialPosts = status === 'done' && project ? buildSocialPosts(project) : [];
+  const activePost = socialPosts.find((post) => post.platform === postPlatform) ?? socialPosts[0];
+  const handleCopyPost = async () => {
+    if (!activePost) return;
+    try {
+      await navigator.clipboard.writeText(activePost.text);
+      setPostCopied(true);
+    } catch {
+      setPostCopied(false);
+    }
+  };
+  const handleSharePost = async () => {
+    if (!activePost) return;
+    try {
+      await navigator.share({ text: activePost.text });
+    } catch {
+      // user closed the sheet
     }
   };
 
@@ -319,6 +385,92 @@ export function ExportPanel() {
               This browser can't share files directly — save the MP4, then post it from your gallery or files.
             </p>
           )}
+        </div>
+      )}
+
+      {status === 'done' && producerReport && (
+        <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">Producer's report</span>
+            <span className="text-[11px] font-black text-gold">
+              {producerReport.score}/100 · Grade {producerReport.grade}
+            </span>
+          </div>
+          <p className="text-xs text-white/80 font-bold">{producerReport.headline}</p>
+          <div className="flex flex-col gap-1.5">
+            {producerReport.checks.map((check) => (
+              <div key={check.id} className="flex gap-2 items-start">
+                <span className="mt-0.5 shrink-0">
+                  {check.status === 'pass' ? (
+                    <Check size={13} strokeWidth={3} className="text-emerald-400" />
+                  ) : check.status === 'warn' ? (
+                    <AlertTriangle size={13} className="text-amber-300" />
+                  ) : check.status === 'fail' ? (
+                    <X size={13} strokeWidth={3} className="text-red-400" />
+                  ) : (
+                    <Info size={13} className="text-white/40" />
+                  )}
+                </span>
+                <p className="text-[11px] leading-snug text-white/60">
+                  <span className="font-bold text-white/85">{check.label}.</span> {check.detail}
+                </p>
+              </div>
+            ))}
+          </div>
+          {producerReport.fixes.length > 0 && (
+            <div className="border-t border-white/10 pt-2 flex flex-col gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Fix first</span>
+              {producerReport.fixes.map((fix, i) => (
+                <p key={i} className="text-[11px] text-gold/90 leading-snug">
+                  {i + 1}. {fix}
+                </p>
+              ))}
+            </div>
+          )}
+          <p className="text-[10px] text-white/30 leading-snug">
+            Measured from your project and the finished file — hook timing, captions, beat, closing ask, format.
+            Posting window tip: Caribbean audiences scroll hardest in the evening and on weekends.
+          </p>
+        </div>
+      )}
+
+      {status === 'done' && activePost && (
+        <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">
+            Your posts — ready to paste, 5 tags each
+          </span>
+          <select
+            aria-label="Post platform"
+            value={activePost.platform}
+            onChange={(e) => {
+              setPostPlatform(e.target.value as SocialPlatform);
+              setPostCopied(false);
+            }}
+            className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+          >
+            {socialPosts.map((post) => (
+              <option key={post.platform} value={post.platform}>
+                {post.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-white/80 whitespace-pre-wrap leading-relaxed bg-black/30 rounded-lg p-2.5">{activePost.text}</p>
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => void handleCopyPost()}
+              className="flex-1 min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-black uppercase tracking-wide"
+            >
+              {postCopied ? 'Copied ✓' : 'Copy post'}
+            </button>
+            {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
+              <button
+                onClick={() => void handleSharePost()}
+                className="flex-1 min-h-11 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-white text-xs font-bold"
+              >
+                Share text…
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
