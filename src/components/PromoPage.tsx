@@ -25,7 +25,8 @@ import {
   type VisionSuggestion,
 } from '../lib/promo/suggest';
 import { analyzeArtwork } from '../lib/promo/ocrEngine';
-import { classifyReadout, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
+import { classifyReadout, mergeReadoutFields, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
+import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../lib/timeline/utils';
@@ -139,6 +140,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const lastBitmapRef = useRef<ImageBitmap | null>(null);
   const inFlightRef = useRef(0);
   const readCacheRef = useRef<Map<string, ReadoutResult>>(new Map());
+  const lastReadoutRef = useRef<ReadoutResult | null>(null);
   const suggestKeyRef = useRef<string>('');
   const [ownTrack, setOwnTrack] = useState<File | null>(null);
   const [packTrackId, setPackTrackId] = useState<string | null>(null);
@@ -185,8 +187,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       cta: result.fields.cta ?? '',
       genre: result.genre,
     };
+    lastReadoutRef.current = result;
     setReadLines(result.lines);
-    setTexts((t) => mergeIntoUntouched(t, touchedRef.current, result.fields));
+    setTexts((t) => mergeReadoutFields(t, touchedRef.current, result));
     setAutoNote(
       result.headline
         ? 'Words read from your artwork itself — tap any line to make it yours.'
@@ -201,6 +204,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     suggestKeyRef.current = cacheKey;
     lastBitmapRef.current = bitmap;
     visionRef.current = null;
+    lastReadoutRef.current = null;
     setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bankSuggestion(ctx)));
     setAutoNote('Words suggested from your artwork type — tap any line to make it yours.');
 
@@ -446,6 +450,13 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           // Music is a layer, not a blocker — the promo still opens.
         }
       }
+
+      // R12 premium pass: the word-box camera tour (when the
+      // artwork's readout gave us word boxes) and the art-derived
+      // stage backdrop (when the recipe left a black void).
+      const readout = lastReadoutRef.current;
+      if (readout) project = applyCameraTour(project, readout);
+      project = applyStageBackdrop(project);
 
       setStatus('Saving…');
       await saveProject(project);

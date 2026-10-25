@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyReadout, type OcrLine } from './readout';
+import { classifyReadout, mergeReadoutFields, type OcrLine } from './readout';
 
 // Fixtures are the REAL lines the engine produced in the 2026-10-25
 // proof run on the owner's own uploads — not invented samples.
@@ -35,11 +35,43 @@ describe('readout classification on the owner proof fixtures', () => {
     expect(r.genre).toBe('soca');
   });
 
-  it('the realtor banner yields its printed CTA and genre despite noise', () => {
+  it('the realtor banner: its own phone number becomes the CTA (phone beats slogan)', () => {
     const r = classifyReadout(BANNER, { kind: 'flyer', fileName: 'banner.png' });
-    expect(r.fields.cta).toContain('TALK ABOUT YOUR NEXT MOVE');
+    expect(r.phone).toBe('727-623-8398');
+    expect(r.fields.cta).toBe('CALL 727-623-8398');
     expect(r.genre).toBe('realestate');
     expect(r.lines.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('PROVENANCE LOCK: party bank copy cannot survive a trades read', () => {
+    const cloud: OcrLine[] = [
+      { text: 'ELECTRICAL', confidence: 92, y: 0.3, box: { x: 0.2, y: 0.3, w: 0.6, h: 0.08 } },
+      { text: 'FLOORING', confidence: 88, y: 0.45, box: { x: 0.25, y: 0.45, w: 0.5, h: 0.07 } },
+      { text: 'PLUMBING', confidence: 85, y: 0.6, box: { x: 0.25, y: 0.6, w: 0.5, h: 0.07 } },
+      { text: 'CALL US', confidence: 90, y: 0.8 },
+      { text: '407-616-2569', confidence: 78, y: 0.86 },
+    ];
+    const r = classifyReadout(cloud, { kind: 'logo', fileName: 'ramjitinvestment.png' });
+    expect(r.genre).toBe('trades');
+    expect(r.fields.cta).toBe('CALL 407-616-2569');
+    expect(r.fields.sub).toContain('ELECTRICAL');
+    const bankFilled = { hook1: 'ONE NIGHT.', hook2: 'TWO SOUNDS.', sub: 'ONE NIGHT ONLY', cta: 'TICKETS: LINK IN BIO', font: undefined } as never;
+    const merged = mergeReadoutFields(bankFilled, new Set<string>(), r);
+    expect(merged.hook1).toBe('ELECTRICAL');
+    expect(merged.hook2).toBe('');
+    expect(merged.sub).not.toContain('ONE NIGHT');
+    expect(merged.cta).toBe('CALL 407-616-2569');
+    const serialized = JSON.stringify(merged);
+    expect(serialized).not.toContain('TWO SOUNDS');
+    expect(serialized).not.toContain('TICKETS');
+  });
+
+  it('merge keeps fields the user typed in, even under a headline read', () => {
+    const r = classifyReadout(POSTER, { kind: 'flyer', fileName: 'poster.png' });
+    const current = { hook1: 'MY OWN HOOK', hook2: '', sub: '', cta: '', font: undefined } as never;
+    const merged = mergeReadoutFields(current, new Set(['hook1']), r);
+    expect(merged.hook1).toBe('MY OWN HOOK');
+    expect(merged.hook2).toBe('TWO SOUNDS.');
   });
 
   it('the logo yields its tagline as headline and a bank CTA', () => {

@@ -172,14 +172,34 @@ export type MotionEffectType =
   | 'spotlight'
   | 'vignette'
   | 'flash'
-  | 'light-sweep';
+  | 'light-sweep'
+  | 'word-tour';
 
 /** Used only by the directional effects (ken-burns, parallax); ignored by the rest. */
 export type MotionDirection = 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out';
 
+/** One stop of a word-tour camera move (see `MotionSettings.tourStops`). */
+export interface MotionTourStop {
+  /** Position along the item's own duration, 0..1. */
+  t: number;
+  /** Camera offset as a fraction of canvas width (x) / height (y). */
+  x: number;
+  y: number;
+  /** Zoom multiplier at this stop. */
+  scale: number;
+}
+
 export interface MotionSettings {
   type: MotionEffectType;
   direction?: MotionDirection;
+  /**
+   * Word-tour stops (R12): a camera path baked from the artwork's own
+   * OCR word boxes — the view travels to the words that matter. Only
+   * meaningful when `type` is 'word-tour'; offsets are canvas
+   * fractions so the same project tours identically at any render
+   * size. Built by `lib/promo/camera.ts`; not a user-pickable effect.
+   */
+  tourStops?: MotionTourStop[];
   /**
    * 0.5-2, multiplies the effect's displacement/scale/overlay amount (same
    * range and meaning as `AnimationSettings.intensity`). Undefined behaves

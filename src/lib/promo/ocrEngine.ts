@@ -29,7 +29,7 @@ interface TesseractGlobal {
     oem: number,
     options: Record<string, unknown>,
   ) => Promise<{
-    recognize: (image: string) => Promise<{ data: { lines?: Array<{ text: string; confidence: number; bbox?: { y0: number } }> } }>;
+    recognize: (image: string) => Promise<{ data: { lines?: Array<{ text: string; confidence: number; bbox?: { x0: number; y0: number; x1: number; y1: number } }> } }>;
   }>;
 }
 
@@ -110,6 +110,14 @@ export async function analyzeArtwork(
       text,
       confidence: Math.round(line.confidence || 0),
       y: line.bbox ? line.bbox.y0 / canvas.height : 0,
+      box: line.bbox
+        ? {
+            x: line.bbox.x0 / canvas.width,
+            y: line.bbox.y0 / canvas.height,
+            w: (line.bbox.x1 - line.bbox.x0) / canvas.width,
+            h: (line.bbox.y1 - line.bbox.y0) / canvas.height,
+          }
+        : undefined,
     });
   }
   return lines;

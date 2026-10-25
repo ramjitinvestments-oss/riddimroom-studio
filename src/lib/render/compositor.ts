@@ -553,6 +553,40 @@ export function computeMotionAdjustment(
   const a: AnimatedAdjustment = { ...IDENTITY_ADJUSTMENT };
 
   switch (motion.type) {
+    case 'word-tour': {
+      // R12 word-box camera: interpolate offset + zoom between the
+      // baked stops with a smoothstep inside each segment, so the
+      // camera glides and settles on each word instead of cutting.
+      const stops = (motion.tourStops || []).filter((st) => Number.isFinite(st.t)).sort((m, n) => m.t - n.t);
+      if (stops.length > 0) {
+        const first = stops[0];
+        const last = stops[stops.length - 1];
+        if (p <= first.t) {
+          a.offsetXPx += first.x * canvasWidth;
+          a.offsetYPx += first.y * canvasHeight;
+          a.scaleMul *= first.scale;
+        } else if (p >= last.t) {
+          a.offsetXPx += last.x * canvasWidth;
+          a.offsetYPx += last.y * canvasHeight;
+          a.scaleMul *= last.scale;
+        } else {
+          for (let i = 0; i < stops.length - 1; i++) {
+            const s0 = stops[i];
+            const s1 = stops[i + 1];
+            if (p >= s0.t && p <= s1.t) {
+              const span = Math.max(0.0001, s1.t - s0.t);
+              const u0 = (p - s0.t) / span;
+              const u = u0 * u0 * (3 - 2 * u0);
+              a.offsetXPx += (s0.x + (s1.x - s0.x) * u) * canvasWidth;
+              a.offsetYPx += (s0.y + (s1.y - s0.y) * u) * canvasHeight;
+              a.scaleMul *= s0.scale + (s1.scale - s0.scale) * u;
+              break;
+            }
+          }
+        }
+      }
+      break;
+    }
     case 'ken-burns': {
       const { dx, dy } = motionDirectionVector(motion.direction, 'x');
       a.offsetXPx += -(p - 0.5) * canvasWidth * 0.12 * k * dx;
