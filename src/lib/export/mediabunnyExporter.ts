@@ -506,6 +506,30 @@ export interface EncodeFramesToMp4Options {
   negotiated?: NegotiatedExportCodecs;
   onProgress?: (progress: MediabunnyEncodeProgress) => void;
   signal?: AbortSignal;
+  /** Stall watchdog per encode step; defaults to FRAME_STALL_TIMEOUT_MS. */
+  frameStallTimeoutMs?: number;
+}
+
+/**
+ * Stall watchdog for the encode loop (the canvas2d/ffmpeg path has one;
+ * this path did not): if the encoder consumes no frame for this long,
+ * the export is wedged — historically how "High" exports presented,
+ * frozen at a percentage forever. 90s is far beyond any legitimate
+ * single-frame encode, even 1080×1920 on a low-end phone.
+ */
+export const FRAME_STALL_TIMEOUT_MS = 90_000;
+
+/** Races `work` against a stall timeout; rejects with MediabunnyExportError naming the stall. */
+export async function withStallTimeout<T>(work: Promise<T>, timeoutMs: number, stalledMessage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new MediabunnyExportError(stalledMessage)), timeoutMs);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
 }
 
 export interface EncodeFramesToMp4Result {
@@ -587,8 +611,14 @@ export async function encodeFramesToMp4(
       await options.drawFrame(frame, timeSeconds);
       // Awaiting add() is the backpressure contract: the loop advances
       // only as fast as the encoder actually consumes frames, so the
-      // progress ratio below is frames ENCODED, not frames drawn.
-      await videoSource.add(timeSeconds, frameDuration);
+      // progress ratio below is frames ENCODED, not frames drawn. The
+      // stall watchdog bounds that wait: a wedged encoder fails the
+      // export honestly instead of freezing the progress bar forever.
+      await withStallTimeout(
+        videoSource.add(timeSeconds, frameDuration),
+        options.frameStallTimeoutMs ?? FRAME_STALL_TIMEOUT_MS,
+        `The video encoder stalled — no frame encoded for ${Math.round((options.frameStallTimeoutMs ?? FRAME_STALL_TIMEOUT_MS) / 1000)} seconds — and the export was stopped. Please try again.`,
+      );
       framesEncoded = frame + 1;
       options.onProgress?.({
         framesEncoded,
@@ -599,7 +629,11 @@ export async function encodeFramesToMp4(
     if (audioSource && audioBuffer) {
       await audioSource.add(audioBuffer);
     }
-    await output.finalize();
+    await withStallTimeout(
+      output.finalize(),
+      (options.frameStallTimeoutMs ?? FRAME_STALL_TIMEOUT_MS) * 2,
+      'Finishing the MP4 file stalled and the export was stopped. Please try again.',
+    );
   } catch (err) {
     if (err instanceof RenderAbortedError || err instanceof MediabunnyCapabilityError) throw err;
     // Best-effort release of the encoder/muxer on any mid-encode failure.

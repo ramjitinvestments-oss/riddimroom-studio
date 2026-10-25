@@ -13,6 +13,7 @@ import {
   buildRawVideoProbeConfig,
   buildRawAudioProbeConfig,
   encodeFramesToMp4,
+  withStallTimeout,
   MediabunnyCapabilityError,
   type MediabunnyCapabilityProbe,
   type MediabunnyCapabilitySettings,
@@ -489,5 +490,18 @@ describe('library-load failure (the round-3 phone evidence)', () => {
       vi.doUnmock('mediabunny');
       vi.resetModules();
     }
+  });
+});
+
+describe('withStallTimeout (encode stall watchdog)', () => {
+  it('passes through a fast result', async () => {
+    await expect(withStallTimeout(Promise.resolve(42), 1000, 'stalled')).resolves.toBe(42);
+  });
+  it('rejects a wedged promise with an honest stall error', async () => {
+    const never = new Promise<number>(() => undefined);
+    await expect(withStallTimeout(never, 20, 'encoder stalled')).rejects.toThrow('encoder stalled');
+  });
+  it('propagates the original rejection when work fails first', async () => {
+    await expect(withStallTimeout(Promise.reject(new Error('boom')), 1000, 'stalled')).rejects.toThrow('boom');
   });
 });

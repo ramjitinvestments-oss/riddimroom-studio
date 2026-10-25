@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { createEmptyProject, createTrack, addTrack } from './utils';
-import { appendMediaToTimeline, addCaptionItems, addManualCaptionCue } from './insert';
+import { createEmptyProject, createTrack, addTrack, getItemsAtTime, removeItem } from './utils';
+import { appendMediaToTimeline, addCaptionItems, addManualCaptionCue, addTextItem, addWatermarkItem } from './insert';
+import { createDefaultProject } from '../projects/persistence';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
 import type { MediaAsset } from '../../types/timeline';
 
@@ -202,5 +203,40 @@ describe('addManualCaptionCue — hand-typed caption creation (five-star audit f
     expect(item.startTime).toBe(0);
     expect(item.endTime).toBeCloseTo(0.5, 5);
     expect(item.words[0].end).toBeCloseTo(0.5, 5);
+  });
+});
+
+describe('normalizeVisualZOrder (main-clip swap keeps overlays visible)', () => {
+  const videoAsset = (id: string): MediaAsset => ({
+    id, kind: 'video', storageUrl: `https://x.test/${id}.mp4`, fileName: `${id}.mp4`,
+    sizeBytes: 1, mimeType: 'video/mp4', durationSeconds: 6, createdAt: 0,
+  });
+  const imageAsset = (id: string): MediaAsset => ({
+    id, kind: 'image', storageUrl: `https://x.test/${id}.png`, fileName: `${id}.png`,
+    sizeBytes: 1, mimeType: 'image/png', width: 400, height: 200, createdAt: 0,
+  });
+
+  it('re-adding a main clip after a swap layers it UNDER existing logo + text', () => {
+    let p = createDefaultProject('u1');
+    p = appendMediaToTimeline(p, videoAsset('mainA'));
+    p = addWatermarkItem(p, { asset: imageAsset('logo'), atTime: 0, durationSeconds: 6 });
+    p = addTextItem(p, { text: 'HELLO', atTime: 0, durationSeconds: 6 });
+    const mainA = p.items.find((i) => i.type === 'video')!;
+    // the swap: remove the old main clip, append its replacement
+    p = removeItem(p, mainA.id);
+    p = appendMediaToTimeline(p, videoAsset('mainB'));
+    const at = getItemsAtTime(p, 1);
+    const order = at.map((i) => i.type);
+    expect(order).toEqual(['video', 'image', 'text']);
+    const mainB = p.items.find((i) => i.type === 'video')!;
+    expect(mainB.zIndex).toBeLessThan(p.items.find((i) => i.type === 'image')!.zIndex);
+  });
+
+  it('keeps sequential main clips in append order among themselves', () => {
+    let p = createDefaultProject('u1');
+    p = appendMediaToTimeline(p, videoAsset('v1'));
+    p = appendMediaToTimeline(p, videoAsset('v2'));
+    const vids = p.items.filter((i) => i.type === 'video').sort((a, b) => a.zIndex - b.zIndex);
+    expect(vids.map((v) => v.mediaAssetId)).toEqual(['v1', 'v2']);
   });
 });

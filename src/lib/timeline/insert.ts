@@ -19,11 +19,12 @@ import type {
   MediaAsset,
   Project,
   TextTimelineItem,
+  TimelineItem,
   Track,
   TrackType,
   VideoTimelineItem,
 } from '../../types/timeline';
-import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracksByType } from './utils';
+import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracksByType, updateItem } from './utils';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
 
 const DEFAULT_IMAGE_DURATION_SECONDS = 5;
@@ -150,7 +151,7 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
       volume: 1,
       muted: false,
     };
-    return addItem(next, item);
+    return normalizeVisualZOrder(addItem(next, item));
   }
 
   if (asset.kind === 'image') {
@@ -172,7 +173,7 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
       rotation: 0,
       opacity: 1,
     };
-    return addItem(next, item);
+    return normalizeVisualZOrder(addItem(next, item));
   }
 
   // audio
@@ -197,6 +198,47 @@ export function appendMediaToTimeline(project: Project, asset: MediaAsset, optio
     fade: { fadeInDuration: 0, fadeOutDuration: 0 },
   };
   return addItem(next, item);
+}
+
+/**
+ * Layer classes for the stacking contract the compositor assumes but
+ * insertion order used to violate: main content (0) < PiP overlays (1) <
+ * graphic overlays — watermarks, logos, stickers (2) < text (3) <
+ * captions (4). Every insert used to take `max zIndex + 1`, so deleting
+ * the main clip and re-adding it put the new main clip ON TOP of the
+ * logo and text overlays — and since the compositor draws strictly by
+ * zIndex, the opaque full-frame video silently buried them in preview
+ * and export (the 2026-10-23 "swap the main clip, lose the overlays"
+ * defect). After a main-content append, visual items are re-layered by
+ * class (stable within a class by their previous zIndex), which also
+ * self-heals projects already carrying the bad order. The user's own
+ * bring-forward/send-backward adjustments still work afterwards — this
+ * runs only at append time.
+ */
+function visualClassRank(item: TimelineItem): number {
+  switch (item.type) {
+    case 'video':
+      return item.pip?.isPip ? 1 : 0;
+    case 'image':
+      return item.role === 'photo' || item.role === 'graphic' ? 0 : 2;
+    case 'text':
+      return 3;
+    case 'caption':
+      return 4;
+    default:
+      return -1; // audio — not visual, left alone
+  }
+}
+
+export function normalizeVisualZOrder(project: Project): Project {
+  const visual = project.items
+    .filter((i) => visualClassRank(i) >= 0)
+    .sort((a, b) => visualClassRank(a) - visualClassRank(b) || a.zIndex - b.zIndex || a.startTime - b.startTime);
+  let next = project;
+  visual.forEach((item, idx) => {
+    if (item.zIndex !== idx) next = updateItem(next, item.id, { zIndex: idx });
+  });
+  return next;
 }
 
 export interface AddTextOptions {
