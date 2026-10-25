@@ -71,3 +71,44 @@ describe('vision suggestion sanitizing', () => {
     expect(sanitizePromoSuggestion(null).hook1).toBe('');
   });
 });
+
+describe('vision read outcome mapping', () => {
+  it('maps endpoint codes to UI outcomes and retries nothing blindly', async () => {
+    const { requestVisionRead } = await import('./suggest');
+    const fake = (status: number, body: unknown, json = true) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': json ? 'application/json' : 'text/html' },
+      });
+    const fetcher =
+      (res: Response) =>
+      async () =>
+        res;
+    expect((await requestVisionRead('AA', 'tok', fetcher(fake(503, { success: false, code: 'not_configured' })))).outcome).toBe('not-configured');
+    expect((await requestVisionRead('AA', 'tok', fetcher(fake(503, { success: false, code: 'busy' })))).outcome).toBe('busy');
+    expect((await requestVisionRead('AA', 'tok', fetcher(fake(502, { success: false, code: 'failed' })))).outcome).toBe('failed');
+    expect((await requestVisionRead('AA', 'tok', fetcher(fake(200, null, false)))).outcome).toBe('failed');
+    const ok = await requestVisionRead(
+      'AA',
+      'tok',
+      fetcher(fake(200, { success: true, suggestion: { hook1: 'BIG', hook2: '', sub: '', cta: 'GO', genre: 'soca' } })),
+    );
+    expect(ok.outcome).toBe('ok');
+    expect(ok.suggestion?.hook1).toBe('BIG');
+  });
+});
+
+describe('real music pack integrity', () => {
+  it('every skin maps to a verified, credited, fetchable track', async () => {
+    const { PROMO_PACK_TRACKS, creditForFileName, packTrackForSkin } = await import('../media/tracks');
+    for (const track of Object.values(PROMO_PACK_TRACKS)) {
+      expect(track.url).toMatch(/^https:\/\/upload\.wikimedia\.org\//);
+      expect(track.license).toContain('CC BY');
+      expect(track.credit).toContain(track.artist);
+      expect(creditForFileName(track.fileName)).toBe(track.credit);
+    }
+    expect(packTrackForSkin('dancehall-raw').title).toBe('Tea Roots');
+    expect(packTrackForSkin('soca-shine').title).toBe('Beach Party');
+    expect(creditForFileName('some-user-upload.mp3')).toBeNull();
+  });
+});

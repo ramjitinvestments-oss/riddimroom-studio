@@ -22,6 +22,16 @@ export class PromoVisionConfigurationError extends Error {
   }
 }
 
+/** The provider is up but busy/quota-limited — worth one retry. */
+export class PromoVisionBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PromoVisionBusyError';
+  }
+}
+
+const BUSY_PATTERN = /503|UNAVAILABLE|RESOURCE_EXHAUSTED|quota|rate limit|overloaded/i;
+
 export interface PromoImageSuggestion {
   hook1: string;
   hook2: string;
@@ -85,6 +95,7 @@ export async function analyzePromoImage(input: {
   }
   const ai = new GoogleGenAI({ apiKey });
   const failures: string[] = [];
+  let sawBusy = false;
   for (const model of MODELS) {
     try {
       const response = await ai.models.generateContent({
@@ -104,10 +115,14 @@ export async function analyzePromoImage(input: {
     } catch (err: any) {
       const msg = String(err?.message || err);
       failures.push(`${model}: ${msg}`);
+      if (BUSY_PATTERN.test(msg)) sawBusy = true;
       // A model this key cannot use → try the next candidate. Anything
       // else (quota, bad image) is real — surface it after the loop.
       if (!/404|NOT_FOUND|no longer available|not found/i.test(msg)) break;
     }
+  }
+  if (sawBusy) {
+    throw new PromoVisionBusyError(`The artwork reader is busy right now (${failures.join(' | ')})`);
   }
   throw new Error(`Artwork analysis failed (${failures.join(' | ')})`);
 }

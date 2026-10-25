@@ -1,5 +1,5 @@
 import { verifyRequest, fsGetDoc, type ApiRequest, type ApiResponse } from './_lib.js';
-import { analyzePromoImage, PromoVisionConfigurationError } from '../src/lib/promo/vision.js';
+import { analyzePromoImage, PromoVisionBusyError, PromoVisionConfigurationError } from '../src/lib/promo/vision.js';
 
 // Artwork analysis for Viral Promo auto-captions. Mirrors
 // api/transcribe.ts's auth + access gate (approved accounts and admins
@@ -62,12 +62,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   } catch (err: any) {
     if (err instanceof PromoVisionConfigurationError) {
       // Not a failure of the request — the deployment simply has no
-      // Gemini key yet. 503 + a plain message; the client falls back
-      // to its built-in copy bank and the user is never blocked.
-      res.status(503).json({ success: false, error: err.message });
+      // Gemini key yet. The client falls back to its built-in copy
+      // bank, says so in plain words, and the user is never blocked.
+      res.status(503).json({ success: false, code: 'not_configured', error: err.message });
+      return;
+    }
+    if (err instanceof PromoVisionBusyError) {
+      res.status(503).json({ success: false, code: 'busy', error: 'The artwork reader is busy — try the read again in a moment.' });
       return;
     }
     console.error('[promo-analyze] failed:', err?.message || err);
-    res.status(502).json({ success: false, error: 'Artwork analysis failed — built-in suggestions were used instead.' });
+    res.status(502).json({ success: false, code: 'failed', error: 'Artwork analysis failed — built-in suggestions were used instead.' });
   }
 }

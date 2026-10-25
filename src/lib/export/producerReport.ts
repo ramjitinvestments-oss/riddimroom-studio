@@ -11,6 +11,7 @@
  */
 import type { Project } from '../../types/timeline';
 import { getProjectDuration } from '../timeline/utils';
+import { creditForFileName } from '../media/tracks';
 
 export type ProducerCheckStatus = 'pass' | 'warn' | 'fail' | 'info';
 
@@ -171,6 +172,22 @@ export function buildProducerReport(project: Project, loudness?: LoudnessReading
     fix: feedShape && goodLength ? undefined : 'For TikTok/Reels, export from a 9:16 project, 60 seconds or under.',
     weight: 1,
   });
+
+  // ── Music credit (info): a pack track carries a CC attribution
+  // duty — surface the credit so it travels with the export. ──
+  const musicItem = items.find(
+    (i): i is Extract<typeof i, { type: 'audio' }> => i.type === 'audio' && i.role === 'music',
+  );
+  const credit = musicItem ? creditForFileName(project.mediaAssets[musicItem.mediaAssetId]?.fileName ?? '') : null;
+  if (credit) {
+    checks.push({
+      id: 'music-credit',
+      label: 'Music credit',
+      status: 'info',
+      detail: `Real track — ${credit}. Keep this credit when you post.`,
+      weight: 0,
+    });
+  }
 
   // ── Loop seam (info): short videos that end on their last frame loop
   // cleanly on the feed players. ──

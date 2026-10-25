@@ -188,15 +188,68 @@ export function mergeIntoUntouched(
   return next;
 }
 
+export type VisionReadOutcome = 'ok' | 'not-configured' | 'busy' | 'failed';
+
+export interface VisionReadResult {
+  outcome: VisionReadOutcome;
+  suggestion: VisionSuggestion | null;
+}
+
+type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
+
+/**
+ * The POST half of the artwork read, factored out so its outcome
+ * mapping is unit-testable without a browser canvas. The endpoint
+ * answers with a classed code (not_configured / busy / failed) and
+ * this maps it to the outcome the UI reports in plain words — a
+ * failed read is NEVER silent: the note under the word fields says
+ * exactly which thing happened.
+ */
+export async function requestVisionRead(
+  imageBase64: string,
+  idToken: string,
+  fetcher: Fetcher = fetch,
+): Promise<VisionReadResult> {
+  try {
+    const res = await fetcher('/api/promo-analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({ imageBase64, mimeType: 'image/jpeg' }),
+    });
+    const isJson = (res.headers.get('content-type') || '').includes('application/json');
+    if (!isJson) return { outcome: 'failed', suggestion: null };
+    const data = await res.json();
+    if (res.ok && data?.success && data.suggestion) {
+      const sg = data.suggestion as VisionSuggestion;
+      return {
+        outcome: 'ok',
+        suggestion: {
+          hook1: String(sg.hook1 ?? ''),
+          hook2: String(sg.hook2 ?? ''),
+          sub: String(sg.sub ?? ''),
+          cta: String(sg.cta ?? ''),
+          genre: String(sg.genre ?? ''),
+        },
+      };
+    }
+    if (data?.code === 'not_configured') return { outcome: 'not-configured', suggestion: null };
+    if (data?.code === 'busy') return { outcome: 'busy', suggestion: null };
+    return { outcome: 'failed', suggestion: null };
+  } catch {
+    return { outcome: 'failed', suggestion: null };
+  }
+}
+
 /**
  * Ask the server to READ the artwork (downscaled to ≤1024px JPEG
- * here, so the request stays small). Returns null on ANY failure —
- * the caller keeps the bank suggestion; analysis never blocks a build.
+ * here, so the request stays small). A 'busy' outcome earns ONE
+ * automatic retry after a short pause — free-tier demand spikes are
+ * usually momentary. Any other failure returns its classed outcome;
+ * the caller keeps the bank suggestion, so analysis never blocks a
+ * build and never fails silently.
  */
-export async function fetchVisionSuggestion(
-  bitmap: ImageBitmap,
-  idToken: string,
-): Promise<VisionSuggestion | null> {
+export async function fetchVisionRead(bitmap: ImageBitmap, idToken: string): Promise<VisionReadResult> {
+  let base64: string | null = null;
   try {
     const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
     const w = Math.max(1, Math.round(bitmap.width * scale));
@@ -205,11 +258,11 @@ export async function fetchVisionSuggestion(
     canvas.width = w;
     canvas.height = h;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    if (!ctx) return { outcome: 'failed', suggestion: null };
     ctx.drawImage(bitmap, 0, 0, w, h);
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-    if (!blob) return null;
-    const base64 = await new Promise<string | null>((resolve) => {
+    if (!blob) return { outcome: 'failed', suggestion: null };
+    base64 = await new Promise<string | null>((resolve) => {
       const reader = new FileReader();
       reader.onload = () => {
         const result = typeof reader.result === 'string' ? reader.result : '';
@@ -218,24 +271,12 @@ export async function fetchVisionSuggestion(
       reader.onerror = () => resolve(null);
       reader.readAsDataURL(blob);
     });
-    if (!base64) return null;
-    const res = await fetch('/api/promo-analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-      body: JSON.stringify({ imageBase64: base64, mimeType: 'image/jpeg' }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!data?.success || !data.suggestion) return null;
-    const s = data.suggestion as VisionSuggestion;
-    return {
-      hook1: String(s.hook1 ?? ''),
-      hook2: String(s.hook2 ?? ''),
-      sub: String(s.sub ?? ''),
-      cta: String(s.cta ?? ''),
-      genre: String(s.genre ?? ''),
-    };
   } catch {
-    return null;
+    return { outcome: 'failed', suggestion: null };
   }
+  if (!base64) return { outcome: 'failed', suggestion: null };
+  const first = await requestVisionRead(base64, idToken);
+  if (first.outcome !== 'busy') return first;
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  return requestVisionRead(base64, idToken);
 }

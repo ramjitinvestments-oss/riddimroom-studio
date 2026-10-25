@@ -12,11 +12,12 @@ import { ASPECT_RATIO_OPTIONS } from '../lib/aspectRatios';
 import { createProject, saveProject } from '../lib/projects/persistence';
 import { uploadMediaFile } from '../lib/media/upload';
 import { getLoopDef, renderLoopFile, LOOP_DURATION_SECONDS } from '../lib/media/loops';
+import { fetchPackTrackFile, packTrackForSkin, probeAudioDurationSeconds } from '../lib/media/tracks';
 import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
 import {
   bankSuggestion,
   cycleAlternate,
-  fetchVisionSuggestion,
+  fetchVisionRead,
   fieldAlternates,
   mergeIntoUntouched,
   type SuggestionContext,
@@ -113,7 +114,7 @@ function cleanName(fileName: string): string {
 }
 
 export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
-  const { currentUser, idToken } = useAuth();
+  const { currentUser } = useAuth();
   const { tier } = useLicenseTier();
   const [picked, setPicked] = useState<PickedFile[]>([]);
   const [analysis, setAnalysis] = useState<ArtworkAnalysis | null>(null);
@@ -125,11 +126,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [autoNote, setAutoNote] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
   const touchedRef = useRef<Set<string>>(new Set());
-  const idTokenRef = useRef<string | null>(null);
-  idTokenRef.current = idToken;
   const visionRef = useRef<VisionSuggestion | null>(null);
   const suggestCtxRef = useRef<SuggestionContext | null>(null);
   const suggestRunRef = useRef(0);
+  const currentUserRef = useRef<typeof currentUser>(null);
+  currentUserRef.current = currentUser;
+  const lastBitmapRef = useRef<ImageBitmap | null>(null);
+  const [ownTrack, setOwnTrack] = useState<File | null>(null);
+  const ownTrackInputRef = useRef<HTMLInputElement | null>(null);
   const [duration, setDuration] = useState(12);
   const [musicOn, setMusicOn] = useState(true);
   const [kitNote, setKitNote] = useState<string | null>(null);
@@ -157,26 +161,52 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
   // Auto-fit words: the bank fills untouched fields instantly; the
   // vision read then refines them with the artwork's own printed
-  // words. Fields the user has typed in are never overwritten.
+  // words. Fields the user has typed in are never overwritten, and
+  // the note under the fields always says which source won — a
+  // failed read is reported in plain words, never silent.
   const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string) => {
     const runId = ++suggestRunRef.current;
     const ctx: SuggestionContext = { kind, fileName };
     suggestCtxRef.current = ctx;
+    lastBitmapRef.current = bitmap;
     visionRef.current = null;
     setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bankSuggestion(ctx)));
-    setAutoNote('Words suggested from your artwork — tap any line to make it yours.');
-    const token = idTokenRef.current;
-    if (!token) return;
+    setAutoNote('Words suggested from your artwork type — tap any line to make it yours.');
+    const user = currentUserRef.current;
+    if (!user) return;
     setSuggesting(true);
-    const vision = await fetchVisionSuggestion(bitmap, token);
+    let token: string | null = null;
+    try {
+      token = await user.getIdToken(true);
+    } catch {
+      token = null;
+    }
+    if (!token) {
+      if (suggestRunRef.current === runId) setSuggesting(false);
+      return;
+    }
+    const read = await fetchVisionRead(bitmap, token);
     if (suggestRunRef.current !== runId) return;
     setSuggesting(false);
-    if (vision) {
-      visionRef.current = vision;
-      setTexts((t) => mergeIntoUntouched(t, touchedRef.current, vision));
+    if (read.outcome === 'ok' && read.suggestion) {
+      visionRef.current = read.suggestion;
+      setTexts((t) => mergeIntoUntouched(t, touchedRef.current, read.suggestion!));
       setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
+    } else if (read.outcome === 'not-configured') {
+      setAutoNote("Image reading isn't switched on for this build yet — words suggested from the artwork type instead.");
+    } else if (read.outcome === 'busy') {
+      setAutoNote('The artwork reader was busy — suggested words are in. Tap “Read my artwork” to try the read again.');
+    } else {
+      setAutoNote("The artwork read didn't complete — suggested words are in. Tap “Read my artwork” to try again.");
     }
   }, []);
+
+  const handleReadAgain = useCallback(() => {
+    const bitmap = lastBitmapRef.current;
+    const ctx = suggestCtxRef.current;
+    if (!bitmap || !ctx || suggesting) return;
+    void runSuggestion(bitmap, ctx.kind, ctx.fileName);
+  }, [runSuggestion, suggesting]);
 
   const cycleField = useCallback((field: SuggestionField) => {
     const ctx = suggestCtxRef.current;
@@ -310,17 +340,35 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         }
       }
 
-      // Music pack: the skin's built-in beat, fitted to the promo's
-      // length. A failure here never blocks the promo — it just opens
-      // without music (the editor's Music panel can add it later).
+      // Music, fitted to the promo's length, in the owner's order:
+      // their own track first, then the skin's REAL pack track (a
+      // license-verified recording), then the built-in synth loop as
+      // the last-resort fallback. A failure here never blocks the
+      // promo — it just opens without music (the editor's Music
+      // panel can add it later).
       if (musicOn) {
         try {
           setStatus('Adding the beat…');
-          const def = getLoopDef(PROMO_SKIN_LOOP[skin]);
-          if (def) {
-            const file = await renderLoopFile(def);
-            const up = await uploadMediaFile({ uid, file });
-            project = addPromoMusic(project, up.asset, duration);
+          let musicFile: File | null = ownTrack;
+          if (!musicFile) {
+            try {
+              musicFile = await fetchPackTrackFile(packTrackForSkin(skin));
+            } catch {
+              musicFile = null;
+            }
+          }
+          if (!musicFile) {
+            const def = getLoopDef(PROMO_SKIN_LOOP[skin]);
+            if (def) musicFile = await renderLoopFile(def);
+          }
+          if (musicFile) {
+            const probed = await probeAudioDurationSeconds(musicFile);
+            const up = await uploadMediaFile({ uid, file: musicFile });
+            const asset =
+              probed && (!up.asset.durationSeconds || Math.abs(up.asset.durationSeconds - probed) > 0.75)
+                ? { ...up.asset, durationSeconds: probed }
+                : up.asset;
+            project = addPromoMusic(project, asset, duration);
           }
         } catch {
           // Music is a layer, not a blocker — the promo still opens.
@@ -334,7 +382,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setError(err?.message || 'The promo could not be built. Try again.');
       setPhase('ready');
     }
-  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn]);
+  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack]);
 
   const inputCls =
     'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-gold/60';
@@ -468,11 +516,49 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Beat</span>
-                <button onClick={() => setMusicOn(true)} className={chipCls(musicOn)}>
-                  {getLoopDef(PROMO_SKIN_LOOP[skin])?.label ?? 'Built-in beat'}
+                <button
+                  onClick={() => {
+                    setOwnTrack(null);
+                    setMusicOn(true);
+                  }}
+                  className={chipCls(musicOn && !ownTrack)}
+                >
+                  {packTrackForSkin(skin).title} — {packTrackForSkin(skin).artist}
                 </button>
-                <button onClick={() => setMusicOn(false)} className={chipCls(!musicOn)}>No music</button>
-                {musicOn && <span className="text-[11px] text-white/40">Fitted to your promo's length automatically.</span>}
+                <button onClick={() => ownTrackInputRef.current?.click()} className={chipCls(musicOn && !!ownTrack)}>
+                  {ownTrack ? `Your track: ${ownTrack.name}` : 'Your own track'}
+                </button>
+                <input
+                  ref={ownTrackInputRef}
+                  type="file"
+                  accept="audio/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) {
+                      setOwnTrack(f);
+                      setMusicOn(true);
+                    }
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    setOwnTrack(null);
+                    setMusicOn(false);
+                  }}
+                  className={chipCls(!musicOn)}
+                >
+                  No music
+                </button>
+                {musicOn && !ownTrack && (
+                  <span className="text-[11px] text-white/40">
+                    A real recording ({packTrackForSkin(skin).license}), fitted to your promo's length.
+                  </span>
+                )}
+                {musicOn && ownTrack && (
+                  <span className="text-[11px] text-white/40">Your track, fitted to your promo's length.</span>
+                )}
               </div>
             </div>
 
@@ -518,6 +604,13 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
                 >
                   Save CTA + sub + skin as my brand defaults
+                </button>
+                <button
+                  onClick={handleReadAgain}
+                  disabled={suggesting}
+                  className="min-h-[40px] px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-white/80 text-[11px] font-bold disabled:opacity-50"
+                >
+                  {suggesting ? 'Reading…' : 'Read my artwork'}
                 </button>
                 {kitNote && <span className="text-[11px] text-white/40">{kitNote}</span>}
               </div>
