@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Check, ChevronDown, ChevronRight, Clapperboard, Crop, Loader2, Music, Sparkles } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Clapperboard, Crop, Frame, Loader2, Music, Sparkles } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import {
   TEMPLATE_CATEGORIES,
@@ -15,6 +15,7 @@ import { findAspectRatioOption } from '../../lib/aspectRatios';
 import { uploadMediaFile } from '../../lib/media/upload';
 import { updateItem } from '../../lib/timeline/utils';
 import { SlotTrimPicker } from './SlotTrimPicker';
+import { ReframePicker } from './ReframePicker';
 
 /**
  * Templates v3 — 20 ultra-premium viral templates in two collapsible
@@ -118,6 +119,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       });
       setAppliedId(t.id);
       setPendingAdjust(result.shortenedClips.length > 0 ? result.shortenedClips : null);
+      setPendingFramed(result.framedItems.length > 0 ? result.framedItems : null);
       if (result.canvasSwitched) {
         setNotice(`Project switched to ${t.frame?.aspect} — the frame this preset is designed for. Every clip was cropped to it.`);
       } else if (needsMusic) {
@@ -131,6 +133,13 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       setError(e instanceof Error ? e.message : 'Could not apply template.');
     }
   };
+
+  const [pendingFramed, setPendingFramed] = useState<ShortenedClipInfo[] | null>(null);
+  const [reframeTargetId, setReframeTargetId] = useState<string | null>(null);
+  const reframeTarget = reframeTargetId
+    ? project.items.find((i) => i.id === reframeTargetId && (i.type === 'video' || i.type === 'image'))
+    : undefined;
+  const reframeAsset = reframeTarget && 'mediaAssetId' in reframeTarget ? project.mediaAssets[reframeTarget.mediaAssetId] : undefined;
 
   const adjustTarget = adjustTargetId
     ? project.items.find((i): i is VideoTimelineItem => i.id === adjustTargetId && i.type === 'video')
@@ -254,6 +263,49 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
             Done
           </button>
         </div>
+      )}
+
+      {/* v9 post-apply reframe step: every clip the preset cropped to
+          its frame can have its window re-positioned. */}
+      {pendingFramed && !reframeTarget && (
+        <div className="flex flex-col gap-1.5 rounded-xl border border-gold/30 bg-gold/5 p-2.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-gold flex items-center gap-1.5">
+            <Frame size={12} /> Reframe clips
+          </span>
+          <p className="text-[11px] text-white/50 leading-snug">
+            The preset cropped {pendingFramed.length} clip{pendingFramed.length === 1 ? '' : 's'} to its frame. Slide any
+            window if the crop missed the subject — or skip and keep the smart default.
+          </p>
+          {pendingFramed.map((clip) => (
+            <div key={clip.itemId} className="flex items-center gap-2">
+              <span className="flex-1 min-w-0 truncate text-xs text-white/80">{clip.fileName}</span>
+              <button
+                onClick={() => setReframeTargetId(clip.itemId)}
+                className="shrink-0 min-h-10 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
+              >
+                Reframe
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() => setPendingFramed(null)}
+            className="self-end min-h-10 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
+      {reframeTarget && reframeAsset && (reframeTarget.type === 'video' || reframeTarget.type === 'image') && (
+        <ReframePicker
+          item={reframeTarget}
+          asset={reframeAsset}
+          onCancel={() => setReframeTargetId(null)}
+          onConfirm={(crop) => {
+            mutate((p) => updateItem(p, reframeTarget.id, { crop }));
+            setReframeTargetId(null);
+          }}
+        />
       )}
 
       {adjustTarget && adjustAsset && adjustTarget.type === 'video' && (

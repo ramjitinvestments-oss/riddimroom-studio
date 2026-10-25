@@ -169,6 +169,8 @@ export interface ApplyFullTemplateResult {
   musicAdded: boolean;
   /** v9 — true when the project's canvas was switched to the template's frame aspect. */
   canvasSwitched: boolean;
+  /** v9 — items that received a frame crop (the panel offers each a Reframe step). */
+  framedItems: ShortenedClipInfo[];
 }
 
 /** Main-track media for slotting: full-frame videos (not PiP overlays) and `photo` images (not overlay/watermark/logo images). */
@@ -305,6 +307,7 @@ export function applyFullTemplate(
   const grade = getGradePreset(template.grade);
   const frameDims = frame ? frameCanvasDims(frame.aspect) : null;
   const frameAspectNumber = frameDims ? frameDims.width / frameDims.height : 0;
+  const framedItems: ShortenedClipInfo[] = [];
   for (const item of next.items) {
     if (item.type === 'video' || item.type === 'image' || item.type === 'text') {
       const patch: Record<string, unknown> = {
@@ -327,7 +330,10 @@ export function applyFullTemplate(
             frameAspectNumber,
             item.type === 'video' ? 0.38 : 0.5,
           );
-          if (crop) patch.crop = crop;
+          if (crop) {
+            patch.crop = crop;
+            framedItems.push({ itemId: item.id, fileName: asset?.fileName ?? 'Clip' });
+          }
           // Card stage: slotted heroes sit as an inset card (84% wide,
           // centred slightly high). Videos scale against the canvas;
           // images scale against their 0.25-canvas base width.
@@ -437,7 +443,7 @@ export function applyFullTemplate(
     });
   }
 
-  return { project: next, shortenedClips, reelStartSeconds: reelStart, reelEndSeconds: reelEnd, musicAdded, canvasSwitched };
+  return { project: next, shortenedClips, reelStartSeconds: reelStart, reelEndSeconds: reelEnd, musicAdded, canvasSwitched, framedItems };
 }
 
 export function applyTemplateToProject(

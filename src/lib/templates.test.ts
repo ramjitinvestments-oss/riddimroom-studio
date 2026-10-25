@@ -536,6 +536,8 @@ describe('v9 preset FRAME — crop-to-preset, project-wide grade, canvas switch'
     const pipV = pip.type === 'video' ? pip : undefined;
     expect(pipV?.crop).toBeUndefined();
     expect(pipV?.colorGrade).toEqual(getGradePreset('vivid-party')!.grade);
+    // the panel's Reframe step is driven by framedItems: hero in, PiP out
+    expect(result.framedItems.map((f) => f.itemId)).toEqual([hero.id]);
     expect(validateProject(result.project).valid).toBe(true);
   });
 

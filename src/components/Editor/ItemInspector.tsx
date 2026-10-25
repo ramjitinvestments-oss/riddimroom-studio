@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, Crop, X } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, Crop, Frame, X } from 'lucide-react';
 import { SlotTrimPicker } from './SlotTrimPicker';
+import { ReframePicker } from './ReframePicker';
 import { hasCroppableSlack, resolveSourceDuration } from '../../lib/timeline/trimWindow';
 import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, TimelineItem } from '../../types/timeline';
 import { useProject } from '../../context/ProjectContext';
@@ -136,7 +137,11 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
   // shortened clip keeps). Only offered when the source is longer than
   // the item's current window — otherwise there is nothing to slide.
   const [showCropPicker, setShowCropPicker] = useState(false);
+  // v9 — spatial reframe (preset frame crops), the SlotTrimPicker's twin.
+  const [showReframePicker, setShowReframePicker] = useState(false);
   const videoAsset = item.type === 'video' && project ? project.mediaAssets[item.mediaAssetId] : undefined;
+  const frameAsset = (item.type === 'video' || item.type === 'image') && project ? project.mediaAssets[item.mediaAssetId] : undefined;
+  const frameCrop = (item.type === 'video' || item.type === 'image') ? item.crop : undefined;
   const videoSourceDuration = item.type === 'video' ? resolveSourceDuration(item, videoAsset?.durationSeconds) : 0;
   const canAdjustCrop = item.type === 'video' && !!videoAsset && hasCroppableSlack(item, videoSourceDuration);
   const transitionBoundaryDuration = findTransitionPreset(transitionPresetForBoundary)?.defaultDurationSeconds ?? 0.6;
@@ -380,6 +385,22 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
             className="min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold flex items-center justify-center gap-1.5 transition"
           >
             <Crop size={14} /> Adjust crop
+          </button>
+        </div>
+      )}
+
+      {(item.type === 'video' || item.type === 'image') && frameCrop && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40">Frame position</span>
+          <p className="text-[11px] text-white/35 -mt-1">
+            A preset cropped this clip to a {Math.round(frameCrop.width)}% × {Math.round(frameCrop.height)}% window of its
+            source. Slide the window if it missed the subject.
+          </p>
+          <button
+            onClick={() => setShowReframePicker(true)}
+            className="min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold flex items-center justify-center gap-1.5 transition"
+          >
+            <Frame size={14} /> Reframe
           </button>
         </div>
       )}
@@ -696,6 +717,18 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
           <input type="checkbox" checked={item.visible} onChange={(e) => patch({ visible: e.target.checked })} />
           Visible
         </label>
+      )}
+
+      {showReframePicker && (item.type === 'video' || item.type === 'image') && frameAsset && (
+        <ReframePicker
+          item={item}
+          asset={frameAsset}
+          onCancel={() => setShowReframePicker(false)}
+          onConfirm={(crop) => {
+            patch({ crop });
+            setShowReframePicker(false);
+          }}
+        />
       )}
 
       {showCropPicker && item.type === 'video' && videoAsset && (

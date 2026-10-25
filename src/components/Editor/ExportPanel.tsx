@@ -45,6 +45,10 @@ export function ExportPanel() {
   const [convertRatio, setConvertRatio] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  // v9 share pack: keep the finished blob so it can go straight into the
+  // phone's share sheet (WhatsApp / TikTok / gallery) without a re-export.
+  const [lastBlob, setLastBlob] = useState<Blob | null>(null);
+  const [captionCopied, setCaptionCopied] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const busy = status === 'rendering' || status === 'converting';
   // Effective tier (server profile when the API answered; admin-grant
@@ -75,6 +79,8 @@ export function ExportPanel() {
     setConvertRatio(0);
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     setDownloadUrl(null);
+    setLastBlob(null);
+    setCaptionCopied(false);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -123,6 +129,7 @@ export function ExportPanel() {
       }
 
       setDownloadUrl(URL.createObjectURL(mp4Blob));
+      setLastBlob(mp4Blob);
       setStatus('done');
       if (user) recordExport(user.uid);
     } catch (err: any) {
@@ -157,6 +164,31 @@ export function ExportPanel() {
     const dims = resolveExportDimensions(project.canvasWidth, project.canvasHeight, id);
     return dims.width === project.canvasWidth && dims.height === project.canvasHeight;
   };
+  const exportFileName = `${project.name.replace(/[^a-z0-9-_]+/gi, '_') || 'export'}.mp4`;
+  const canShareFiles = !!(
+    lastBlob &&
+    typeof navigator !== 'undefined' &&
+    typeof navigator.canShare === 'function' &&
+    navigator.canShare({ files: [new File([lastBlob], exportFileName, { type: 'video/mp4' })] })
+  );
+  const handleShare = async () => {
+    if (!lastBlob) return;
+    try {
+      await navigator.share({ files: [new File([lastBlob], exportFileName, { type: 'video/mp4' })], title: project.name });
+    } catch {
+      // The user closed the share sheet — nothing to report.
+    }
+  };
+  const handleCopyCaption = async () => {
+    const caption = `${project.name} — made with RiddimRoom Studio · riddimroom.com\n#RiddimRoom #Caribbean #Dancehall #Soca #Trini`;
+    try {
+      await navigator.clipboard.writeText(caption);
+      setCaptionCopied(true);
+    } catch {
+      setCaptionCopied(false);
+    }
+  };
+
   const chipClass = (isActive: boolean) =>
     `min-h-11 px-2 rounded-lg border text-xs font-bold transition ${
       isActive
@@ -172,62 +204,61 @@ export function ExportPanel() {
         {project.watermarkEnabled !== false ? ' · Watermark on (free).' : ' · No watermark.'}
       </p>
 
-      <div className="flex flex-col gap-1">
+      {/* v9: the three export pickers as dropdowns — one row each. */}
+      <label className="flex flex-col gap-1">
         <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Resolution</span>
-        <div className="flex gap-1.5">
+        <select
+          aria-label="Export resolution"
+          value={resolution}
+          disabled={busy}
+          onChange={(e) => setResolution(e.target.value as ExportResolutionId)}
+          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+        >
           {EXPORT_RESOLUTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setResolution(opt.id)}
-              disabled={busy || isRedundantResolution(opt.id)}
-              aria-pressed={resolution === opt.id}
-              title={isRedundantResolution(opt.id) ? 'Same as this project\'s native size — exports never upscale' : undefined}
-              className={`${chipClass(resolution === opt.id)} flex-1`}
-            >
-              {opt.id === 'native' ? `Native ${project.canvasWidth}×${project.canvasHeight}` : opt.label}
-            </button>
+            <option key={opt.id} value={opt.id} disabled={isRedundantResolution(opt.id)}>
+              {opt.id === 'native' ? `Native — ${project.canvasWidth}×${project.canvasHeight}` : opt.label}
+              {isRedundantResolution(opt.id) ? ' (same as native)' : ''}
+            </option>
           ))}
-        </div>
-      </div>
+        </select>
+      </label>
 
-      <div className="flex flex-col gap-1">
+      <label className="flex flex-col gap-1">
         <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Frame rate</span>
-        <div className="flex gap-1.5">
+        <select
+          aria-label="Export frame rate"
+          value={effectiveFrameRate}
+          disabled={busy}
+          onChange={(e) => setFrameRateChoice(Number(e.target.value))}
+          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+        >
           {EXPORT_FRAME_RATES.map((fps) => (
-            <button
-              key={fps}
-              onClick={() => setFrameRateChoice(fps)}
-              disabled={busy}
-              aria-pressed={effectiveFrameRate === fps}
-              className={`${chipClass(effectiveFrameRate === fps)} flex-1`}
-            >
+            <option key={fps} value={fps}>
               {fps} fps
-            </button>
+            </option>
           ))}
-        </div>
-      </div>
+        </select>
+      </label>
 
-      <div className="flex flex-col gap-1">
+      <label className="flex flex-col gap-1">
         <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Quality</span>
-        <div className="flex gap-1.5">
+        <select
+          aria-label="Export quality"
+          value={qualityTier}
+          disabled={busy}
+          onChange={(e) => setQualityTier(e.target.value as ExportQualityTier)}
+          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+        >
           {EXPORT_QUALITY_TIERS.map((opt) => (
-            <button
-              key={opt.id}
-              onClick={() => setQualityTier(opt.id)}
-              disabled={busy}
-              aria-pressed={qualityTier === opt.id}
-              title={opt.description}
-              className={`${chipClass(qualityTier === opt.id)} flex-1`}
-            >
-              {opt.label}
-            </button>
+            <option key={opt.id} value={opt.id}>
+              {opt.label} — {opt.description}
+            </option>
           ))}
-        </div>
-        <p className="text-[10px] text-white/30">
+        </select>
+        <span className="text-[10px] text-white/30">
           Output: {resolved.width}×{resolved.height} · {resolved.frameRate} fps · ~{(resolved.videoBitsPerSecond / 1_000_000).toFixed(1)} Mbps video
-          {' · '}{EXPORT_QUALITY_TIERS.find((t) => t.id === qualityTier)?.description}
-        </p>
-      </div>
+        </span>
+      </label>
       {!busy && (
         <button
           onClick={handleExport}
@@ -260,13 +291,35 @@ export function ExportPanel() {
       )}
       {status === 'error' && error && <p className="text-xs text-red-400">{error}</p>}
       {status === 'done' && downloadUrl && (
-        <a
-          href={downloadUrl}
-          download={`${project.name.replace(/[^a-z0-9-_]+/gi, '_') || 'export'}.mp4`}
-          className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white self-start flex items-center"
-        >
-          Download MP4
-        </a>
+        <div className="flex flex-col gap-1.5 rounded-xl border border-gold/30 bg-gold/5 p-2.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-gold">Share pack</span>
+          {canShareFiles && (
+            <button
+              onClick={() => void handleShare()}
+              className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-black uppercase tracking-wide"
+            >
+              Share video…
+            </button>
+          )}
+          <a
+            href={downloadUrl}
+            download={exportFileName}
+            className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white flex items-center justify-center"
+          >
+            Save MP4 to this device
+          </a>
+          <button
+            onClick={() => void handleCopyCaption()}
+            className="min-h-11 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-white text-xs font-bold"
+          >
+            {captionCopied ? 'Caption copied ✓' : 'Copy caption + hashtags'}
+          </button>
+          {!canShareFiles && (
+            <p className="text-[10px] text-white/40">
+              This browser can't share files directly — save the MP4, then post it from your gallery or files.
+            </p>
+          )}
+        </div>
       )}
     </div>
   );
