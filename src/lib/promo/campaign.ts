@@ -26,7 +26,8 @@
  * field stays exactly as editable as the single build's.
  */
 import type { PromoRecipeId, PromoTexts } from './recipes';
-import { splitHeadline } from './suggest';
+import { bankAlternatesForGenre, splitHeadline } from './suggest';
+import type { PostGenre } from '../export/socialPosts';
 
 export type CampaignRole = 'master' | 'alt' | 'series' | 'format';
 export type CampaignSeriesKind = 'countdown' | 'spotlight';
@@ -60,6 +61,14 @@ export interface CampaignInput {
   kind: 'logo' | 'portrait' | 'flyer';
   /** Candidate alternate hook pairs, best first (artwork lines, then bank). */
   altHookPairs?: Array<[string, string]>;
+  /** Alternate sub lines, best first — pieces rotate through these
+      so the supporting words change with the hook. */
+  altSubs?: string[];
+  /** Alternate CTA lines, best first. */
+  altCtas?: string[];
+  /** The genre the artwork's own words detected: when the caller
+      has no pools, the planner draws them from this genre's bank. */
+  genre?: PostGenre;
   font?: string;
 }
 
@@ -113,6 +122,35 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     altPairs.push(p);
   }
 
+  // Rotation pools for sub + CTA: the caller's alternates first,
+  // then the detected genre's bank. A pool entry is only ever used
+  // when it differs from the master's line — rotating to the same
+  // words is not a rotation (owner's R14 verdict: "some captions
+  // don't change at all" — the picker had taken the in-use pair).
+  const poolOf = (values: string[], masterValue: string): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const v of values) {
+      const t = (v ?? '').trim();
+      if (!t || t.toUpperCase() === masterValue.toUpperCase() || seen.has(t.toUpperCase())) continue;
+      seen.add(t.toUpperCase());
+      out.push(t);
+    }
+    return out;
+  };
+  const subPool = poolOf(
+    [...(input.altSubs ?? []), ...(input.genre ? bankAlternatesForGenre('sub', input.genre) : [])],
+    base.sub,
+  );
+  const ctaPool = poolOf(
+    [...(input.altCtas ?? []), ...(input.genre ? bankAlternatesForGenre('cta', input.genre) : [])],
+    base.cta,
+  );
+  let subIdx = 0;
+  let ctaIdx = 0;
+  const takeSub = (): string | undefined => subPool[subIdx++];
+  const takeCta = (): string | undefined => ctaPool[ctaIdx++];
+
   const pieces: CampaignPiece[] = [];
   const push = (p: Omit<CampaignPiece, 'texts'> & { texts: Required<Omit<PromoTexts, 'font'>> }) =>
     pieces.push({ ...p, texts: withFont(p.texts) });
@@ -139,18 +177,28 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     slug: alt1Pair ? 'alt-hook-1' : 'alt-cut-1',
     recipe: rotateRecipe(input.masterRecipe, 1),
     formatId: input.masterFormatId,
-    texts: alt1Pair ? { ...base, hook1: alt1Pair[0], hook2: alt1Pair[1] } : base,
+    texts: {
+      ...base,
+      ...(alt1Pair ? { hook1: alt1Pair[0], hook2: alt1Pair[1] } : {}),
+      sub: takeSub() ?? base.sub,
+      cta: takeCta() ?? base.cta,
+    },
     scheduleLabel: event ? 'Post 5 days before' : 'Day 2',
     hookChanged: !!alt1Pair,
   });
 
   // 3..5 — the series.
   if (event) {
+    const cd7Sub = base.sub || headline;
+    const cd48Sub = headline && headline !== cd7Sub ? headline : (takeSub() ?? headline);
+    const cdDaySub = headline && headline !== cd48Sub ? headline : (takeSub() ?? cd48Sub);
     const countdown = (
       id: string,
       label: string,
       slug: string,
       hooks: [string, string],
+      sub: string,
+      cta: string,
       scheduleLabel: string,
     ) =>
       push({
@@ -160,13 +208,14 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
         slug,
         recipe: 'countdown',
         formatId: input.masterFormatId,
-        texts: { ...base, hook1: hooks[0], hook2: hooks[1], sub: headline || base.sub },
+        texts: { ...base, hook1: hooks[0], hook2: hooks[1], sub, cta },
         scheduleLabel,
         hookChanged: true,
       });
-    countdown('series-7d', 'Countdown — 7 days to go', 'countdown-7-days', ['7 DAYS', 'TO GO'], 'Post 7 days before');
-    countdown('series-48h', 'Countdown — 48 hours to go', 'countdown-48-hours', ['48 HOURS', 'TO GO'], 'Post 48 hours before');
-    countdown('series-day', 'Countdown — today is the day', 'countdown-day-of', ['TODAY', 'IS THE DAY'], 'Post on the day — morning');
+    countdown('series-7d', 'Countdown — 7 days to go', 'countdown-7-days', ['7 DAYS', 'TO GO'], cd7Sub, base.cta, 'Post 7 days before');
+    countdown('series-48h', 'Countdown — 48 hours to go', 'countdown-48-hours', ['48 HOURS', 'TO GO'], cd48Sub, base.cta, 'Post 48 hours before');
+    // Day-of pushes the ask: its CTA rotates to the next phrasing.
+    countdown('series-day', 'Countdown — today is the day', 'countdown-day-of', ['TODAY', 'IS THE DAY'], cdDaySub, takeCta() ?? base.cta, 'Post on the day — morning');
   } else {
     push({
       id: 'series-news',
@@ -175,7 +224,7 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       slug: 'newsflash-cut',
       recipe: 'newsflash',
       formatId: input.masterFormatId,
-      texts: base,
+      texts: { ...base, sub: takeSub() ?? base.sub },
       scheduleLabel: 'Day 3',
       hookChanged: false,
     });
@@ -214,7 +263,12 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     slug: alt2Pair ? 'alt-hook-2' : 'alt-cut-2',
     recipe: rotateRecipe(input.masterRecipe, 2),
     formatId: input.masterFormatId,
-    texts: alt2Pair ? { ...base, hook1: alt2Pair[0], hook2: alt2Pair[1] } : base,
+    texts: {
+      ...base,
+      ...(alt2Pair ? { hook1: alt2Pair[0], hook2: alt2Pair[1] } : {}),
+      sub: takeSub() ?? base.sub,
+      cta: takeCta() ?? base.cta,
+    },
     scheduleLabel: event ? 'Post the day before' : 'Day 4',
     hookChanged: !!alt2Pair,
   });
@@ -239,6 +293,60 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       hookChanged: false,
     });
   });
+
+  // DISTINCTNESS BACKSTOP — the owner's standing rule for the set:
+  // no two pieces (format re-stages exempt — they ARE the master on
+  // another stage, and they say so) may carry the identical four
+  // words. A piece that still collides rotates its sub, then its
+  // CTA, then its hook from the pools until it stands apart. Only
+  // when every pool is exhausted can a collision survive — the
+  // planner never invents text to force one apart.
+  const keyOf = (t: PromoTexts) =>
+    [t.hook1, t.hook2, t.sub, t.cta].map((v) => (v ?? '').trim().toUpperCase()).join('|');
+  const seen = new Set<string>();
+  for (const piece of pieces) {
+    if (piece.role === 'format') continue;
+    if (!seen.has(keyOf(piece.texts))) {
+      seen.add(keyOf(piece.texts));
+      continue;
+    }
+    const t: Required<Omit<PromoTexts, 'font'>> = {
+      hook1: piece.texts.hook1 ?? '',
+      hook2: piece.texts.hook2 ?? '',
+      sub: piece.texts.sub ?? '',
+      cta: piece.texts.cta ?? '',
+    };
+    let placed = false;
+    const attempt = (): boolean => {
+      if (seen.has(keyOf(t))) return false;
+      piece.texts = { ...t, font };
+      seen.add(keyOf(t));
+      placed = true;
+      return true;
+    };
+    const s2 = takeSub();
+    if (s2) {
+      t.sub = s2;
+      attempt();
+    }
+    if (!placed) {
+      const c2 = takeCta();
+      if (c2) {
+        t.cta = c2;
+        attempt();
+      }
+    }
+    if (!placed) {
+      const hp = altPairs.find((pr) => !samePair(pr, [t.hook1, t.hook2]) && !samePair(pr, masterPair));
+      if (hp) {
+        t.hook1 = hp[0];
+        t.hook2 = hp[1];
+        piece.hookChanged = true;
+        attempt();
+      }
+    }
+    if (!placed) seen.add(keyOf(piece.texts));
+  }
 
   return { seriesKind, pieces };
 }

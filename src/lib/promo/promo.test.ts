@@ -192,3 +192,59 @@ describe('brand kit (device-local promo defaults)', () => {
     }
   });
 });
+
+describe('format fit (R15)', () => {
+  const drawn = (project: ReturnType<typeof createDefaultProject>, assetId: string) => {
+    const item = project.items.find((i) => i.type === 'image' && (i as { mediaAssetId: string }).mediaAssetId === assetId) as
+      | { scale: number }
+      | undefined;
+    if (!item) throw new Error('hero item missing');
+    const asset = project.mediaAssets[assetId];
+    const w = item.scale * project.canvasWidth * 0.25;
+    return { w, h: (w * asset.height) / asset.width };
+  };
+
+  it('slam fits whole art by default on a square stage — no crop', () => {
+    const art = fakeAsset('flyer', 1080, 1920);
+    const p = buildSlamProject(createDefaultProject('u', 'S', 1080, 1080), art, { hook1: 'X' }, { duration: 10 });
+    const d = drawn(p, 'flyer');
+    expect(d.h).toBeLessThanOrEqual(1080 + 0.5);
+    expect(d.w).toBeLessThanOrEqual(1080 + 0.5);
+  });
+
+  it('slam still covers the stage when the user picks Fill screen', () => {
+    const art = fakeAsset('flyer', 1080, 1920);
+    const p = buildSlamProject(createDefaultProject('u', 'S', 1080, 1080), art, {}, { duration: 10, fit: 'fill' });
+    const d = drawn(p, 'flyer');
+    expect(d.w).toBeGreaterThanOrEqual(1080 - 0.5);
+    expect(d.h).toBeGreaterThanOrEqual(1080 - 0.5);
+  });
+
+  it('newsflash stage keeps a portrait artwork inside a square canvas', () => {
+    const art = fakeAsset('flyer', 1080, 1920);
+    const p = buildNewsflashProject(createDefaultProject('u', 'N', 1080, 1080), art, { hook1: 'X' }, { duration: 10 });
+    const d = drawn(p, 'flyer');
+    expect(d.h).toBeLessThanOrEqual(1080 * 0.8 + 0.5);
+  });
+
+  it('versus cards stay inside a wide canvas with portrait arts', () => {
+    const a = fakeAsset('a', 1080, 1920);
+    const b = fakeAsset('b', 1080, 1920);
+    const p = buildVersusProject(createDefaultProject('u', 'V', 1920, 1080), a, b, {}, { duration: 10 });
+    for (const id of ['a', 'b']) {
+      const d = drawn(p, id);
+      expect(d.h).toBeLessThanOrEqual(1080 * 0.72 + 0.5);
+    }
+  });
+
+  it('kinetic finale card stays inside a square canvas', () => {
+    const art = fakeAsset('art', 1080, 1920);
+    const slices = tilingBands(4).map((band, i) => ({ asset: fakeAsset(`kb${i}`, 1080, 480), band }));
+    const p = buildKineticProject(createDefaultProject('u', 'K', 1080, 1080), art, slices, {}, { duration: 10 });
+    const images = p.items.filter((i) => i.type === 'image') as Array<{ scale: number; mediaAssetId: string }>;
+    const card = images[images.length - 1];
+    const w = card.scale * 1080 * 0.25;
+    const h = (w * 1920) / 1080;
+    expect(h).toBeLessThanOrEqual(1080 * 0.8 + 0.5);
+  });
+});

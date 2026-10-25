@@ -138,6 +138,17 @@ function artRect(project: Project, asset: MediaAsset, fit: 'fit' | 'fill' = 'fit
   return rectFor(project, asset, widthPx, W / 2, H / 2);
 }
 
+/** Shrink a rect (same center) until its height fits a canvas budget.
+    Fixed-fraction rects (newsflash stage, versus cards, stack,
+    finale cards) are sized from canvas WIDTH — on a square or wide
+    stage a portrait artwork would otherwise spill off the top and
+    bottom. Fit is always whole-art: shrink, never crop. */
+function clampRectHeight(project: Project, asset: MediaAsset, rect: Rect, maxHeightPx: number): Rect {
+  if (rect.heightPx <= maxHeightPx) return rect;
+  const widthPx = maxHeightPx / assetAspect(asset);
+  return rectFor(project, asset, widthPx, (rect.cx / 100) * project.canvasWidth, (rect.cy / 100) * project.canvasHeight);
+}
+
 type ImageItemOpts = Partial<ImageTimelineItem> & Pick<ImageTimelineItem, 'startTime' | 'endTime' | 'zIndex'>;
 
 function imageItem(project: Project, trackId: string, asset: MediaAsset, rect: Rect, opts: ImageItemOpts): ImageTimelineItem {
@@ -280,7 +291,7 @@ export function buildKineticProject(
     next = withAssets(next, extras);
     next = addPhotoCuts(next, trackId, extras, buildEnd, cardStart, skin, 45);
   }
-  const cardRect = rectFor(next, art, W * 0.8, W / 2, H * 0.42);
+  const cardRect = clampRectHeight(next, art, rectFor(next, art, W * 0.8, W / 2, H * 0.42), H * 0.8);
   next = addItem(next, imageItem(next, trackId, art, cardRect, {
     startTime: cardStart, endTime: D, zIndex: 50,
     fade: { fadeInDuration: 0.3, fadeOutDuration: 0 }, colorGrade: skin.grade,
@@ -385,7 +396,7 @@ export function buildSlamProject(
   const skin = resolveSkin(opts);
   const trackId = imageTrackId(project);
   let next = withAssets(project, [art]);
-  const cover = artRect(next, art, 'fill');
+  const cover = artRect(next, art, opts?.fit ?? 'fit');
   const split = D * 0.62;
   const spin = opts?.variant === 'spin';
 
@@ -474,7 +485,7 @@ export function buildNewsflashProject(
   let next = withAssets(project, [art]);
   const W = next.canvasWidth;
   const H = next.canvasHeight;
-  const rect = rectFor(next, art, W * 0.86, W / 2, H * 0.42);
+  const rect = clampRectHeight(next, art, rectFor(next, art, W * 0.86, W / 2, H * 0.42), H * 0.8);
 
   next = addItem(next, imageItem(next, trackId, art, rect, {
     startTime: 0.2, endTime: D, zIndex: 10,
@@ -546,7 +557,7 @@ export function buildLineupProject(
   });
 
   const finaleAt = seg * (solos.length + 1);
-  const card = rectFor(next, poster, next.canvasWidth * 0.84, next.canvasWidth / 2, next.canvasHeight * 0.42);
+  const card = clampRectHeight(next, poster, rectFor(next, poster, next.canvasWidth * 0.84, next.canvasWidth / 2, next.canvasHeight * 0.42), next.canvasHeight * 0.72);
   next = addItem(next, imageItem(next, trackId, poster, card, {
     startTime: finaleAt, endTime: D, zIndex: 60,
     fade: { fadeInDuration: 0.25, fadeOutDuration: 0 }, colorGrade: skin.grade,
@@ -572,8 +583,8 @@ export function buildVersusProject(
   let next = withAssets(project, [a, b]);
   const W = next.canvasWidth;
   const H = next.canvasHeight;
-  const rectA = rectFor(next, a, W * 0.44, W * 0.26, H * 0.42);
-  const rectB = rectFor(next, b, W * 0.44, W * 0.74, H * 0.42);
+  const rectA = clampRectHeight(next, a, rectFor(next, a, W * 0.44, W * 0.26, H * 0.42), H * 0.72);
+  const rectB = clampRectHeight(next, b, rectFor(next, b, W * 0.44, W * 0.74, H * 0.42), H * 0.72);
 
   next = addItem(next, imageItem(next, trackId, a, rectA, {
     startTime: 0.3, endTime: D, zIndex: 10,
@@ -617,7 +628,7 @@ export function buildStackProject(
 
   const stackDeck = dealTreatments(arts.length);
   arts.forEach((art, i) => {
-    const rect = rectFor(next, art, W * 0.62, W / 2, H * 0.44);
+    const rect = clampRectHeight(next, art, rectFor(next, art, W * 0.62, W / 2, H * 0.44), H * 0.78);
     next = addItem(next, imageItem(next, trackId, art, rect, {
       startTime: 0.4 + i * (0.5 / skin.energy), endTime: D, zIndex: 10 + i,
       rotation: rotations[i % rotations.length],
@@ -627,7 +638,7 @@ export function buildStackProject(
   });
 
   const top = arts[arts.length - 1];
-  const topRect = rectFor(next, top, W * 0.62, W / 2, H * 0.44);
+  const topRect = clampRectHeight(next, top, rectFor(next, top, W * 0.62, W / 2, H * 0.44), H * 0.78);
   const shineAt = 0.4 + arts.length * (0.5 / skin.energy) + 0.3;
   next = addItem(next, imageItem(next, trackId, top, topRect, {
     startTime: shineAt, endTime: Math.min(D, shineAt + 1.6), zIndex: 40,

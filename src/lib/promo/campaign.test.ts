@@ -45,12 +45,13 @@ describe('planCampaign — event flyer', () => {
     expect(alt.scheduleLabel).toBe('Post 5 days before');
   });
 
-  it('countdown pieces carry the countdown hook and the event headline as sub', () => {
+  it('countdown rungs carry distinct supporting lines: date first, headline next', () => {
     const [d7, h48, day] = plan.pieces.slice(2, 5);
     expect(d7.texts.hook1).toBe('7 DAYS');
     expect(d7.texts.hook2).toBe('TO GO');
-    expect(d7.texts.sub).toBe('ONE NIGHT. TWO SOUNDS.');
+    expect(d7.texts.sub).toBe('SAT - DEC 20 - THE GRAND HALL');
     expect(d7.texts.cta).toBe('TICKETS OUT NOW');
+    expect(h48.texts.sub).toBe('ONE NIGHT. TWO SOUNDS.');
     expect(d7.recipe).toBe('countdown');
     expect(h48.texts.hook1).toBe('48 HOURS');
     expect(day.texts.hook1).toBe('TODAY');
@@ -138,6 +139,55 @@ describe('planCampaign — guards', () => {
       kind: 'portrait',
     });
     expect(plan.seriesKind).toBe('countdown');
+  });
+
+  it('R15: with rotation pools, no two non-format pieces share the same four words', () => {
+    const keyOf = (t: typeof FLYER_TEXTS) =>
+      [t.hook1, t.hook2, t.sub, t.cta].map((v) => (v ?? '').toUpperCase()).join('|');
+    for (const plan of [
+      planCampaign({
+        texts: FLYER_TEXTS, masterRecipe: 'slam', masterFormatId: '9:16', kind: 'flyer',
+        altHookPairs: [['LIVE', 'ON STAGE'], ['THE BIGGEST', 'NIGHT OF THE YEAR']],
+        altSubs: ['THE GRAND HALL - DOWNTOWN', 'DOORS 9PM'],
+        altCtas: ['GET YOUR TICKETS', 'LINK IN BIO'],
+      }),
+      planCampaign({
+        texts: { hook1: 'ELECTRICAL', hook2: '', sub: 'CONCRETE • FLOORING • REMODELING', cta: 'CALL US TODAY' },
+        masterRecipe: 'slam', masterFormatId: '9:16', kind: 'logo',
+        altSubs: ['LICENSED & INSURED', 'FREE ESTIMATES'],
+        altCtas: ['CALL FOR A QUOTE', 'BOOK YOUR JOB'],
+      }),
+      // genre-bank pools alone (no caller pools) must also separate the set
+      planCampaign({
+        texts: FLYER_TEXTS, masterRecipe: 'slam', masterFormatId: '9:16', kind: 'flyer', genre: 'soca',
+      }),
+    ]) {
+      const seen = new Set<string>();
+      for (const piece of plan.pieces) {
+        if (piece.role === 'format') continue;
+        const key = keyOf(piece.texts as typeof FLYER_TEXTS);
+        expect(seen.has(key), `${piece.id} duplicates another piece's words`).toBe(false);
+        seen.add(key);
+      }
+      // format cuts are the master's re-stage: identical words, on purpose
+      const master = plan.pieces[0];
+      const format = plan.pieces.find((p) => p.role === 'format')!;
+      expect(keyOf(format.texts as typeof FLYER_TEXTS)).toBe(keyOf(master.texts as typeof FLYER_TEXTS));
+    }
+  });
+
+  it('R15: alt pieces rotate sub and CTA, not just the hook', () => {
+    const plan = planCampaign({
+      texts: FLYER_TEXTS, masterRecipe: 'slam', masterFormatId: '9:16', kind: 'flyer',
+      altHookPairs: [['LIVE', 'ON STAGE']],
+      altSubs: ['THE GRAND HALL - DOWNTOWN'],
+      altCtas: ['GET YOUR TICKETS', 'LINK IN BIO - GO NOW'],
+    });
+    const alt = plan.pieces.find((p) => p.id === 'alt-1')!;
+    expect(alt.texts.sub).toBe('THE GRAND HALL - DOWNTOWN');
+    expect(alt.texts.cta).toBe('GET YOUR TICKETS');
+    const day = plan.pieces.find((p) => p.id === 'series-day')!;
+    expect(day.texts.cta).not.toBe(FLYER_TEXTS.cta);
   });
 
   it('every piece has a schedule label and a unique slug', () => {

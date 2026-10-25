@@ -30,7 +30,7 @@ import { createExportRenderer, getConfiguredExportEngine } from '../lib/export/m
 import { validateRenderResult } from '../lib/export/validate';
 import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
 import { resolveExportSettings } from '../lib/export/quality';
-import { buildSocialPosts, type SocialPost } from '../lib/export/socialPosts';
+import { buildSocialPosts, type PostGenre, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
 import { classifyReadout, mergeReadoutFields, stripJunkEdges, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
@@ -509,27 +509,36 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     );
     const readout = lastReadoutRef.current;
     if (readout) {
-      const candidate = readout.lines
+      const candidates = readout.lines
         .filter((l) => {
           const t = stripJunkEdges(l.text).trim();
           return l.confidence >= 55 && t.length >= 3 && t.length <= 40 && !used.has(t.toUpperCase());
         })
-        .sort((a, b) => (b.box?.h ?? 0) - (a.box?.h ?? 0))[0];
-      if (candidate) pairs.push(splitHeadline(stripJunkEdges(candidate.text).trim().toUpperCase()));
+        .sort((a, b) => (b.box?.h ?? 0) - (a.box?.h ?? 0))
+        .slice(0, 2);
+      for (const candidate of candidates) {
+        pairs.push(splitHeadline(stripJunkEdges(candidate.text).trim().toUpperCase()));
+      }
     }
     const ctx = suggestCtxRef.current;
     if (ctx) {
       const h1 = fieldAlternates('hook1', ctx);
       const h2 = fieldAlternates('hook2', ctx);
       for (let i = 0; i < Math.min(h1.length, h2.length); i++) {
-        if (h1[i] || h2[i]) {
-          pairs.push([h1[i] ?? '', h2[i] ?? '']);
-          break;
-        }
+        if (h1[i] || h2[i]) pairs.push([h1[i] ?? '', h2[i] ?? '']);
       }
     }
     return pairs;
   }, [texts.hook1, texts.hook2, texts.sub, texts.cta]);
+
+  /** The genre the artwork's own words detected (readout first,
+      the suggestion pass second) — the campaign planner draws its
+      rotation pools from this genre's bank. */
+  const detectedPostGenre = useCallback((): PostGenre | undefined => {
+    const g = lastReadoutRef.current?.genre ?? visionRef.current?.genre ?? '';
+    const known: PostGenre[] = ['soca', 'dancehall', 'gospel', 'realestate', 'business', 'caribbean'];
+    return (known as string[]).includes(g) ? (g as PostGenre) : undefined;
+  }, []);
 
   /**
    * The Campaign Engine runner: plan the set, upload the artwork
@@ -549,6 +558,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       masterFormatId: ratioId,
       kind: analysis.suggestedKind,
       altHookPairs: currentAltPairs(),
+      altSubs: suggestCtxRef.current ? fieldAlternates('sub', suggestCtxRef.current) : [],
+      altCtas: suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : [],
+      genre: detectedPostGenre(),
       font: fontFamily,
     });
     setCampaignRunning(true);
@@ -725,7 +737,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -765,6 +777,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           masterFormatId: ratioId,
           kind: analysis.suggestedKind,
           altHookPairs: currentAltPairs(),
+          altSubs: suggestCtxRef.current ? fieldAlternates('sub', suggestCtxRef.current) : [],
+          altCtas: suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : [],
+          genre: detectedPostGenre(),
           font: fontFamily,
         })
       : null;
@@ -1054,10 +1069,18 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 </p>
                 <ul className="space-y-1">
                   {planPreview.pieces.map((pc) => (
-                    <li key={pc.id} className="flex items-center gap-2 text-[11px]">
-                      <span className="text-white/85 font-bold">{pc.label}</span>
-                      <span className="px-1.5 py-0.5 rounded border border-white/15 text-white/45">{pc.formatId}</span>
-                      <span className="text-white/40">{pc.scheduleLabel}</span>
+                    <li key={pc.id} className="text-[11px]">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white/85 font-bold">{pc.label}</span>
+                        <span className="px-1.5 py-0.5 rounded border border-white/15 text-white/45">{pc.formatId}</span>
+                        <span className="text-white/40">{pc.scheduleLabel}</span>
+                      </div>
+                      {(pc.texts.hook1 || pc.texts.hook2) && (
+                        <p className="text-white/35 truncate pl-0.5">
+                          “{[pc.texts.hook1, pc.texts.hook2].filter(Boolean).join(' ')}”
+                          {pc.texts.sub ? ` — ${pc.texts.sub}` : ''}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>

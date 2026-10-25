@@ -100,7 +100,18 @@ export function bakeTourMotion(project: Project, hero: ImageTimelineItem, stops:
     const c = boxCenter(s.line);
     const px = (c.x - 0.5) * dw;
     const py = (c.y - 0.5) * dh;
-    return { x: (-px * s.zoom) / W, y: (-py * s.zoom) / H, scale: s.zoom };
+    let ox = (-px * s.zoom) / W;
+    let oy = (-py * s.zoom) / H;
+    // Framing cap (R15): however edge-hugging the word, the hero
+    // must keep spanning the middle of the frame on that axis —
+    // the camera travels to the word, the artwork never flies off
+    // stage. When the zoomed art is narrower than the middle span,
+    // there is no honest travel on that axis at all.
+    const maxOx = Math.max(0, (dw * s.zoom) / 2 - W * 0.25) / W;
+    const maxOy = Math.max(0, (dh * s.zoom) / 2 - H * 0.25) / H;
+    ox = Math.max(-maxOx, Math.min(maxOx, ox));
+    oy = Math.max(-maxOy, Math.min(maxOy, oy));
+    return { x: ox, y: oy, scale: s.zoom };
   });
   const n = baked.length;
   const tourStops = [
@@ -143,10 +154,17 @@ export function applyStageBackdrop(project: Project): Project {
   const { w, h } = drawnSize(project, hero.item);
   const fillRatio = (w * h) / (project.canvasWidth * project.canvasHeight);
   if (fillRatio >= 0.92) return project;
+  // The backdrop COVERS the stage (R15): a merely-enlarged copy
+  // (the old x1.35) still left black bands on tall and wide
+  // stages. Cover-fit — the same math as a photo fill — means the
+  // dimmed art reaches every edge whatever the format; the hero
+  // stays whole and untouched in front of it.
+  const aspect = assetAspect(project, hero.item.mediaAssetId);
+  const coverWidthPx = Math.max(project.canvasWidth, project.canvasHeight / aspect);
   const backdrop: ImageTimelineItem = {
     ...hero.item,
     id: generateTimelineId('item'),
-    scale: (hero.item.scale || 1) * 1.35,
+    scale: coverWidthPx / (project.canvasWidth * 0.25),
     opacity: 0.32,
     zIndex: (hero.item.zIndex || 1) - 1,
     motion: { type: 'slow-zoom-in', intensity: 0.7 },

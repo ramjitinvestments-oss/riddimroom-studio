@@ -153,6 +153,23 @@ export function bankCtaForGenre(genre: PostGenre): string {
   return BANKS[genre].ctas[0];
 }
 
+/** Alternates for one field from an EXPLICIT genre's bank — the
+    campaign planner's pools come from the genre the artwork's own
+    words detected (R13's rule), never a filename guess. */
+export function bankAlternatesForGenre(field: SuggestionField, genre: PostGenre): string[] {
+  const bank = BANKS[genre];
+  switch (field) {
+    case 'hook1':
+      return bank.hooks.map((h) => h[0]);
+    case 'hook2':
+      return bank.hooks.map((h) => h[1]);
+    case 'sub':
+      return [...bank.subs];
+    case 'cta':
+      return [...bank.ctas];
+  }
+}
+
 /** Alternates for one field (the ↻ cycle), bank order. */
 export function fieldAlternates(field: SuggestionField, ctx: SuggestionContext): string[] {
   const genre = genreForContext(ctx);
