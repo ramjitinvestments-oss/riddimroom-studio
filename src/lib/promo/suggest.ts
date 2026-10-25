@@ -188,7 +188,7 @@ export function mergeIntoUntouched(
   return next;
 }
 
-export type VisionReadOutcome = 'ok' | 'not-configured' | 'busy' | 'failed';
+export type VisionReadOutcome = 'ok' | 'not-configured' | 'busy' | 'failed' | 'timeout';
 
 export interface VisionReadResult {
   outcome: VisionReadOutcome;
@@ -211,12 +211,16 @@ export async function requestVisionRead(
   imageBase64: string,
   idToken: string,
   fetcher: Fetcher = fetch,
+  timeoutMs = 25_000,
 ): Promise<VisionReadResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetcher('/api/promo-analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
       body: JSON.stringify({ imageBase64, mimeType: 'image/jpeg' }),
+      signal: controller.signal,
     });
     const isJson = (res.headers.get('content-type') || '').includes('application/json');
     if (!isJson) return { outcome: 'failed', suggestion: null };
@@ -237,8 +241,11 @@ export async function requestVisionRead(
     if (data?.code === 'not_configured') return { outcome: 'not-configured', suggestion: null };
     if (data?.code === 'busy') return { outcome: 'busy', suggestion: null };
     return { outcome: 'failed', suggestion: null, reason: typeof data?.reason === 'string' ? data.reason : undefined };
-  } catch {
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return { outcome: 'timeout', suggestion: null };
     return { outcome: 'failed', suggestion: null };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -277,8 +284,14 @@ export async function fetchVisionRead(bitmap: ImageBitmap, idToken: string): Pro
     return { outcome: 'failed', suggestion: null };
   }
   if (!base64) return { outcome: 'failed', suggestion: null };
-  const first = await requestVisionRead(base64, idToken);
+  // One 25-second budget for the whole read, retry included — the
+  // note in the UI must ALWAYS land on a verdict (owner's test
+  // stranded on "Reading…" when nothing in the chain had a deadline).
+  const budgetEndsAt = Date.now() + 25_000;
+  const remaining = () => Math.max(1_000, budgetEndsAt - Date.now());
+  const first = await requestVisionRead(base64, idToken, fetch, remaining());
   if (first.outcome !== 'busy') return first;
+  if (Date.now() + 2_000 > budgetEndsAt) return first;
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  return requestVisionRead(base64, idToken);
+  return requestVisionRead(base64, idToken, fetch, remaining());
 }

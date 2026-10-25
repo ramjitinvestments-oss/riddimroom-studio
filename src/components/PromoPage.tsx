@@ -133,6 +133,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const currentUserRef = useRef<typeof currentUser>(null);
   currentUserRef.current = currentUser;
   const lastBitmapRef = useRef<ImageBitmap | null>(null);
+  const inFlightRef = useRef(0);
+  const readCacheRef = useRef<Map<string, VisionSuggestion>>(new Map());
+  const suggestKeyRef = useRef<string>('');
   const [ownTrack, setOwnTrack] = useState<File | null>(null);
   const [packTrackId, setPackTrackId] = useState<string | null>(null);
   const [fontFamily, setFontFamily] = useState<string>(DEFAULT_PROMO_FONT);
@@ -167,43 +170,63 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   // vision read then refines them with the artwork's own printed
   // words. Fields the user has typed in are never overwritten, and
   // the note under the fields always says which source won — a
-  // failed read is reported in plain words, never silent.
-  const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string) => {
+  // failed read is reported in plain words, never silent, and the
+  // spinner is owned by an in-flight counter so NO interleaving of
+  // reads can strand it (the owner's "stuck on Reading…" defect).
+  const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string, cacheKey = '') => {
     const runId = ++suggestRunRef.current;
     const ctx: SuggestionContext = { kind, fileName };
     suggestCtxRef.current = ctx;
+    suggestKeyRef.current = cacheKey;
     lastBitmapRef.current = bitmap;
     visionRef.current = null;
     setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bankSuggestion(ctx)));
     setAutoNote('Words suggested from your artwork type — tap any line to make it yours.');
-    const user = currentUserRef.current;
-    if (!user) return;
-    setSuggesting(true);
-    let token: string | null = null;
-    try {
-      token = await user.getIdToken(true);
-    } catch {
-      token = null;
-    }
-    if (!token) {
-      if (suggestRunRef.current === runId) setSuggesting(false);
+
+    // Session cache: a successful read of the same image is never
+    // paid for twice.
+    const cached = cacheKey ? readCacheRef.current.get(cacheKey) : undefined;
+    if (cached) {
+      visionRef.current = cached;
+      setTexts((t) => mergeIntoUntouched(t, touchedRef.current, cached));
+      setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
       return;
     }
-    const read = await fetchVisionRead(bitmap, token);
-    if (suggestRunRef.current !== runId) return;
-    setSuggesting(false);
-    if (read.outcome === 'ok' && read.suggestion) {
-      visionRef.current = read.suggestion;
-      setTexts((t) => mergeIntoUntouched(t, touchedRef.current, read.suggestion!));
-      setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
-    } else if (read.outcome === 'not-configured') {
-      setAutoNote("Image reading isn't switched on for this build yet — words suggested from the artwork type instead.");
-    } else if (read.outcome === 'busy') {
-      setAutoNote('The artwork reader was busy — suggested words are in. Tap “Read my artwork” to try the read again.');
-    } else {
-      setAutoNote(
-        `The artwork read didn't complete${read.reason ? ` — ${read.reason}` : ''}. Suggested words are in; tap “Read my artwork” to try again.`,
-      );
+
+    const user = currentUserRef.current;
+    if (!user) return;
+    inFlightRef.current += 1;
+    setSuggesting(true);
+    try {
+      let token: string | null = null;
+      try {
+        token = await user.getIdToken(true);
+      } catch {
+        token = null;
+      }
+      if (!token) return;
+      const read = await fetchVisionRead(bitmap, token);
+      if (suggestRunRef.current !== runId) return; // a newer read owns the note
+      if (read.outcome === 'ok' && read.suggestion) {
+        const suggestion = read.suggestion;
+        visionRef.current = suggestion;
+        if (cacheKey) readCacheRef.current.set(cacheKey, suggestion);
+        setTexts((t) => mergeIntoUntouched(t, touchedRef.current, suggestion));
+        setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
+      } else if (read.outcome === 'not-configured') {
+        setAutoNote("Image reading isn't switched on for this build yet — words suggested from the artwork type instead.");
+      } else if (read.outcome === 'busy') {
+        setAutoNote('The artwork reader was busy — suggested words are in. Tap “Read my artwork” to try the read again.');
+      } else if (read.outcome === 'timeout') {
+        setAutoNote('The read timed out — suggested words are in. Tap “Read my artwork” to try again.');
+      } else {
+        setAutoNote(
+          `The artwork read didn't complete${read.reason ? ` — ${read.reason}` : ''}. Suggested words are in; tap “Read my artwork” to try again.`,
+        );
+      }
+    } finally {
+      inFlightRef.current = Math.max(0, inFlightRef.current - 1);
+      setSuggesting(inFlightRef.current > 0);
     }
   }, []);
 
@@ -211,7 +234,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     const bitmap = lastBitmapRef.current;
     const ctx = suggestCtxRef.current;
     if (!bitmap || !ctx || suggesting) return;
-    void runSuggestion(bitmap, ctx.kind, ctx.fileName);
+    void runSuggestion(bitmap, ctx.kind, ctx.fileName, suggestKeyRef.current);
   }, [runSuggestion, suggesting]);
 
   const cycleField = useCallback((field: SuggestionField) => {
@@ -245,7 +268,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       if (firstAnalysis) setRecipe(RECIPE_FOR_KIND[firstAnalysis.suggestedKind]);
       setPhase('ready');
       if (firstAnalysis && results[0]) {
-        void runSuggestion(results[0].bitmap, firstAnalysis.suggestedKind, list[0].name);
+        void runSuggestion(results[0].bitmap, firstAnalysis.suggestedKind, list[0].name, `${list[0].name}:${list[0].size}`);
       }
     } catch (err: any) {
       setError(err?.message || 'That file could not be read as an image.');
@@ -636,7 +659,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               </div>
               {(suggesting || autoNote) && (
                 <p className="text-[11px] text-white/40">
-                  {suggesting ? 'Reading your artwork…' : autoNote}
+                  {suggesting ? 'Reading your artwork… up to ~20 seconds.' : autoNote}
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-2 pt-1">

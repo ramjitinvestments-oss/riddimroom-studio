@@ -84,15 +84,25 @@ export function sanitizePromoSuggestion(raw: unknown): PromoImageSuggestion {
 }
 
 const FILE_READY_POLL_INTERVAL_MS = 1000;
-const FILE_READY_TIMEOUT_MS = 30_000;
+const FILE_READY_TIMEOUT_MS = 12_000;
+/**
+ * Total server budget for one read (upload + processing wait +
+ * generation). The serverless host kills invocations at 60s; the
+ * client's own deadline is 25s — so this budget keeps the function
+ * answering with a classed result LONG before either kill, instead
+ * of stretching toward a minute the way the first version could.
+ */
+const READ_DEADLINE_MS = 35_000;
 
-async function waitUntilActive(ai: GoogleGenAI, name: string): Promise<void> {
-  const deadline = Date.now() + FILE_READY_TIMEOUT_MS;
+async function waitUntilActive(ai: GoogleGenAI, name: string, deadline: number): Promise<void> {
+  const pollDeadline = Math.min(deadline, Date.now() + FILE_READY_TIMEOUT_MS);
   for (;;) {
     const file = await ai.files.get({ name });
     if (file.state === 'ACTIVE') return;
     if (file.state === 'FAILED') throw new Error(`Gemini file processing failed for "${name}".`);
-    if (Date.now() > deadline) throw new Error(`Gemini file "${name}" did not become ready within ${FILE_READY_TIMEOUT_MS / 1000}s.`);
+    if (Date.now() > pollDeadline) {
+      throw new PromoVisionBusyError(`Gemini file "${name}" did not become ready within ${FILE_READY_TIMEOUT_MS / 1000}s.`);
+    }
     await new Promise((resolve) => setTimeout(resolve, FILE_READY_POLL_INTERVAL_MS));
   }
 }
@@ -122,12 +132,19 @@ export async function analyzePromoImage(input: {
   if (!uploaded.uri || !uploaded.name) {
     throw new Error('Gemini file upload did not return a usable file reference.');
   }
+  const startedAt = Date.now();
+  const deadline = startedAt + READ_DEADLINE_MS;
   try {
-    await waitUntilActive(ai, uploaded.name);
+    await waitUntilActive(ai, uploaded.name, deadline);
     const failures: string[] = [];
     let sawBusy = false;
     for (const model of MODELS) {
       for (let attempt = 0; attempt < 2; attempt++) {
+        if (Date.now() > deadline) {
+          sawBusy = true;
+          failures.push('read deadline reached');
+          break;
+        }
         try {
           const response = await ai.models.generateContent({
             model,

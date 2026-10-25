@@ -116,3 +116,21 @@ describe('real music pack integrity', () => {
     expect(creditForFileName('some-user-upload.mp3')).toBeNull();
   });
 });
+
+describe('vision read deadline', () => {
+  it('an aborted (hung) request resolves as a timeout verdict, never hangs', async () => {
+    const { requestVisionRead } = await import('./suggest');
+    const hangingFetcher = (_input: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          const err = new Error('aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
+    const started = Date.now();
+    const result = await requestVisionRead('AA', 'tok', hangingFetcher as never, 40);
+    expect(result.outcome).toBe('timeout');
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
