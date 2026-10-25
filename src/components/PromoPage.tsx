@@ -17,13 +17,15 @@ import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
 import {
   bankSuggestion,
   cycleAlternate,
-  fetchVisionRead,
   fieldAlternates,
   mergeIntoUntouched,
+  splitHeadline,
   type SuggestionContext,
   type SuggestionField,
   type VisionSuggestion,
 } from '../lib/promo/suggest';
+import { analyzeArtwork } from '../lib/promo/ocrEngine';
+import { classifyReadout, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../lib/timeline/utils';
@@ -126,6 +128,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [texts, setTexts] = useState<PromoTexts>({ hook1: '', hook2: '', cta: '', sub: '' });
   const [autoNote, setAutoNote] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
+  const [analyzePct, setAnalyzePct] = useState<number | null>(null);
+  const [readLines, setReadLines] = useState<OcrLine[]>([]);
   const touchedRef = useRef<Set<string>>(new Set());
   const visionRef = useRef<VisionSuggestion | null>(null);
   const suggestCtxRef = useRef<SuggestionContext | null>(null);
@@ -134,7 +138,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   currentUserRef.current = currentUser;
   const lastBitmapRef = useRef<ImageBitmap | null>(null);
   const inFlightRef = useRef(0);
-  const readCacheRef = useRef<Map<string, VisionSuggestion>>(new Map());
+  const readCacheRef = useRef<Map<string, ReadoutResult>>(new Map());
   const suggestKeyRef = useRef<string>('');
   const [ownTrack, setOwnTrack] = useState<File | null>(null);
   const [packTrackId, setPackTrackId] = useState<string | null>(null);
@@ -167,13 +171,30 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
 
   // Auto-fit words: the bank fills untouched fields instantly; the
-  // vision read then refines them with the artwork's own printed
-  // words. Fields the user has typed in are never overwritten, and
-  // the note under the fields always says which source won — a
-  // failed read is reported in plain words, never silent, and the
-  // spinner is owned by an in-flight counter so NO interleaving of
-  // reads can strand it (the owner's "stuck on Reading…" defect).
-  const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string, cacheKey = '') => {
+  // DEDICATED ON-DEVICE ENGINE (Tesseract OCR, R11) then reads the
+  // artwork itself — no server, no key, no quota (the Gemini read
+  // was retired after three rounds of unverifiable failures). The
+  // spinner is owned by an in-flight counter so no interleaving can
+  // strand it, and every line the engine reads is shown in the
+  // readout panel for one-tap assignment.
+  const applyReadout = useCallback((result: ReadoutResult) => {
+    visionRef.current = {
+      hook1: result.fields.hook1 ?? '',
+      hook2: result.fields.hook2 ?? '',
+      sub: result.fields.sub ?? '',
+      cta: result.fields.cta ?? '',
+      genre: result.genre,
+    };
+    setReadLines(result.lines);
+    setTexts((t) => mergeIntoUntouched(t, touchedRef.current, result.fields));
+    setAutoNote(
+      result.headline
+        ? 'Words read from your artwork itself — tap any line to make it yours.'
+        : 'The engine read your artwork — tap a line below to place it where it belongs.',
+    );
+  }, []);
+
+  const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string, cacheKey = '', force = false) => {
     const runId = ++suggestRunRef.current;
     const ctx: SuggestionContext = { kind, fileName };
     suggestCtxRef.current = ctx;
@@ -183,59 +204,69 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bankSuggestion(ctx)));
     setAutoNote('Words suggested from your artwork type — tap any line to make it yours.');
 
-    // Session cache: a successful read of the same image is never
-    // paid for twice.
-    const cached = cacheKey ? readCacheRef.current.get(cacheKey) : undefined;
-    if (cached) {
-      visionRef.current = cached;
-      setTexts((t) => mergeIntoUntouched(t, touchedRef.current, cached));
-      setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
-      return;
+    if (!force && cacheKey) {
+      const cached = readCacheRef.current.get(cacheKey);
+      if (cached) {
+        applyReadout(cached);
+        return;
+      }
     }
 
-    const user = currentUserRef.current;
-    if (!user) return;
     inFlightRef.current += 1;
     setSuggesting(true);
+    setAnalyzePct(0);
     try {
-      let token: string | null = null;
+      let lines: OcrLine[] = [];
       try {
-        token = await user.getIdToken(true);
+        lines = await analyzeArtwork(bitmap, (fraction, stage) => {
+          if (suggestRunRef.current === runId && stage === 'recognizing text') setAnalyzePct(Math.round(fraction * 100));
+        });
       } catch {
-        token = null;
+        if (suggestRunRef.current === runId) {
+          setAutoNote('The artwork engine could not load — check your connection. Suggested words are in; tap "Analyze artwork" to try again.');
+        }
+        return;
       }
-      if (!token) return;
-      const read = await fetchVisionRead(bitmap, token);
-      if (suggestRunRef.current !== runId) return; // a newer read owns the note
-      if (read.outcome === 'ok' && read.suggestion) {
-        const suggestion = read.suggestion;
-        visionRef.current = suggestion;
-        if (cacheKey) readCacheRef.current.set(cacheKey, suggestion);
-        setTexts((t) => mergeIntoUntouched(t, touchedRef.current, suggestion));
-        setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
-      } else if (read.outcome === 'not-configured') {
-        setAutoNote("Image reading isn't switched on for this build yet — words suggested from the artwork type instead.");
-      } else if (read.outcome === 'busy') {
-        setAutoNote('The artwork reader was busy — suggested words are in. Tap “Read my artwork” to try the read again.');
-      } else if (read.outcome === 'timeout') {
-        setAutoNote('The read timed out — suggested words are in. Tap “Read my artwork” to try again.');
-      } else {
-        setAutoNote(
-          `The artwork read didn't complete${read.reason ? ` — ${read.reason}` : ''}. Suggested words are in; tap “Read my artwork” to try again.`,
-        );
+      if (suggestRunRef.current !== runId) return;
+      if (lines.length === 0) {
+        setReadLines([]);
+        setAutoNote('No readable words found in this image — suggested words are in. Type your own, or analyze again after a clearer upload.');
+        return;
       }
+      const result = classifyReadout(lines, ctx);
+      if (cacheKey) readCacheRef.current.set(cacheKey, result);
+      applyReadout(result);
     } finally {
       inFlightRef.current = Math.max(0, inFlightRef.current - 1);
       setSuggesting(inFlightRef.current > 0);
+      if (suggestRunRef.current === runId) setAnalyzePct(null);
     }
-  }, []);
+  }, [applyReadout]);
 
-  const handleReadAgain = useCallback(() => {
+  const handleAnalyze = useCallback(() => {
     const bitmap = lastBitmapRef.current;
     const ctx = suggestCtxRef.current;
     if (!bitmap || !ctx || suggesting) return;
-    void runSuggestion(bitmap, ctx.kind, ctx.fileName, suggestKeyRef.current);
+    void runSuggestion(bitmap, ctx.kind, ctx.fileName, suggestKeyRef.current, true);
   }, [runSuggestion, suggesting]);
+
+  /** One-tap assignment from the readout: a line the engine read,
+      placed exactly where the user wants it. Counts as the user's
+      own edit, so later auto-fills never overwrite it. */
+  const assignReadLine = useCallback((target: 'hook' | 'sub' | 'cta', text: string) => {
+    if (target === 'hook') {
+      const [h1, h2] = splitHeadline(text);
+      touchedRef.current.add('hook1');
+      if (h2) touchedRef.current.add('hook2');
+      setTexts((t) => ({ ...t, hook1: h1, ...(h2 ? { hook2: h2 } : {}) }));
+    } else if (target === 'sub') {
+      touchedRef.current.add('sub');
+      setTexts((t) => ({ ...t, sub: text }));
+    } else {
+      touchedRef.current.add('cta');
+      setTexts((t) => ({ ...t, cta: text }));
+    }
+  }, []);
 
   const cycleField = useCallback((field: SuggestionField) => {
     const ctx = suggestCtxRef.current;
@@ -659,7 +690,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               </div>
               {(suggesting || autoNote) && (
                 <p className="text-[11px] text-white/40">
-                  {suggesting ? 'Reading your artwork… up to ~20 seconds.' : autoNote}
+                  {suggesting ? `Analyzing your artwork on this device${analyzePct !== null ? ` — ${analyzePct}%` : '…'}` : autoNote}
                 </p>
               )}
               <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -670,14 +701,35 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   Save CTA + sub + skin as my brand defaults
                 </button>
                 <button
-                  onClick={handleReadAgain}
-                  disabled={suggesting}
-                  className="min-h-[40px] px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-white/80 text-[11px] font-bold disabled:opacity-50"
+                  onClick={handleAnalyze}
+                  disabled={suggesting || !analysis}
+                  className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold disabled:opacity-50"
                 >
-                  {suggesting ? 'Reading…' : 'Read my artwork'}
+                  {suggesting ? 'Analyzing…' : 'Analyze artwork'}
                 </button>
                 {kitNote && <span className="text-[11px] text-white/40">{kitNote}</span>}
               </div>
+              {readLines.length > 0 && (
+                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/50">What the engine read</p>
+                  {readLines.map((line, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="flex-1 min-w-0 truncate text-xs text-white/85" title={line.text}>{line.text}</span>
+                      <span className="text-[10px] text-white/30 shrink-0">{line.confidence}%</span>
+                      {(['hook', 'sub', 'cta'] as const).map((target) => (
+                        <button
+                          key={target}
+                          onClick={() => assignReadLine(target, line.text)}
+                          className="shrink-0 min-h-[28px] px-2 rounded-md border border-white/15 bg-white/5 hover:bg-gold/20 hover:text-gold text-[10px] font-bold uppercase text-white/60"
+                        >
+                          {target}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                  <p className="text-[10px] text-white/35 pt-0.5">Tap Hook, Sub or CTA to place a line exactly where it belongs.</p>
+                </div>
+              )}
             </div>
 
             <button
