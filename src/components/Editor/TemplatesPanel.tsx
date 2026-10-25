@@ -152,20 +152,22 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         </p>
       )}
 
-      {/* Category chips: one slim scrollable row (v3 compact pass). */}
-      <div className="flex flex-nowrap gap-1 overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
-        {(['All', ...TEMPLATE_CATEGORIES] as const).map((c) => (
-          <button
-            key={c}
-            onClick={() => setCategory(c)}
-            className={`shrink-0 min-h-10 px-2.5 rounded-full text-[10px] font-bold border transition flex items-center ${
-              category === c ? 'bg-gold text-black border-gold' : 'bg-white/5 text-white/60 border-white/10 hover:bg-white/10'
-            }`}
-          >
-            {c}
-          </button>
-        ))}
-      </div>
+      {/* v9: category as one dropdown row (was a scrolling chip row). */}
+      <label className="flex items-center gap-2">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Category</span>
+        <select
+          aria-label="Template category"
+          value={category}
+          onChange={(e) => setCategory(e.target.value as TemplateCategory | 'All')}
+          className="flex-1 min-h-10 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+        >
+          {(['All', ...TEMPLATE_CATEGORIES] as const).map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      </label>
 
       <TemplateSection
         title="Hooks · 1.5–4s"

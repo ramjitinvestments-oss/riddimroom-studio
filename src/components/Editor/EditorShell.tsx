@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronRight, FolderOpen, Plus, Redo2, Settings, Undo2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, FolderOpen, Plus, Redo2, Settings, Undo2, X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import BrandLogo from '../BrandLogo';
 import { ProjectProvider, useProject } from '../../context/ProjectContext';
@@ -33,6 +33,37 @@ import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
  * through `useProject()`, i.e. the timeline foundation's `Project` model —
  * no parallel state.
  */
+
+/**
+ * v9 accordion group for the editor side panel: a slim 44px header row;
+ * the body renders only while the group is open (one group at a time —
+ * the shell owns which). Same node on desktop and in the mobile sheet.
+ */
+function PanelGroup({
+  title,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-xl border border-white/10 bg-white/[0.03]">
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        className="w-full min-h-11 px-3 flex items-center gap-1.5 text-left text-[11px] font-bold uppercase tracking-wide text-white/70 hover:text-white"
+      >
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        {title}
+      </button>
+      {open && <div className="px-3 pb-3 flex flex-col gap-3">{children}</div>}
+    </section>
+  );
+}
 
 function EditorInner({ uid }: { uid: string }) {
   const {
@@ -73,6 +104,14 @@ function EditorInner({ uid }: { uid: string }) {
   // into a `BottomSheet` instead, opened from two small header buttons.
   // `null` = no sheet open; otherwise which one.
   const [mobileSheet, setMobileSheet] = useState<'library' | 'panel' | null>(null);
+
+  // v9 mobile-first: the side panel is an ACCORDION — one group open at
+  // a time, so a phone shows six slim headers instead of nine stacked
+  // panels. Selecting a timeline item auto-opens its group.
+  const [openGroup, setOpenGroup] = useState<string>('add');
+  useEffect(() => {
+    if (selectedItemId) setOpenGroup('item');
+  }, [selectedItemId]);
 
   // Re-derive the toggle's highlighted variant from what's actually placed
   // on the timeline whenever the project (re)loads — `bgVariantByAssetId`
@@ -291,14 +330,19 @@ function EditorInner({ uid }: { uid: string }) {
     </>
   );
 
+  // v9: the side panel as an accordion — one group open at a time.
+  // Every panel below is the SAME component instance as before (same
+  // sidePanel node → desktop aside + mobile BottomSheet, never a second
+  // copy); only the chrome changed. Groups: Add · Item · Style
+  // (Transitions + Effects, the v9 "Style" merge) · Audio · Overlay ·
+  // Captions (Transcribe + manual + export, the v9 Captions merge).
+  const groupProps = (id: string) => ({
+    open: openGroup === id,
+    onToggle: () => setOpenGroup((g) => (g === id ? '' : id)),
+  });
   const sidePanel = (
     <>
-      {/* Tweaks round — Step 2 gets the same three clear add actions as
-          Step 1's import panel (before this, adding media mid-edit meant
-          going back to Step 1). Same MediaImportPanel component and the
-          same upload handlers — never a second upload system. */}
-      <section className="flex flex-col gap-2">
-        <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Add media</h3>
+      <PanelGroup title="Add media" {...groupProps('add')}>
         <MediaImportPanel
           uid={uid}
           canvasWidth={project.canvasWidth}
@@ -306,58 +350,37 @@ function EditorInner({ uid }: { uid: string }) {
           onAssetUploaded={handleAssetUploaded}
           onOverlayAssetUploaded={handleOverlayAssetUploaded}
         />
-      </section>
+      </PanelGroup>
 
-      {selectedItem ? (
-        <section>
-          <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50 mb-1.5">Selected item</h3>
+      <PanelGroup title={selectedItem ? 'Selected item' : 'Text & watermark'} {...groupProps('item')}>
+        {selectedItem ? (
           <ItemInspector item={selectedItem} />
-        </section>
-      ) : (
-        <>
-          <section>
+        ) : (
+          <>
             <AddTextPanel currentTime={currentTime} />
-          </section>
-          <section>
             <WatermarkPanel uid={uid} />
-          </section>
-        </>
-      )}
+          </>
+        )}
+      </PanelGroup>
 
-      {/* Phase 2.1 — Transitions + Effects as first-class Step 2 panels.
-          They act on the selected item (guided empty states when nothing
-          eligible is selected) and live in this same `sidePanel` node, so
-          they mount in the desktop aside AND the mobile BottomSheet,
-          exactly like every other panel here — never a second copy. */}
-      <section>
+      <PanelGroup title="Style — transitions & effects" {...groupProps('style')}>
         <TransitionsPanel item={selectedItem} />
-      </section>
-
-      <section>
         <EffectsPanel item={selectedItem} />
-      </section>
+      </PanelGroup>
 
-      {/* Phase 2.3 — Music & Audio panel, same sidePanel node/mounting
-          pattern as Transitions/Effects above. */}
-      <section>
+      <PanelGroup title="Music & audio" {...groupProps('audio')}>
         <MusicPanel uid={uid} item={selectedItem} />
-      </section>
+      </PanelGroup>
 
-      <section>
+      <PanelGroup title="Overlay (PiP)" {...groupProps('overlay')}>
         <PipPanel item={selectedItem} />
-      </section>
+      </PanelGroup>
 
-      <section>
+      <PanelGroup title="Captions" {...groupProps('captions')}>
         <TranscribePanel uid={uid} />
-      </section>
-
-      <section>
         <AddCaptionPanel currentTime={currentTime} />
-      </section>
-
-      <section>
         <CaptionsExportPanel />
-      </section>
+      </PanelGroup>
     </>
   );
 
@@ -397,20 +420,6 @@ function EditorInner({ uid }: { uid: string }) {
           />
         </div>
         <div className="flex items-center gap-1.5 sm:gap-3 text-xs shrink-0">
-          <button
-            onClick={() => setMobileSheet('library')}
-            title="Media library"
-            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
-          >
-            <FolderOpen size={18} />
-          </button>
-          <button
-            onClick={() => setMobileSheet('panel')}
-            title={selectedItem ? 'Selected item' : 'Add / Export'}
-            className="lg:hidden min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
-          >
-            <Settings size={18} />
-          </button>
           <div className="flex items-center gap-1">
             <button
               onClick={undo}
@@ -486,7 +495,7 @@ function EditorInner({ uid }: { uid: string }) {
           <div className="flex flex-col gap-4">{libraryPanel}</div>
           <aside className="flex flex-col gap-4">
             <TemplatesPanel currentTime={currentTime} uid={uid} />
-            <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
+            <div className="hidden lg:block bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
               <p className="font-bold text-white text-sm">How it works</p>
               <p>1. Upload or record your clip.</p>
               <p>2. Edit + add captions.</p>
@@ -498,7 +507,7 @@ function EditorInner({ uid }: { uid: string }) {
       )}
 
       {step === 2 && (
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 pb-24 sm:p-4 overflow-auto min-w-0">
           <main className="flex flex-col gap-4 items-center min-w-0">
             <PreviewPane
               project={project}
@@ -531,7 +540,7 @@ function EditorInner({ uid }: { uid: string }) {
       )}
 
       {step === 3 && (
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 pb-24 sm:p-4 overflow-auto min-w-0">
           <main className="flex flex-col gap-4 items-center min-w-0">
             <PreviewPane
               project={project}
@@ -544,16 +553,38 @@ function EditorInner({ uid }: { uid: string }) {
             />
             <div className="flex gap-2">
               <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
-              {/* Phone-width dead-end fix (five-star audit): below lg the
-                  export controls live only in the BottomSheet — without
-                  this CTA the Export step's main pane offered no visible
-                  path to them at all (just a header icon). Same sheet,
-                  same panel node — never a second export UI. */}
-              <button onClick={() => setMobileSheet('panel')} className="lg:hidden min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5">Export options <ArrowRight size={16} /></button>
             </div>
           </main>
           <aside className="hidden lg:flex flex-col gap-4">{exportPanel}</aside>
         </div>
+      )}
+
+      {/* v9 mobile bottom bar (steps 2–3): thumb-reach Library / Tools,
+          plus a direct Export jump on step 2. Replaces the two header
+          icon buttons; desktop keeps the side columns and shows no bar. */}
+      {step !== 1 && (
+        <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-[#0b0b0b]/95 backdrop-blur border-t border-white/10 flex" aria-label="Editor tools">
+          <button
+            onClick={() => setMobileSheet('library')}
+            className="flex-1 min-h-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold uppercase tracking-wide text-white/80"
+          >
+            <FolderOpen size={18} /> Library
+          </button>
+          <button
+            onClick={() => setMobileSheet('panel')}
+            className="flex-1 min-h-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold uppercase tracking-wide text-white/80"
+          >
+            <Settings size={18} /> {step === 3 ? 'Export' : selectedItem ? 'Selected item' : 'Tools'}
+          </button>
+          {step === 2 && (
+            <button
+              onClick={() => setStep(3)}
+              className="flex-1 min-h-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-black uppercase tracking-wide bg-gold text-black"
+            >
+              <ArrowRight size={18} /> Export
+            </button>
+          )}
+        </nav>
       )}
 
       <BottomSheet open={mobileSheet === 'library'} onClose={() => setMobileSheet(null)} title="Media Library">

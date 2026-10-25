@@ -82,37 +82,23 @@ export function EffectsPanel({ item }: { item: TimelineItem | null }) {
     { id: 'br', label: 'Bottom right', position: { x: 80, y: 80 } },
   ];
 
-  const cardClass = (isActive: boolean) =>
-    `min-h-11 px-2 rounded-lg border text-left flex items-center justify-between gap-1 transition ${
-      isActive
-        ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
-        : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
-    }`;
-
   return (
     <div className="flex flex-col gap-2">
       {header}
-      <div className="grid grid-cols-2 gap-1.5">
-        <button onClick={() => setMotion({ type: 'none' })} aria-pressed={activeType === 'none'} className={cardClass(activeType === 'none')}>
-          <span className="text-xs font-bold">None</span>
-          {activeType === 'none' && <Check size={14} strokeWidth={3} className="shrink-0" />}
-        </button>
-        {MOTION_EFFECTS.map((effect) => {
-          const isActive = activeType === effect.id;
-          return (
-            <button
-              key={effect.id}
-              onClick={() => setMotion({ type: effect.id })}
-              aria-pressed={isActive}
-              title={effect.description}
-              className={cardClass(isActive)}
-            >
-              <span className="text-xs font-bold leading-tight">{effect.label}</span>
-              {isActive && <Check size={14} strokeWidth={3} className="shrink-0" />}
-            </button>
-          );
-        })}
-      </div>
+      {/* v9 mobile-first: one dropdown instead of a 13-card grid. */}
+      <select
+        aria-label="Motion effect"
+        value={activeType}
+        onChange={(e) => setMotion({ type: e.target.value as MotionEffectType })}
+        className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-gold/60"
+      >
+        <option value="none">None</option>
+        {MOTION_EFFECTS.map((effect) => (
+          <option key={effect.id} value={effect.id}>
+            {effect.label}
+          </option>
+        ))}
+      </select>
 
       {activeInfo && (
         <div className="flex flex-col gap-2 pt-1">

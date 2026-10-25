@@ -108,36 +108,29 @@ export function TransitionsPanel({ item }: { item: TimelineItem | null }) {
           <Check size={12} strokeWidth={3} /> Applied: {appliedInfo?.label ?? applied.preset} ({applied.durationSeconds.toFixed(2)}s)
         </p>
       )}
-      {TRANSITION_CATEGORIES.map((cat) => (
-        <div key={cat.id} className="flex flex-col gap-1.5">
-          <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">{cat.label}</span>
-          <div className="grid grid-cols-2 gap-1.5">
-            {transitionPresetsByCategory(cat.id).map((preset) => {
-              const isActive = applied?.preset === preset.id;
-              return (
-                <button
-                  key={preset.id}
-                  onClick={() => handlePick(preset.id)}
-                  aria-pressed={isActive}
-                  className={`min-h-11 px-2 rounded-lg border text-left flex items-center justify-between gap-1 transition ${
-                    isActive
-                      ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
-                      : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
-                  }`}
-                >
-                  <span className="flex flex-col">
-                    <span className="text-xs font-bold leading-tight">{preset.label}</span>
-                    <span className={`text-[10px] ${isActive ? 'text-gold/70' : 'text-white/30'}`}>
-                      {preset.defaultDurationSeconds.toFixed(2)}s
-                    </span>
-                  </span>
-                  {isActive && <Check size={14} strokeWidth={3} className="shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
+      {/* v9 mobile-first: one dropdown (grouped by category) instead of
+          34 cards — same one-tap apply, a fifth of the scroll. */}
+      <select
+        aria-label="Transition preset"
+        value={applied?.preset ?? ''}
+        onChange={(e) => {
+          if (e.target.value) handlePick(e.target.value as AnimationPreset);
+        }}
+        className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-gold/60"
+      >
+        <option value="" disabled>
+          Choose a transition…
+        </option>
+        {TRANSITION_CATEGORIES.map((cat) => (
+          <optgroup key={cat.id} label={cat.label}>
+            {transitionPresetsByCategory(cat.id).map((preset) => (
+              <option key={preset.id} value={preset.id}>
+                {preset.label} · {preset.defaultDurationSeconds.toFixed(2)}s
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
       <p className="text-[10px] text-white/30">
         {TRANSITION_PRESETS.length} presets. Tip: Undo (Ctrl/Cmd+Z) removes a transition — it shifts the next clip, so there's no separate remove.
       </p>
