@@ -29,6 +29,7 @@ import { analyzeArtwork } from '../lib/promo/ocrEngine';
 import { parseEventDate, planCampaign, campaignFileName, type CampaignPiece, type CampaignPlan } from '../lib/promo/campaign';
 import { detectBeats, findHookWindow } from '../lib/media/beats';
 import { convertPromoTextToCaptions } from '../lib/promo/viralCaptions';
+import { CAPTION_SIZE_TIERS, type CaptionSizeTier } from '../lib/captions/styles';
 import { createExportRenderer, getConfiguredExportEngine } from '../lib/export/mediabunnyExporter';
 import { validateRenderResult } from '../lib/export/validate';
 import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
@@ -232,6 +233,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   /** R17 Viral Finish: words as beat-timed animated captions, and
       music that starts at its hook. */
   const [captionMode, setCaptionMode] = useState<'words' | 'lines'>('words');
+  /** R19: caption size tier for the viral-words conversion (promo
+      words are headlines — L is the default). */
+  const [captionSize, setCaptionSize] = useState<CaptionSizeTier>('L');
   const [hookTrim, setHookTrim] = useState(true);
   const trackAnalysisCacheRef = useRef(new Map<string, Promise<{ beats: number[]; bpm: number; hook: number } | null>>());
 
@@ -640,6 +644,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           project,
           [cleanTexts.hook1 ?? '', cleanTexts.hook2 ?? '', cleanTexts.sub ?? '', cleanTexts.cta ?? ''],
           beats,
+          undefined,
+          CAPTION_SIZE_TIERS[captionSize],
         );
       }
 
@@ -650,7 +656,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setError(err?.message || 'The promo could not be built. Try again.');
       setPhase('ready');
     }
-  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily, captionMode, hookTrim, analyzeTrackFile]);
+  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily, captionMode, hookTrim, analyzeTrackFile, captionSize]);
 
 
   /**
@@ -862,6 +868,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
             project,
             [piece.texts.hook1 ?? '', piece.texts.hook2 ?? '', piece.texts.sub ?? '', piece.texts.cta ?? ''],
             beats,
+            undefined,
+            CAPTION_SIZE_TIERS[captionSize],
           );
         }
         await saveProject(project);
@@ -937,7 +945,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile, captionSize]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -1276,6 +1284,16 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   Kinetic lines
                 </button>
               </div>
+              {captionMode === 'words' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Caption size</span>
+                  {(Object.keys(CAPTION_SIZE_TIERS) as CaptionSizeTier[]).map((tier) => (
+                    <button key={tier} type="button" onClick={() => setCaptionSize(tier)} className={chipCls(captionSize === tier)}>
+                      {tier === 'S' ? 'S — subtle' : tier === 'M' ? 'M — standard' : tier === 'L' ? 'L — big' : 'XL — maximum'}
+                    </button>
+                  ))}
+                </div>
+              )}
               <label className="flex flex-col gap-1">
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Your name / brand, exactly as printed on your art</span>
                 <input

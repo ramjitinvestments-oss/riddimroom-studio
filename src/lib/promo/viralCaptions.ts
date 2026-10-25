@@ -71,6 +71,7 @@ export function convertPromoTextToCaptions(
   fieldTexts: string[],
   beats: number[],
   styleId: string = VIRAL_CAPTION_STYLE_ID,
+  sizeScale = 1,
 ): Project {
   const wanted = new Set(fieldTexts.map(normalize).filter(Boolean));
   if (wanted.size === 0) return project;
@@ -99,6 +100,7 @@ export function convertPromoTextToCaptions(
       visible: true,
       words: wordTimingsForLine(item.text, duration, beatsInWindow),
       captionStyleId: styleId,
+      sizeScale,
       source: 'manual',
       editable: true,
     };

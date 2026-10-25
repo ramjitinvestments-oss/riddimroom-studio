@@ -1,34 +1,38 @@
-import { describe, it, expect } from 'vitest';
-import { CAPTION_STYLES, getCaptionStyle } from './styles';
+import { describe, expect, it } from 'vitest';
+import { CAPTION_SIZE_TIERS, CAPTION_STYLES, getCaptionStyle, resolveCaptionFontPx } from './styles';
 
-/**
- * Phase 2.3 — the style catalog is consumed by BOTH the shared compositor
- * (preview + export) and the inspector's preview chips, so its integrity is
- * worth pinning: unique ids, resolvable lookups, and a karaoke style that
- * actually carries the highlight the compositor reads.
- */
-describe('caption style catalog', () => {
-  it('has unique ids', () => {
+describe('R19 caption catalog — premium faces and the size system', () => {
+  it('style ids are unique and every style resolves', () => {
     const ids = CAPTION_STYLES.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(getCaptionStyle(id).id).toBe(id);
   });
 
-  it('getCaptionStyle resolves known ids and falls back to the first style for unknown ones', () => {
-    expect(getCaptionStyle('gold-premium').label).toBe('Gold Premium');
-    expect(getCaptionStyle('no-such-style')).toBe(CAPTION_STYLES[0]);
-  });
-
-  it('the karaoke style carries a highlightColor distinct from its base color', () => {
+  it('the flagship styles wear premium faces at true weights', () => {
+    const viral = getCaptionStyle('viral-gold-pop');
+    expect(viral.fontFamily).toContain('Anton');
+    expect(viral.fontWeight).toBe(400); // Anton is single-weight — never faux-bold
+    expect(viral.fontSize).toBe(88);
     const karaoke = getCaptionStyle('karaoke-gold');
-    expect(karaoke.highlightColor).toBeTruthy();
-    expect(karaoke.highlightColor).not.toBe(karaoke.color);
+    expect(karaoke.fontFamily).toContain('Montserrat');
+    expect(karaoke.fontWeight).toBe(900);
+    expect(getCaptionStyle('soca-pop').fontFamily).toContain('Bungee');
+    expect(getCaptionStyle('anton-slam').fontSize).toBe(94);
+    expect(getCaptionStyle('titan-chunk').fontFamily).toContain('Titan One');
+    expect(getCaptionStyle('alfa-poster').fontFamily).toContain('Alfa Slab One');
   });
 
-  it('every style has renderable params (positive size, non-empty family/color)', () => {
-    for (const style of CAPTION_STYLES) {
-      expect(style.fontSize).toBeGreaterThan(0);
-      expect(style.fontFamily.length).toBeGreaterThan(0);
-      expect(style.color.length).toBeGreaterThan(0);
-    }
+  it('sizes are authored at the 1080 reference and scale with the canvas', () => {
+    const viral = getCaptionStyle('viral-gold-pop');
+    expect(resolveCaptionFontPx(viral, 1080)).toBe(88);
+    expect(resolveCaptionFontPx(viral, 540)).toBe(44);
+    expect(resolveCaptionFontPx(viral, 2160)).toBe(176);
+  });
+
+  it('size tiers multiply the authored size', () => {
+    const viral = getCaptionStyle('viral-gold-pop');
+    expect(resolveCaptionFontPx(viral, 1080, CAPTION_SIZE_TIERS.S)).toBeCloseTo(70.4);
+    expect(resolveCaptionFontPx(viral, 1080, CAPTION_SIZE_TIERS.L)).toBe(110);
+    expect(resolveCaptionFontPx(viral, 1080, CAPTION_SIZE_TIERS.XL)).toBeCloseTo(136.4);
   });
 });

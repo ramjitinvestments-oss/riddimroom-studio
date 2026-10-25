@@ -65,6 +65,14 @@ describe('convertPromoTextToCaptions', () => {
     }
   });
 
+  it('R19: the size tier lands on the converted captions', () => {
+    const project = buildSlamProject(createDefaultProject('u1', 'T', 1080, 1920, { watermarkEnabled: false }), asset, { hook1: 'ONE NIGHT.' }, { duration: 12 });
+    const out = convertPromoTextToCaptions(project, ['ONE NIGHT.'], [], 'viral-gold-pop', 1.25);
+    const caps = out.items.filter((i) => i.type === 'caption');
+    expect(caps.length).toBeGreaterThan(0);
+    for (const c of caps) if (c.type === 'caption') expect(c.sizeScale).toBe(1.25);
+  });
+
   it('no matching field text: the project passes through untouched', () => {
     const base = createDefaultProject('u1', 'Plain', 1080, 1920, { watermarkEnabled: false });
     const project = buildSlamProject(base, asset, { hook1: 'HELLO', hook2: '', sub: '', cta: '' }, { duration: 8 });

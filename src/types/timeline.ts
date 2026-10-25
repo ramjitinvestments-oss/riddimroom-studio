@@ -381,6 +381,13 @@ export interface CaptionTimelineItem extends TimelineItemBase {
   words: CaptionWordTiming[];
   /** References a named style (riddimroom-caption's CaptionStyle shape) rather than embedding one. */
   captionStyleId: string;
+  /** R19 size system: multiplier over the style's authored size
+      (S 0.8 / M 1 / L 1.25 / XL 1.55). Absent = M. The rendered px
+      also scale with canvas width, so a cue looks the same at any
+      render size. */
+  sizeScale?: number;
+  /** R19 placement zone. Absent = 'bottom' (the safe-area anchor). */
+  anchorY?: 'bottom' | 'middle' | 'top';
   source: 'ai' | 'manual';
   /**
    * Always true in this data model — captions remain editable structured

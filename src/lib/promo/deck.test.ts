@@ -66,9 +66,9 @@ describe('the animation deck — dealt, never stamped', () => {
 });
 
 describe('premium fonts', () => {
-  it('ships exactly 10 faces and builds canvas stacks safely', () => {
-    expect(FONT_OPTIONS).toHaveLength(10);
-    expect(new Set(FONT_OPTIONS.map((f) => f.family)).size).toBe(10);
+  it('ships exactly 12 faces and builds canvas stacks safely', () => {
+    expect(FONT_OPTIONS).toHaveLength(12);
+    expect(new Set(FONT_OPTIONS.map((f) => f.family)).size).toBe(12);
     expect(canvasFontStack('Anton')).toContain('"Anton"');
     expect(canvasFontStack('Arial')).toBe('Arial, Helvetica, sans-serif');
     expect(canvasFontStack(undefined)).toBe('Arial, Helvetica, sans-serif');

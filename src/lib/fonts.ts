@@ -14,6 +14,8 @@
  * fonts the project actually uses before rendering a frame.
  */
 
+import { CAPTION_STYLES } from './captions/styles';
+
 export interface FontOption {
   /** The CSS family name stored on text items. */
   family: string;
@@ -32,6 +34,8 @@ export const FONT_OPTIONS: FontOption[] = [
   { family: 'Playfair Display', label: 'Playfair Display', vibe: 'Elegant serif — gospel + luxury' },
   { family: 'Cinzel', label: 'Cinzel', vibe: 'Engraved caps — ceremony + realty' },
   { family: 'Poppins', label: 'Poppins', vibe: 'Round + friendly — corporate clean' },
+  { family: 'Titan One', label: 'Titan One', vibe: 'Chunky rounded — friendly heavyweight' },
+  { family: 'Alfa Slab One', label: 'Alfa Slab One', vibe: 'Slab poster — reggae billboard' },
 ];
 
 export const DEFAULT_PROMO_FONT = 'Anton';
@@ -47,6 +51,8 @@ const WEIGHTS: Record<string, string> = {
   'Playfair Display': '700;800;900',
   Cinzel: '600;700;800',
   Poppins: '600;700;800',
+  'Titan One': '400',
+  'Alfa Slab One': '400',
 };
 
 export function googleFontsStylesheetUrl(): string {
@@ -99,10 +105,27 @@ export async function ensureFontsLoaded(families?: string[]): Promise<void> {
 }
 
 /** Distinct premium families a project actually uses on text items. */
-export function fontsUsedInProject(project: { items: Array<{ type: string; font?: string }> }): string[] {
+export function fontsUsedInProject(project: {
+  items: Array<{ type: string; font?: string; captionStyleId?: string }>;
+}): string[] {
   const used = new Set<string>();
   for (const item of project.items) {
     if (item.type === 'text' && item.font && item.font !== 'Arial') used.add(item.font);
+    // R19: caption styles carry premium faces too — an export must
+    // load them or the canvas silently falls back to Arial.
+    if (item.type === 'caption' && item.captionStyleId) {
+      const family = captionStyleFamily(item.captionStyleId);
+      if (family) used.add(family);
+    }
   }
   return [...used];
+}
+
+/** The loadable Google family a caption style renders in, when its
+    first-choice face is one of the premium library's. */
+export function captionStyleFamily(styleId: string): string | null {
+  const style = CAPTION_STYLES.find((s) => s.id === styleId);
+  if (!style) return null;
+  const first = style.fontFamily.split(',')[0].trim().replace(/^"|"$/g, '');
+  return FONT_OPTIONS.some((f) => f.family === first) ? first : null;
 }

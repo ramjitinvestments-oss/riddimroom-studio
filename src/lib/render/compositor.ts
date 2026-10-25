@@ -39,7 +39,7 @@ import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSett
 import { canvasFontStack } from '../fonts';
 import { getItemsAtTime } from '../timeline/utils';
 import { colorGradeToFilter } from '../grades';
-import { getCaptionStyle } from '../captions/styles';
+import { getCaptionStyle, resolveCaptionFontPx } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
 import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
 import { MAX_FADE_SECONDS } from '../media/constants';
@@ -1231,6 +1231,7 @@ export function getItemBoundsPercent(
 // ---------------------------------------------------------------------------
 
 const CAPTION_SAFE_AREA_BOTTOM_FRACTION = 0.82;
+const CAPTION_SAFE_AREA_TOP_FRACTION = 0.13;
 const CAPTION_MAX_LINE_WIDTH_FRACTION = 0.86;
 const CAPTION_WORD_POP_SECONDS = 0.18;
 
@@ -1270,30 +1271,51 @@ function drawCaptionItem(
   const centerX = canvasWidth / 2;
 
   ctx.save();
-  ctx.font = `bold ${style.fontSize}px ${style.fontFamily}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
   const activeIndex = item.words.findIndex((w) => relativeTime >= w.start && relativeTime < w.end);
   const words = item.words.map((w) => (style.uppercase ? w.text.toUpperCase() : w.text));
-  const spaceWidth = ctx.measureText(' ').width;
   const maxLineWidth = canvasWidth * CAPTION_MAX_LINE_WIDTH_FRACTION;
-  const lines = wrapCaptionWords(ctx, words, spaceWidth, maxLineWidth);
 
-  const lineHeight = style.fontSize * 1.28;
-  // Anchor the LAST line at the bottom safe area and grow upward, matching
-  // how short-form captions are conventionally placed (stays clear of
-  // platform UI chrome at the bottom of the frame) regardless of how many
-  // lines a long cue wraps into.
-  const lastLineCenterY = canvasHeight * CAPTION_SAFE_AREA_BOTTOM_FRACTION;
+  // R19 size system: the style's authored size scales with the
+  // canvas (1080 reference) and the item's size tier — then the FIT
+  // GUARANTEE shrinks the cue (never below 62% of nominal) until
+  // its widest word fits the frame and it wraps to at most 3 lines.
+  // Big and always fitting, enforced by the renderer.
+  const nominalPx = resolveCaptionFontPx(style, canvasWidth, item.sizeScale);
+  let fontPx = nominalPx;
+  let lines: CaptionLine[] = [{ words: [], widths: [], totalWidth: 0, startIndex: 0 }];
+  for (const factor of [1, 0.93, 0.86, 0.79, 0.72, 0.66, 0.62]) {
+    fontPx = nominalPx * factor;
+    ctx.font = `${style.fontWeight ?? 700} ${fontPx}px ${style.fontFamily}`;
+    const spaceWidth = ctx.measureText(' ').width;
+    lines = wrapCaptionWords(ctx, words, spaceWidth, maxLineWidth);
+    const widestWord = Math.max(0, ...lines.flatMap((l) => l.widths));
+    if (widestWord <= maxLineWidth && lines.length <= 3) break;
+  }
+  const spaceWidth = ctx.measureText(' ').width;
+
+  const lineHeight = fontPx * 1.28;
+  // Anchor zones: bottom (default) pins the LAST line at the bottom
+  // safe area and grows upward, clear of platform UI chrome; middle
+  // centers the block; top pins the first line under the top safe
+  // area.
+  const anchor = item.anchorY ?? 'bottom';
+  const lastLineCenterY =
+    anchor === 'middle'
+      ? canvasHeight * 0.5 + ((lines.length - 1) * lineHeight) / 2
+      : anchor === 'top'
+        ? canvasHeight * CAPTION_SAFE_AREA_TOP_FRACTION + (lines.length - 1) * lineHeight
+        : canvasHeight * CAPTION_SAFE_AREA_BOTTOM_FRACTION;
   const firstLineCenterY = lastLineCenterY - (lines.length - 1) * lineHeight;
 
   if (style.background) {
-    const paddingX = 24;
-    const paddingY = 14;
+    const paddingX = fontPx * 0.34;
+    const paddingY = fontPx * 0.2;
     const widestLine = Math.max(...lines.map((l) => l.totalWidth));
-    const blockTop = firstLineCenterY - style.fontSize / 2 - paddingY;
-    const blockHeight = lastLineCenterY + style.fontSize / 2 + paddingY - blockTop;
+    const blockTop = firstLineCenterY - fontPx / 2 - paddingY;
+    const blockHeight = lastLineCenterY + fontPx / 2 + paddingY - blockTop;
     ctx.fillStyle = style.background;
     ctx.fillRect(centerX - widestLine / 2 - paddingX, blockTop, widestLine + paddingX * 2, blockHeight);
   }
@@ -1321,7 +1343,7 @@ function drawCaptionItem(
       ctx.translate(x, centerY);
       if (scaleMul !== 1) ctx.scale(scaleMul, scaleMul);
       if (style.strokeColor && style.strokeColor !== 'transparent' && style.strokeWidth > 0) {
-        ctx.lineWidth = style.strokeWidth;
+        ctx.lineWidth = style.strokeWidth * (fontPx / style.fontSize);
         ctx.strokeStyle = style.strokeColor;
         ctx.strokeText(word, 0, 0);
       }

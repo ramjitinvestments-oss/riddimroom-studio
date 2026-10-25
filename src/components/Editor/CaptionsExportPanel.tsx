@@ -4,6 +4,7 @@ import { captionsToSRT, captionsToVTT, downloadTextFile, collectCues } from '../
 import { applyImportedCaptions, parseSubtitleFile, SubtitleImportError } from '../../lib/captions/subtitleImport';
 import { getItemsByTrackType } from '../../lib/timeline/utils';
 import type { CaptionTimelineItem } from '../../types/timeline';
+import { CAPTION_SIZE_TIERS, type CaptionSizeTier } from '../../lib/captions/styles';
 
 /** v1 captions export — SRT / VTT for YouTube, TikTok, Instagram, etc. Burn-in happens at export; these files are the sidecar option. Import (SRT/ASS) brings an existing caption file into the same caption model transcription writes to. */
 export function CaptionsExportPanel() {
@@ -60,6 +61,46 @@ export function CaptionsExportPanel() {
         <button onClick={handleMakeViral} className="px-3 py-2 rounded bg-gold text-black hover:bg-gold/90 text-xs font-bold min-h-10">
           Make captions viral — word by word
         </button>
+      )}
+      {hasCues && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wide text-white/40 mr-1">Size</span>
+            {(Object.keys(CAPTION_SIZE_TIERS) as CaptionSizeTier[]).map((tier) => (
+              <button
+                key={tier}
+                onClick={() => {
+                  mutate((p) => ({
+                    ...p,
+                    items: p.items.map((i) => (i.type === 'caption' ? { ...i, sizeScale: CAPTION_SIZE_TIERS[tier] } : i)),
+                  }));
+                  setMessage(`All captions set to size ${tier} — sizes scale with the frame and always fit.`);
+                }}
+                className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-gold/25 hover:text-gold text-[11px] font-bold min-h-8"
+              >
+                {tier}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wide text-white/40 mr-1">Place</span>
+            {([['bottom', 'Bottom'], ['middle', 'Middle'], ['top', 'Top']] as const).map(([zone, label]) => (
+              <button
+                key={zone}
+                onClick={() => {
+                  mutate((p) => ({
+                    ...p,
+                    items: p.items.map((i) => (i.type === 'caption' ? { ...i, anchorY: zone } : i)),
+                  }));
+                  setMessage(`All captions placed at the ${label.toLowerCase()} — inside the platform safe zones.`);
+                }}
+                className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-gold/25 hover:text-gold text-[11px] font-bold min-h-8"
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
       <div className="flex gap-2">
         <button onClick={() => handleExport('srt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-10">Export SRT</button>
