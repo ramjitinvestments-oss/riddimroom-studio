@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { analyzePixels, detectBands, recipeBands, tilingBands } from './analyze';
-import { buildKineticProject, buildLogoProject, buildSlamProject } from './recipes';
+import {
+  buildCountdownProject, buildKineticProject, buildLineupProject, buildLogoProject,
+  buildNewsflashProject, buildSlamProject, buildStackProject, buildVersusProject,
+} from './recipes';
 import { createDefaultProject } from '../projects/persistence';
 import { validateProject } from '../timeline/validation';
 import type { MediaAsset } from '../../types/timeline';
@@ -67,7 +70,7 @@ describe('promo recipe builders', () => {
     const project = buildKineticProject(createDefaultProject('user1', 'Promo'), art, slices, {
       hook1: 'ONE NIGHT.',
       cta: 'TICKETS — LINK IN BIO',
-    }, 12);
+    }, { duration: 12 });
     expect(validateProject(project).valid).toBe(true);
     const images = project.items.filter((i) => i.type === 'image');
     // ambient + 5 bands + shine + CTA card
@@ -86,7 +89,7 @@ describe('promo recipe builders', () => {
       { asset: fakeAsset('word', 1400, 200), band: { y0: 0.35, y1: 0.5 } },
       { asset: fakeAsset('tag', 1000, 120), band: { y0: 0.55, y1: 0.65 } },
     ];
-    const project = buildLogoProject(createDefaultProject('user1', 'Logo'), strips, { cta: 'BOOK NOW' }, 10);
+    const project = buildLogoProject(createDefaultProject('user1', 'Logo'), strips, { cta: 'BOOK NOW' }, { duration: 10 });
     expect(validateProject(project).valid).toBe(true);
     const images = project.items.filter((i) => i.type === 'image');
     expect(images.length).toBe(4); // 3 strips + sheen pass
@@ -100,9 +103,72 @@ describe('promo recipe builders', () => {
       hook1: 'EVEN KINGS',
       hook2: 'GET TIRED.',
       cta: "BUT KINGS DON'T QUIT.",
-    }, 10);
+    }, { duration: 10 });
     expect(validateProject(project).valid).toBe(true);
     expect(project.items.filter((i) => i.type === 'image').length).toBe(2);
     expect(project.items.filter((i) => i.type === 'text').length).toBe(3);
+  });
+
+  it('builders stay valid at 16:9 and 1:1, and skins grade the art', () => {
+    const art = fakeAsset('art169', 1200, 800);
+    const slices = tilingBands(4).map((band, i) => ({ asset: fakeAsset(`b${i}`, 1200, 200), band }));
+    for (const [w, h] of [[1920, 1080], [1080, 1080]] as const) {
+      const p = buildKineticProject(createDefaultProject('u', 'F', w, h), art, slices, {}, { duration: 10, skin: 'soca-shine' });
+      expect(validateProject(p).valid).toBe(true);
+      const graded = p.items.filter((i) => i.type === 'image' && i.colorGrade);
+      expect(graded.length).toBeGreaterThan(0);
+    }
+    const logo = buildLogoProject(createDefaultProject('u', 'L', 1920, 1080), slices.slice(0, 3), {}, { duration: 10 });
+    expect(validateProject(logo).valid).toBe(true);
+  });
+});
+
+describe('promo recipe round 2', () => {
+  const art = fakeAsset('main', 1080, 1350);
+  const texts = { hook1: 'BIG NEWS', hook2: 'TONIGHT', cta: 'LINK IN BIO', sub: 'SAT • DEC 20' };
+
+  it('countdown builds numbers then lands the CTA', () => {
+    const p = buildCountdownProject(createDefaultProject('u', 'CD'), art, texts, { duration: 10 });
+    expect(validateProject(p).valid).toBe(true);
+    const nums = p.items.filter((i) => i.type === 'text' && ['3', '2', '1'].includes(i.text));
+    expect(nums.length).toBe(3);
+  });
+
+  it('newsflash stacks headline and lower third', () => {
+    const p = buildNewsflashProject(createDefaultProject('u', 'NF'), art, texts, { duration: 10 });
+    expect(validateProject(p).valid).toBe(true);
+    expect(p.items.filter((i) => i.type === 'text').length).toBe(4);
+  });
+
+  it('lineup gives every solo a named segment and a poster finale', () => {
+    const entries = [
+      { asset: fakeAsset('poster', 1536, 1024), name: 'Cast Poster' },
+      { asset: fakeAsset('c1', 800, 1000), name: 'Banna' },
+      { asset: fakeAsset('c2', 800, 1000), name: 'Trini' },
+    ];
+    const p = buildLineupProject(createDefaultProject('u', 'LU'), entries, texts, { duration: 15 });
+    expect(validateProject(p).valid).toBe(true);
+    const names = p.items.filter((i) => i.type === 'text' && (i.text === 'BANNA' || i.text === 'TRINI'));
+    expect(names.length).toBe(2);
+  });
+
+  it('versus places two arts and a VS mark', () => {
+    const p = buildVersusProject(createDefaultProject('u', 'VS'), fakeAsset('a', 900, 900), fakeAsset('b', 900, 900), texts, { duration: 10 });
+    expect(validateProject(p).valid).toBe(true);
+    expect(p.items.some((i) => i.type === 'text' && i.text === 'VS')).toBe(true);
+  });
+
+  it('flyer stack fans the arts with rotation', () => {
+    const p = buildStackProject(createDefaultProject('u', 'ST'), [fakeAsset('s1', 800, 1000), fakeAsset('s2', 800, 1000), fakeAsset('s3', 800, 1000)], texts, { duration: 10 });
+    expect(validateProject(p).valid).toBe(true);
+    const rotated = p.items.filter((i) => i.type === 'image' && i.rotation !== 0);
+    expect(rotated.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('spin slam enters with a spin animation', () => {
+    const p = buildSlamProject(createDefaultProject('u', 'SP'), art, texts, { duration: 10, variant: 'spin' });
+    expect(validateProject(p).valid).toBe(true);
+    const first = p.items.find((i) => i.type === 'image');
+    expect(first && first.type === 'image' && first.animation?.entrance).toBe('spin');
   });
 });

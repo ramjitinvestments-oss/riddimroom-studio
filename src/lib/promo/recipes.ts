@@ -6,20 +6,53 @@
  * pixels on the timeline (full art and/or canvas-sliced band assets) with
  * the choreography proven in the offline proof set — slam hook, kinetic
  * band build, light-sweep shine, CTA card, logo power-on build, character
- * slam. Artwork is never redrawn or regenerated; only transforms, fades,
+ * slam, countdown, newsflash, lineup reveal, versus and flyer stack.
+ * Artwork is never redrawn or regenerated; only transforms, fades,
  * entrance animations and the compositor's motion effects move it.
  *
  * Canvas math mirrors `drawImageItem` in lib/render/compositor.ts: an
  * image item's rendered width = canvasWidth * 0.25 * scale, height follows
- * the source aspect. Positions are % of canvas (center-based).
+ * the source aspect. Positions are % of canvas (center-based). All
+ * geometry derives from the project's canvas size, so every recipe works
+ * at 9:16, 16:9, 1:1 and 4:5.
  */
 
-import type { ImageTimelineItem, MediaAsset, Project } from '../../types/timeline';
+import type { ColorGradeSettings, ImageTimelineItem, MediaAsset, Project } from '../../types/timeline';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../timeline/utils';
 import { addTextItem } from '../timeline/insert';
+import { getGradePreset } from '../grades';
 import type { Band } from './analyze';
 
-export type PromoRecipeId = 'kinetic-build' | 'logo-build' | 'slam';
+export type PromoRecipeId =
+  | 'kinetic-build' | 'logo-build' | 'slam' | 'spin-slam'
+  | 'countdown' | 'newsflash' | 'lineup' | 'versus' | 'flyer-stack';
+
+export type PromoSkinId = 'dancehall-raw' | 'soca-shine' | 'gospel-light' | 'corporate-clean';
+
+export interface PromoSkin {
+  label: string;
+  /** Accent colour for added type (hook line 2, sub lines). */
+  accent: string;
+  /** Studio grade preset applied to the artwork items. */
+  gradeId: string;
+  /** Timing/intensity multiplier: >1 = faster, harder hits. */
+  energy: number;
+}
+
+export const PROMO_SKINS: Record<PromoSkinId, PromoSkin> = {
+  'dancehall-raw': { label: 'Dancehall Raw', accent: '#FFD100', gradeId: 'vivid-party', energy: 1.15 },
+  'soca-shine': { label: 'Soca Shine', accent: '#FFB03A', gradeId: 'cinematic-warm', energy: 1.05 },
+  'gospel-light': { label: 'Gospel Light', accent: '#FFE9A8', gradeId: 'clean-commercial', energy: 0.9 },
+  'corporate-clean': { label: 'Corporate Clean', accent: '#7FD4FF', gradeId: 'clean-commercial', energy: 0.85 },
+};
+
+export interface PromoBuildOpts {
+  /** Total length in seconds (clamped 8..20). */
+  duration?: number;
+  /** 'fit' = whole artwork visible (default, text-safe). 'fill' = cover the screen, edges may crop. */
+  fit?: 'fit' | 'fill';
+  skin?: PromoSkinId;
+}
 
 export interface PromoTexts {
   hook1?: string;
@@ -33,7 +66,21 @@ export interface SliceInput {
   band: Band;
 }
 
-const GOLD = '#FFD100';
+interface SkinResolved {
+  accent: string;
+  grade?: ColorGradeSettings;
+  energy: number;
+}
+
+function resolveSkin(opts?: PromoBuildOpts): SkinResolved {
+  const skin = PROMO_SKINS[opts?.skin ?? 'dancehall-raw'];
+  const preset = getGradePreset(skin.gradeId);
+  return { accent: skin.accent, grade: preset ? { ...preset.grade } : undefined, energy: skin.energy };
+}
+
+function durationOf(opts?: PromoBuildOpts): number {
+  return Math.min(20, Math.max(8, opts?.duration ?? 12));
+}
 
 function imageTrackId(project: Project): string {
   const tracks = getTracksByType(project, 'image');
@@ -42,14 +89,13 @@ function imageTrackId(project: Project): string {
 }
 
 interface Rect {
-  cx: number; // center x, % of canvas width
-  cy: number; // center y, % of canvas height
-  scale: number; // item scale that renders the asset at the rect width
+  cx: number;
+  cy: number;
+  scale: number;
   widthPx: number;
   heightPx: number;
 }
 
-/** Rect for an asset of aspect h/w shown at a target width, centered at (cxPx, cyPx). */
 function rectFor(project: Project, asset: MediaAsset, widthPx: number, cxPx: number, cyPx: number): Rect {
   const aw = asset.width && asset.width > 0 ? asset.width : 1000;
   const ah = asset.height && asset.height > 0 ? asset.height : 1000;
@@ -63,17 +109,26 @@ function rectFor(project: Project, asset: MediaAsset, widthPx: number, cxPx: num
   };
 }
 
-/** Fit artwork inside the canvas: full-bleed width for portrait art, a wide card for landscape. */
-function artRect(project: Project, asset: MediaAsset): Rect {
+function assetAspect(asset: MediaAsset): number {
+  const aw = asset.width && asset.width > 0 ? asset.width : 1000;
+  const ah = asset.height && asset.height > 0 ? asset.height : 1000;
+  return ah / aw;
+}
+
+/** The artwork's stage rect: fit-inside (whole art visible) or fill (cover). */
+function artRect(project: Project, asset: MediaAsset, fit: 'fit' | 'fill' = 'fit'): Rect {
   const W = project.canvasWidth;
   const H = project.canvasHeight;
-  const aw = asset.width && asset.width > 0 ? asset.width : W;
-  const ah = asset.height && asset.height > 0 ? asset.height : H;
+  const a = assetAspect(asset);
+  if (fit === 'fill') {
+    const widthPx = Math.max(W, H / a);
+    return rectFor(project, asset, widthPx, W / 2, H / 2);
+  }
   let widthPx = W;
-  let heightPx = (widthPx * ah) / aw;
+  let heightPx = widthPx * a;
   if (heightPx > H) {
     heightPx = H;
-    widthPx = (heightPx * aw) / ah;
+    widthPx = heightPx / a;
   }
   return rectFor(project, asset, widthPx, W / 2, H / 2);
 }
@@ -102,28 +157,35 @@ function withAssets(project: Project, assets: MediaAsset[]): Project {
   return next;
 }
 
-function addHookTexts(project: Project, texts: PromoTexts, duration: number): Project {
+function addHookTexts(project: Project, texts: PromoTexts, accent: string, until: number): Project {
   let next = project;
   if (texts.hook1) {
     next = addTextItem(next, {
-      text: texts.hook1,
-      atTime: 0.25,
-      durationSeconds: Math.min(1.9, duration * 0.2),
-      role: 'title',
-      fontSize: 92,
-      color: '#ffffff',
-      position: { x: 50, y: 9 },
+      text: texts.hook1, atTime: 0.25, durationSeconds: Math.min(1.9, Math.max(0.8, until)),
+      role: 'title', fontSize: 92, color: '#ffffff', position: { x: 50, y: 9 },
     });
   }
   if (texts.hook2) {
     next = addTextItem(next, {
-      text: texts.hook2,
-      atTime: 0.85,
-      durationSeconds: Math.min(1.9, duration * 0.2),
-      role: 'title',
-      fontSize: 92,
-      color: GOLD,
-      position: { x: 50, y: 16.5 },
+      text: texts.hook2, atTime: 0.85, durationSeconds: Math.min(1.9, Math.max(0.8, until)),
+      role: 'title', fontSize: 92, color: accent, position: { x: 50, y: 16.5 },
+    });
+  }
+  return next;
+}
+
+function addCtaTexts(project: Project, texts: PromoTexts, accent: string, from: number, duration: number): Project {
+  let next = project;
+  if (texts.cta) {
+    next = addTextItem(next, {
+      text: texts.cta, atTime: from, durationSeconds: Math.max(0.5, duration - from),
+      role: 'title', fontSize: 72, color: '#ffffff', position: { x: 50, y: 83 },
+    });
+  }
+  if (texts.sub) {
+    next = addTextItem(next, {
+      text: texts.sub, atTime: from + 0.55, durationSeconds: Math.max(0.5, duration - from - 0.55),
+      role: 'overlay', fontSize: 44, color: accent, position: { x: 50, y: 89.5 },
     });
   }
   return next;
@@ -132,134 +194,86 @@ function addHookTexts(project: Project, texts: PromoTexts, duration: number): Pr
 /**
  * KINETIC BUILD (flyers/posters): ambient plate → bands land staggered on
  * the beat → light-sweep shine across the assembled art → CTA card + texts.
- * `slices` are the artwork's own bands, uploaded as separate assets.
  */
 export function buildKineticProject(
   project: Project,
   art: MediaAsset,
   slices: SliceInput[],
   texts: PromoTexts,
-  duration = 12,
+  opts?: PromoBuildOpts,
 ): Project {
-  const D = Math.min(20, Math.max(8, duration));
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
   const trackId = imageTrackId(project);
   let next = withAssets(project, [art, ...slices.map((s) => s.asset)]);
-  const rect = artRect(next, art);
+  const rect = artRect(next, art, opts?.fit ?? 'fit');
   const W = next.canvasWidth;
   const H = next.canvasHeight;
   const topPx = rect.cy * (H / 100) - rect.heightPx / 2;
 
-  // Ambient plate: the art itself, oversized and dimmed, for the whole cut.
-  next = addItem(
-    next,
-    imageItem(next, trackId, art, { ...rect, scale: rect.scale * 1.15 }, {
-      startTime: 0,
-      endTime: D,
-      zIndex: 1,
-      opacity: 0.35,
-      motion: { type: 'vignette', intensity: 1 },
-    }),
-  );
+  next = addItem(next, imageItem(next, trackId, art, { ...rect, scale: rect.scale * 1.15 }, {
+    startTime: 0, endTime: D, zIndex: 1, opacity: 0.35,
+    motion: { type: 'vignette', intensity: 1 }, colorGrade: skin.grade,
+  }));
 
-  // Bands land staggered, alternating slide direction.
   const buildEnd = D * 0.6;
+  const stagger = 0.32 / skin.energy;
   slices.forEach((slice, i) => {
     const bandCenterYPx = topPx + ((slice.band.y0 + slice.band.y1) / 2) * rect.heightPx;
     const bandRect = rectFor(next, slice.asset, rect.widthPx, W / 2, bandCenterYPx);
-    next = addItem(
-      next,
-      imageItem(next, trackId, slice.asset, bandRect, {
-        startTime: 1.0 + i * 0.32,
-        endTime: buildEnd,
-        zIndex: 10 + i,
-        animation: { entrance: i % 2 === 0 ? 'slide-left' : 'slide-right', intensity: 1 },
-        fade: { fadeInDuration: 0.12, fadeOutDuration: 0 },
-      }),
-    );
+    next = addItem(next, imageItem(next, trackId, slice.asset, bandRect, {
+      startTime: 1.0 + i * stagger, endTime: buildEnd, zIndex: 10 + i,
+      animation: { entrance: i % 2 === 0 ? 'slide-left' : 'slide-right', intensity: skin.energy },
+      fade: { fadeInDuration: 0.12, fadeOutDuration: 0 }, colorGrade: skin.grade,
+    }));
   });
 
-  // Shine pass: the full art at the exact assembled rect, light-sweep only.
-  next = addItem(
-    next,
-    imageItem(next, trackId, art, rect, {
-      startTime: D * 0.4,
-      endTime: buildEnd,
-      zIndex: 40,
-      motion: { type: 'light-sweep', intensity: 1.2 },
-    }),
-  );
+  next = addItem(next, imageItem(next, trackId, art, rect, {
+    startTime: D * 0.4, endTime: buildEnd, zIndex: 40,
+    motion: { type: 'light-sweep', intensity: Math.min(2, 1.2 * skin.energy) }, colorGrade: skin.grade,
+  }));
 
-  // CTA card: the full art, calmer scale, gentle end pulse.
   const cardRect = rectFor(next, art, W * 0.8, W / 2, H * 0.42);
-  next = addItem(
-    next,
-    imageItem(next, trackId, art, cardRect, {
-      startTime: buildEnd,
-      endTime: D,
-      zIndex: 50,
-      fade: { fadeInDuration: 0.3, fadeOutDuration: 0 },
-      endTransform: {
-        position: { x: cardRect.cx, y: cardRect.cy },
-        scale: cardRect.scale * 1.03,
-        opacity: 1,
-        eased: true,
-      },
-    }),
-  );
+  next = addItem(next, imageItem(next, trackId, art, cardRect, {
+    startTime: buildEnd, endTime: D, zIndex: 50,
+    fade: { fadeInDuration: 0.3, fadeOutDuration: 0 }, colorGrade: skin.grade,
+    endTransform: { position: { x: cardRect.cx, y: cardRect.cy }, scale: cardRect.scale * 1.03, opacity: 1, eased: true },
+  }));
 
-  next = addHookTexts(next, texts, D);
-  if (texts.cta) {
-    next = addTextItem(next, {
-      text: texts.cta,
-      atTime: buildEnd + 0.15,
-      durationSeconds: D - buildEnd - 0.15,
-      role: 'title',
-      fontSize: 72,
-      color: '#ffffff',
-      position: { x: 50, y: 83 },
-    });
-  }
-  if (texts.sub) {
-    next = addTextItem(next, {
-      text: texts.sub,
-      atTime: buildEnd + 0.7,
-      durationSeconds: D - buildEnd - 0.7,
-      role: 'overlay',
-      fontSize: 44,
-      color: GOLD,
-      position: { x: 50, y: 89.5 },
-    });
-  }
+  next = addHookTexts(next, texts, skin.accent, D * 0.2);
+  next = addCtaTexts(next, texts, skin.accent, buildEnd + 0.15, D);
   return next;
 }
 
 /**
  * LOGO BUILD (logos on dark grounds): the logo's own element strips are
- * re-staged as a tall vertical lockup and power on one by one, then a
- * light-sweep sheen crosses the widest element and the CTA lands.
+ * re-staged as a vertical lockup (a centered lockup in landscape formats)
+ * and power on one by one, then a light-sweep sheen crosses the widest
+ * element and the CTA lands.
  */
 export function buildLogoProject(
   project: Project,
   strips: SliceInput[],
   texts: PromoTexts,
-  duration = 10,
+  opts?: PromoBuildOpts,
 ): Project {
-  const D = Math.min(20, Math.max(8, duration));
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
   const trackId = imageTrackId(project);
   let next = withAssets(project, strips.map((s) => s.asset));
   const W = next.canvasWidth;
   const H = next.canvasHeight;
+  const landscape = W > H;
+  const widthCap = landscape ? 0.55 : 0.94;
 
-  // Display widths: emblem (first strip) capped by height, wordmark full.
   const sized = strips.map((strip, i) => {
-    const aw = strip.asset.width && strip.asset.width > 0 ? strip.asset.width : 1000;
-    const ah = strip.asset.height && strip.asset.height > 0 ? strip.asset.height : 200;
-    let widthPx = W * (i === 0 ? 0.66 : i === 1 ? 0.94 : 0.86);
-    let heightPx = (widthPx * ah) / aw;
+    const a = assetAspect(strip.asset);
+    let widthPx = W * Math.min(widthCap, i === 0 ? 0.66 : i === 1 ? 0.94 : 0.86);
+    let heightPx = widthPx * a;
     const maxH = H * (i === 0 ? 0.3 : 0.17);
     if (heightPx > maxH) {
       heightPx = maxH;
-      widthPx = (heightPx * aw) / ah;
+      widthPx = heightPx / a;
     }
     return { strip, widthPx, heightPx };
   });
@@ -267,58 +281,42 @@ export function buildLogoProject(
   let totalH = sized.reduce((s, x) => s + x.heightPx, 0) + gapPx * Math.max(0, sized.length - 1);
   if (totalH > H * 0.78) {
     const f = (H * 0.78) / totalH;
-    sized.forEach((x) => {
-      x.widthPx *= f;
-      x.heightPx *= f;
-    });
+    sized.forEach((x) => { x.widthPx *= f; x.heightPx *= f; });
     totalH = H * 0.78;
   }
 
   let cursorY = (H - totalH) / 2;
   let widest = 0;
   const rects: Rect[] = [];
+  const stagger = 0.55 / skin.energy;
   sized.forEach((x, i) => {
     if (x.widthPx > sized[widest].widthPx) widest = i;
     const centerY = cursorY + x.heightPx / 2;
     cursorY += x.heightPx + gapPx;
     const rect = rectFor(next, x.strip.asset, x.widthPx, W / 2, centerY);
     rects.push(rect);
-    next = addItem(
-      next,
-      imageItem(next, trackId, x.strip.asset, rect, {
-        startTime: 0.5 + i * 0.55,
-        endTime: D,
-        zIndex: 10 + i,
-        animation: { entrance: 'pop', intensity: 1 },
-        fade: { fadeInDuration: 0.2, fadeOutDuration: 0 },
-      }),
-    );
+    next = addItem(next, imageItem(next, trackId, x.strip.asset, rect, {
+      startTime: 0.5 + i * stagger, endTime: D, zIndex: 10 + i,
+      animation: { entrance: 'pop', intensity: skin.energy },
+      fade: { fadeInDuration: 0.2, fadeOutDuration: 0 }, colorGrade: skin.grade,
+    }));
   });
 
-  // Sheen pass over the widest element once the lockup is complete.
   const sheenRect = rects[widest];
   if (sheenRect) {
-    const sheenStart = 0.5 + sized.length * 0.55 + 0.3;
-    next = addItem(
-      next,
-      imageItem(next, trackId, sized[widest].strip.asset, sheenRect, {
-        startTime: sheenStart,
-        endTime: Math.min(D, sheenStart + 1.6),
-        zIndex: 40,
-        motion: { type: 'light-sweep', intensity: 1 },
-      }),
-    );
+    const sheenStart = 0.5 + sized.length * stagger + 0.3;
+    next = addItem(next, imageItem(next, trackId, sized[widest].strip.asset, sheenRect, {
+      startTime: sheenStart, endTime: Math.min(D, sheenStart + 1.6), zIndex: 40,
+      motion: { type: 'light-sweep', intensity: 1 }, colorGrade: skin.grade,
+    }));
   }
 
-  next = addHookTexts(next, { hook1: texts.hook1 }, D);
+  next = addHookTexts(next, { hook1: texts.hook1 }, skin.accent, D * 0.2);
   if (texts.cta) {
+    const ctaAt = 0.5 + sized.length * stagger + 0.9;
     next = addTextItem(next, {
-      text: texts.cta,
-      atTime: 0.5 + sized.length * 0.55 + 0.9,
-      durationSeconds: Math.max(1, D - (0.5 + sized.length * 0.55 + 0.9)),
-      role: 'overlay',
-      fontSize: 46,
-      color: GOLD,
+      text: texts.cta, atTime: ctaAt, durationSeconds: Math.max(1, D - ctaAt),
+      role: 'overlay', fontSize: 46, color: skin.accent,
       position: { x: 50, y: ((cursorY + gapPx) / H) * 100 + 3 },
     });
   }
@@ -328,73 +326,255 @@ export function buildLogoProject(
 /**
  * SLAM (character art / photos / portrait flyers): full-bleed cover with a
  * punch-zoom impact and slow push, hook type up top, then a calmer CTA
- * phase with a vignette. The artwork is never altered.
+ * phase. The 'spin-slam' variant enters with a spin + flash instead.
  */
 export function buildSlamProject(
   project: Project,
   art: MediaAsset,
   texts: PromoTexts,
-  duration = 10,
+  opts?: PromoBuildOpts & { variant?: 'slam' | 'spin' },
 ): Project {
-  const D = Math.min(20, Math.max(8, duration));
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
+  const trackId = imageTrackId(project);
+  let next = withAssets(project, [art]);
+  const cover = artRect(next, art, 'fill');
+  const split = D * 0.62;
+  const spin = opts?.variant === 'spin';
+
+  next = addItem(next, imageItem(next, trackId, art, cover, {
+    startTime: 0, endTime: split, zIndex: 10,
+    motion: spin ? { type: 'flash', intensity: 1 } : { type: 'punch-zoom', intensity: 1.1 * skin.energy },
+    animation: spin ? { entrance: 'spin', intensity: skin.energy } : undefined,
+    colorGrade: skin.grade,
+    endTransform: { position: { x: cover.cx, y: cover.cy }, scale: cover.scale * 1.1, opacity: 1, eased: true },
+  }));
+  next = addItem(next, imageItem(next, trackId, art, { ...cover, scale: cover.scale * 0.97 }, {
+    startTime: split, endTime: D, zIndex: 11,
+    motion: { type: 'vignette', intensity: 1 },
+    fade: { fadeInDuration: 0.25, fadeOutDuration: 0 }, colorGrade: skin.grade,
+  }));
+
+  next = addHookTexts(next, texts, skin.accent, D * 0.2);
+  next = addCtaTexts(next, texts, skin.accent, split + 0.2, D);
+  return next;
+}
+
+/**
+ * COUNTDOWN (events): the art on stage under a giant 3-2-1, then the
+ * event name and CTA land. Numbers are added type; the art is untouched.
+ */
+export function buildCountdownProject(
+  project: Project,
+  art: MediaAsset,
+  texts: PromoTexts,
+  opts?: PromoBuildOpts,
+): Project {
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
+  const trackId = imageTrackId(project);
+  let next = withAssets(project, [art]);
+  const rect = artRect(next, art, opts?.fit ?? 'fit');
+
+  next = addItem(next, imageItem(next, trackId, art, rect, {
+    startTime: 0, endTime: D, zIndex: 10, opacity: 0.55,
+    motion: { type: 'punch-zoom', intensity: skin.energy }, colorGrade: skin.grade,
+  }));
+
+  const countEnd = D * 0.55;
+  const step = countEnd / 3;
+  ['3', '2', '1'].forEach((n, i) => {
+    next = addTextItem(next, {
+      text: n, atTime: 0.3 + i * step, durationSeconds: step,
+      role: 'title', fontSize: 320, color: i === 2 ? skin.accent : '#ffffff',
+      position: { x: 50, y: 44 },
+    });
+  });
+  if (texts.hook1) {
+    next = addTextItem(next, {
+      text: texts.hook1, atTime: countEnd + 0.1, durationSeconds: D - countEnd - 0.1,
+      role: 'title', fontSize: 96, color: '#ffffff', position: { x: 50, y: 30 },
+    });
+  }
+  next = addCtaTexts(next, texts, skin.accent, countEnd + 0.3, D);
+  return next;
+}
+
+/**
+ * NEWSFLASH (announcements/drops): glitch-in stage art, headline up top,
+ * lower-third stack landing in sequence.
+ */
+export function buildNewsflashProject(
+  project: Project,
+  art: MediaAsset,
+  texts: PromoTexts,
+  opts?: PromoBuildOpts,
+): Project {
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
   const trackId = imageTrackId(project);
   let next = withAssets(project, [art]);
   const W = next.canvasWidth;
   const H = next.canvasHeight;
-  const aw = art.width && art.width > 0 ? art.width : W;
-  const ah = art.height && art.height > 0 ? art.height : H;
-  const coverWidth = Math.max(W, (H * aw) / ah);
-  const cover = rectFor(next, art, coverWidth, W / 2, H / 2);
-  const split = D * 0.62;
+  const rect = rectFor(next, art, W * 0.86, W / 2, H * 0.42);
 
-  next = addItem(
-    next,
-    imageItem(next, trackId, art, cover, {
-      startTime: 0,
-      endTime: split,
-      zIndex: 10,
-      motion: { type: 'punch-zoom', intensity: 1.1 },
-      endTransform: {
-        position: { x: cover.cx, y: cover.cy },
-        scale: cover.scale * 1.1,
-        opacity: 1,
-        eased: true,
-      },
-    }),
-  );
-  next = addItem(
-    next,
-    imageItem(next, trackId, art, { ...cover, scale: cover.scale * 0.97 }, {
-      startTime: split,
-      endTime: D,
-      zIndex: 11,
-      motion: { type: 'vignette', intensity: 1 },
-      fade: { fadeInDuration: 0.25, fadeOutDuration: 0 },
-    }),
-  );
-
-  next = addHookTexts(next, texts, D);
-  if (texts.cta) {
+  next = addItem(next, imageItem(next, trackId, art, rect, {
+    startTime: 0.2, endTime: D, zIndex: 10,
+    animation: { entrance: 'glitch', intensity: skin.energy },
+    motion: { type: 'light-sweep', intensity: 0.8 }, colorGrade: skin.grade,
+  }));
+  if (texts.hook1) {
     next = addTextItem(next, {
-      text: texts.cta,
-      atTime: split + 0.2,
-      durationSeconds: D - split - 0.2,
-      role: 'title',
-      fontSize: 76,
-      color: '#ffffff',
-      position: { x: 50, y: 84 },
+      text: texts.hook1, atTime: 0.2, durationSeconds: D - 0.2,
+      role: 'title', fontSize: 84, color: '#ffffff', position: { x: 50, y: 10 },
     });
   }
-  if (texts.sub) {
+  if (texts.hook2) {
     next = addTextItem(next, {
-      text: texts.sub,
-      atTime: split + 0.8,
-      durationSeconds: D - split - 0.8,
-      role: 'overlay',
-      fontSize: 44,
-      color: GOLD,
-      position: { x: 50, y: 90.5 },
+      text: texts.hook2, atTime: 0.7, durationSeconds: D - 0.7,
+      role: 'title', fontSize: 58, color: skin.accent, position: { x: 50, y: 74 },
     });
   }
+  next = addCtaTexts(next, texts, skin.accent, 1.2, D);
+  return next;
+}
+
+/**
+ * LINEUP REVEAL (cast/lineup posters): the poster slams in, then each
+ * artwork gets a solo hero moment with its name punched in, then the
+ * poster returns for the CTA finale. `arts[0]` is the poster.
+ */
+export function buildLineupProject(
+  project: Project,
+  arts: Array<{ asset: MediaAsset; name: string }>,
+  texts: PromoTexts,
+  opts?: PromoBuildOpts,
+): Project {
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
+  const trackId = imageTrackId(project);
+  let next = withAssets(project, arts.map((a) => a.asset));
+  const poster = arts[0].asset;
+  const solos = arts.slice(1);
+  const seg = D / (solos.length + 2); // intro + one segment per solo + finale
+
+  const posterCover = artRect(next, poster, 'fill');
+  next = addItem(next, imageItem(next, trackId, poster, posterCover, {
+    startTime: 0, endTime: seg, zIndex: 10,
+    motion: { type: 'punch-zoom', intensity: skin.energy }, colorGrade: skin.grade,
+  }));
+  next = addHookTexts(next, texts, skin.accent, seg * 0.5);
+
+  solos.forEach((entry, i) => {
+    const start = seg * (i + 1);
+    const cover = artRect(next, entry.asset, 'fill');
+    next = addItem(next, imageItem(next, trackId, entry.asset, cover, {
+      startTime: start, endTime: start + seg, zIndex: 20 + i,
+      motion: { type: 'slow-zoom-in', intensity: skin.energy },
+      fade: { fadeInDuration: 0.15, fadeOutDuration: 0 }, colorGrade: skin.grade,
+    }));
+    next = addTextItem(next, {
+      text: entry.name.toUpperCase(), atTime: start + 0.1, durationSeconds: seg - 0.1,
+      role: 'title', fontSize: 96, color: '#ffffff', position: { x: 50, y: 11 },
+    });
+    if (texts.hook2) {
+      next = addTextItem(next, {
+        text: texts.hook2, atTime: start + 0.35, durationSeconds: seg - 0.35,
+        role: 'overlay', fontSize: 46, color: skin.accent, position: { x: 50, y: 17.5 },
+      });
+    }
+  });
+
+  const finaleAt = seg * (solos.length + 1);
+  const card = rectFor(next, poster, next.canvasWidth * 0.84, next.canvasWidth / 2, next.canvasHeight * 0.42);
+  next = addItem(next, imageItem(next, trackId, poster, card, {
+    startTime: finaleAt, endTime: D, zIndex: 60,
+    fade: { fadeInDuration: 0.25, fadeOutDuration: 0 }, colorGrade: skin.grade,
+  }));
+  next = addCtaTexts(next, texts, skin.accent, finaleAt + 0.15, D);
+  return next;
+}
+
+/**
+ * VERSUS (clash cards / sound clashes / match-ups): two artworks slide in
+ * from opposite sides, the VS mark lands between them, CTA closes.
+ */
+export function buildVersusProject(
+  project: Project,
+  a: MediaAsset,
+  b: MediaAsset,
+  texts: PromoTexts,
+  opts?: PromoBuildOpts,
+): Project {
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
+  const trackId = imageTrackId(project);
+  let next = withAssets(project, [a, b]);
+  const W = next.canvasWidth;
+  const H = next.canvasHeight;
+  const rectA = rectFor(next, a, W * 0.44, W * 0.26, H * 0.42);
+  const rectB = rectFor(next, b, W * 0.44, W * 0.74, H * 0.42);
+
+  next = addItem(next, imageItem(next, trackId, a, rectA, {
+    startTime: 0.3, endTime: D, zIndex: 10,
+    animation: { entrance: 'slide-left', intensity: skin.energy }, colorGrade: skin.grade,
+  }));
+  next = addItem(next, imageItem(next, trackId, b, rectB, {
+    startTime: 0.3, endTime: D, zIndex: 11,
+    animation: { entrance: 'slide-right', intensity: skin.energy }, colorGrade: skin.grade,
+  }));
+  next = addTextItem(next, {
+    text: 'VS', atTime: 0.8, durationSeconds: D - 0.8,
+    role: 'title', fontSize: 150, color: skin.accent, position: { x: 50, y: 42 },
+  });
+  if (texts.hook1) {
+    next = addTextItem(next, {
+      text: texts.hook1, atTime: 0.2, durationSeconds: D - 0.2,
+      role: 'title', fontSize: 80, color: '#ffffff', position: { x: 50, y: 10 },
+    });
+  }
+  next = addCtaTexts(next, texts, skin.accent, D * 0.55, D);
+  return next;
+}
+
+/**
+ * FLYER STACK (multiple flyers/products): the artworks fan in as a
+ * rotated stack, the top one gets the shine pass, CTA closes.
+ */
+export function buildStackProject(
+  project: Project,
+  arts: MediaAsset[],
+  texts: PromoTexts,
+  opts?: PromoBuildOpts,
+): Project {
+  const D = durationOf(opts);
+  const skin = resolveSkin(opts);
+  const trackId = imageTrackId(project);
+  let next = withAssets(project, arts);
+  const W = next.canvasWidth;
+  const H = next.canvasHeight;
+  const rotations = [-7, 5, -3, 0, 6, -5];
+
+  arts.forEach((art, i) => {
+    const rect = rectFor(next, art, W * 0.62, W / 2, H * 0.44);
+    next = addItem(next, imageItem(next, trackId, art, rect, {
+      startTime: 0.4 + i * (0.5 / skin.energy), endTime: D, zIndex: 10 + i,
+      rotation: rotations[i % rotations.length],
+      animation: { entrance: 'pop', intensity: skin.energy },
+      fade: { fadeInDuration: 0.15, fadeOutDuration: 0 }, colorGrade: skin.grade,
+    }));
+  });
+
+  const top = arts[arts.length - 1];
+  const topRect = rectFor(next, top, W * 0.62, W / 2, H * 0.44);
+  const shineAt = 0.4 + arts.length * (0.5 / skin.energy) + 0.3;
+  next = addItem(next, imageItem(next, trackId, top, topRect, {
+    startTime: shineAt, endTime: Math.min(D, shineAt + 1.6), zIndex: 40,
+    rotation: rotations[(arts.length - 1) % rotations.length],
+    motion: { type: 'light-sweep', intensity: 1 }, colorGrade: skin.grade,
+  }));
+
+  next = addHookTexts(next, texts, skin.accent, D * 0.2);
+  next = addCtaTexts(next, texts, skin.accent, shineAt + 0.4, D);
   return next;
 }

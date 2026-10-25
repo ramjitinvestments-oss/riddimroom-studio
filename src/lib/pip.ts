@@ -7,7 +7,7 @@
  * (PreviewPane drag works for any video item, PiP included).
  */
 import type { MediaAsset, PipSettings, Project, VideoTimelineItem } from '../types/timeline';
-import { addItem, addMediaAsset, generateTimelineId, getItemsByTrackType } from './timeline/utils';
+import { addItem, addMediaAsset, generateTimelineId, getItemsByTrackType, updateItem } from './timeline/utils';
 import { MAX_MEDIA_SECONDS } from './media/constants';
 
 export type PipLayoutId = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | 'side-by-side';
@@ -108,4 +108,72 @@ export function addPipOverlay(project: Project, asset: MediaAsset, options: AddP
 
 export function isPipItem(item: { type: string; pip?: PipSettings }): boolean {
   return item.type === 'video' && !!item.pip?.isPip;
+}
+
+// ---------------------------------------------------------------------------
+// Circle size + main/overlay swap (owner-requested editor changes)
+// ---------------------------------------------------------------------------
+
+/**
+ * A video item fills the canvas at scale 1, so a PiP item's on-screen
+ * width is simply its scale as a percentage of canvas width. The PiP
+ * panel's Size slider speaks in that percentage.
+ */
+export function pipWidthPercentForScale(scale: number): number {
+  return Math.round(scale * 100);
+}
+
+export function pipScaleForWidthPercent(percent: number): number {
+  return Math.min(0.9, Math.max(0.08, percent / 100));
+}
+
+/**
+ * The main video a PiP overlay sits on: the non-PiP video item with the
+ * greatest time overlap with the overlay (ties → lowest zIndex, then
+ * earliest start). Null when the project has no main video yet.
+ */
+export function findMainVideoForPip(project: Project, pipItem: VideoTimelineItem): VideoTimelineItem | null {
+  const candidates = project.items.filter(
+    (i): i is VideoTimelineItem => i.type === 'video' && !isPipItem(i),
+  );
+  if (candidates.length === 0) return null;
+  const overlap = (i: VideoTimelineItem) =>
+    Math.max(0, Math.min(i.endTime, pipItem.endTime) - Math.max(i.startTime, pipItem.startTime));
+  return [...candidates].sort(
+    (a, b) => overlap(b) - overlap(a) || a.zIndex - b.zIndex || a.startTime - b.startTime,
+  )[0];
+}
+
+/**
+ * Swap the main video and the selected PiP overlay (owner request): the
+ * overlay becomes the full-frame main video and the main video becomes
+ * the overlay, inheriting the PiP's shape/position/size. Each clip keeps
+ * its own timing, trim, speed, volume and mute — only the role fields
+ * (pip settings, position, scale, zIndex) trade places. Keyframe
+ * end-transforms are cleared on both, since a glide authored for the main
+ * stage makes no sense on a corner overlay and vice versa. Pure
+ * transform: one call = one undo step. No-op when either side is missing.
+ */
+export function swapMainAndPip(project: Project, pipItemId: string): Project {
+  const pipItem = project.items.find(
+    (i): i is VideoTimelineItem => i.id === pipItemId && isPipItem(i),
+  );
+  if (!pipItem) return project;
+  const main = findMainVideoForPip(project, pipItem);
+  if (!main) return project;
+  let next = updateItem(project, main.id, {
+    pip: pipItem.pip,
+    position: { ...pipItem.position },
+    scale: pipItem.scale,
+    zIndex: pipItem.zIndex,
+    endTransform: undefined,
+  });
+  next = updateItem(next, pipItem.id, {
+    pip: undefined,
+    position: { ...main.position },
+    scale: main.scale,
+    zIndex: main.zIndex,
+    endTransform: undefined,
+  });
+  return next;
 }

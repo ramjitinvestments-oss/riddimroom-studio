@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { addPipOverlay, getPipLayout, PIP_LAYOUTS } from '../lib/pip';
+import { addPipOverlay, getPipLayout, isPipItem, pipScaleForWidthPercent, pipWidthPercentForScale, PIP_LAYOUTS, swapMainAndPip } from '../lib/pip';
+import { validateProject } from '../lib/timeline/validation';
 import { createDefaultProject } from '../lib/projects/persistence';
 import type { MediaAsset } from '../types/timeline';
 
@@ -105,5 +106,39 @@ describe('addPipOverlay with a trim window (Add Overlay upload flow)', () => {
     if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
     expect(pip.trimStart).toBe(0);
     expect(pip.trimEnd).toBe(10);
+  });
+});
+
+describe('swapMainAndPip + size mapping', () => {
+  it('maps width percent to scale and back', () => {
+    expect(pipScaleForWidthPercent(32)).toBeCloseTo(0.32);
+    expect(pipWidthPercentForScale(0.5)).toBe(50);
+    expect(pipScaleForWidthPercent(200)).toBeLessThanOrEqual(0.9);
+  });
+
+  it('swaps roles: overlay becomes main, main becomes the circle', async () => {
+    const { appendMediaToTimeline } = await import('../lib/timeline/insert');
+    let project = createDefaultProject('uid-1');
+    project = appendMediaToTimeline(project, makeAsset());
+    const mainBefore = project.items.find((i) => i.type === 'video')!;
+    project = addPipOverlay(project, { ...makeAsset(), id: 'asset-2', fileName: 'head.mp4' }, { layoutId: 'bottom-right' });
+    const pipBefore = project.items.find((i) => i.type === 'video' && isPipItem(i))!;
+    const next = swapMainAndPip(project, pipBefore.id);
+    const newMain = next.items.find((i) => i.id === pipBefore.id)!;
+    const newPip = next.items.find((i) => i.id === mainBefore.id)!;
+    expect(isPipItem(newMain)).toBe(false);
+    expect(newMain.type === 'video' && newMain.scale).toBe(1);
+    expect(isPipItem(newPip)).toBe(true);
+    expect(newPip.type === 'video' && newPip.pip?.shape).toBe('circle');
+    // timing stays with each clip
+    expect(newMain.startTime).toBe(pipBefore.startTime);
+    expect(newPip.startTime).toBe(mainBefore.startTime);
+    expect(validateProject(next).valid).toBe(true);
+  });
+
+  it('is a no-op without a main video', () => {
+    const project = addPipOverlay(createDefaultProject('uid-1'), makeAsset(), {});
+    const pip = project.items.find((i) => isPipItem(i))!;
+    expect(swapMainAndPip(project, pip.id)).toBe(project);
   });
 });

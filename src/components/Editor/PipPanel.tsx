@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Volume2, VolumeX } from 'lucide-react';
+import { ArrowLeftRight, Volume2, VolumeX } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
-import { addPipOverlay, isPipItem, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
+import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
 import { updateItem } from '../../lib/timeline/utils';
 import type { MediaAsset, TimelineItem, VideoTimelineItem } from '../../types/timeline';
 
@@ -67,6 +67,48 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           </li>
         ))}
       </ul>
+
+      {/* Overlay size + swap — for the selected PiP video. Size writes the
+          item's scale (video fills the canvas at scale 1, so scale IS the
+          width %); both render paths and the canvas drag handles read the
+          same field. Swap trades roles with the main video in one mutate
+          (one undo step); each clip keeps its own timing/trim/audio. */}
+      {selectedPip && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Overlay size</span>
+          <div className="flex items-center gap-2 text-xs text-white/60">
+            <label className="flex flex-col gap-1 flex-1">
+              Width ({pipWidthPercentForScale(selectedPip.scale)}% of screen)
+              <input
+                type="range"
+                min={10}
+                max={80}
+                step={1}
+                value={pipWidthPercentForScale(selectedPip.scale)}
+                onChange={(e) => patchSelectedPip({ scale: pipScaleForWidthPercent(Number(e.target.value)) })}
+              />
+            </label>
+            <div className="flex gap-1">
+              {([['S', 20], ['M', 32], ['L', 50]] as const).map(([label, pct]) => (
+                <button
+                  key={label}
+                  onClick={() => patchSelectedPip({ scale: pipScaleForWidthPercent(pct) })}
+                  className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-9"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button
+            onClick={() => mutate((p) => swapMainAndPip(p, selectedPip.id))}
+            className="flex items-center justify-center gap-2 px-3 py-2 bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg text-xs font-bold uppercase min-h-10"
+          >
+            <ArrowLeftRight size={13} /> Swap main ↔ overlay
+          </button>
+          <p className="text-[10px] text-white/30 -mt-1">The overlay becomes the full-screen main video; the main video takes its place in the circle. Timing, trim and each clip's own sound stay with the clip.</p>
+        </div>
+      )}
 
       {/* Overlay audio — the selected PiP video's own volume/mute, the
           same fields the inspector edits and both render paths honor.

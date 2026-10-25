@@ -140,8 +140,19 @@ export async function analyzeImageFile(file: File): Promise<{ analysis: ArtworkA
 /**
  * Slice the source image into one PNG File per band (full width strips),
  * for upload as separate media assets. Browser only.
+ *
+ * `featherPx` softens each band's top/bottom alpha edge (except the outer
+ * edges of the first/last band): a band sliding in over the ambient plate
+ * then has no hard rectangular seam — the join defect the offline proofs
+ * recorded, fixed in the slice itself so the compositor needs no masks.
  */
-export async function sliceBandFiles(bitmap: ImageBitmap, bands: Band[], baseName: string): Promise<File[]> {
+export async function sliceBandFiles(
+  bitmap: ImageBitmap,
+  bands: Band[],
+  baseName: string,
+  opts?: { featherPx?: number },
+): Promise<File[]> {
+  const feather = opts?.featherPx ?? 0;
   const files: File[] = [];
   for (let i = 0; i < bands.length; i++) {
     const y0 = Math.floor(bands[i].y0 * bitmap.height);
@@ -152,6 +163,25 @@ export async function sliceBandFiles(bitmap: ImageBitmap, bands: Band[], baseNam
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas is not available in this browser.');
     ctx.drawImage(bitmap, 0, y0, bitmap.width, y1 - y0, 0, 0, bitmap.width, y1 - y0);
+    if (feather > 0) {
+      const f = Math.min(feather, (y1 - y0) / 2);
+      ctx.globalCompositeOperation = 'destination-out';
+      if (i > 0) {
+        const g = ctx.createLinearGradient(0, 0, 0, f);
+        g.addColorStop(0, 'rgba(0,0,0,1)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, bitmap.width, f);
+      }
+      if (i < bands.length - 1) {
+        const g = ctx.createLinearGradient(0, canvas.height, 0, canvas.height - f);
+        g.addColorStop(0, 'rgba(0,0,0,1)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, canvas.height - f, bitmap.width, f);
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
     if (!blob) throw new Error('Could not slice the artwork into bands.');
     files.push(new File([blob], `${baseName}-band-${i + 1}.png`, { type: 'image/png' }));
