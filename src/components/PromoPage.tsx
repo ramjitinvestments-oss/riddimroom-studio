@@ -6,7 +6,7 @@ import { analyzeImageFile, recipeBands, sliceBandFiles, type ArtworkAnalysis } f
 import {
   buildCountdownProject, buildKineticProject, buildLineupProject, buildLogoProject,
   buildNewsflashProject, buildSlamProject, buildStackProject, buildVersusProject,
-  PROMO_SKINS, PROMO_SKIN_LOOP, type PromoRecipeId, type PromoSkinId, type PromoTexts,
+  PROMO_SKINS, PROMO_SKIN_LOOP, type PromoRecipeId, type PromoSkinId, type PromoTexts, type SliceInput,
 } from '../lib/promo/recipes';
 import { ASPECT_RATIO_OPTIONS } from '../lib/aspectRatios';
 import { createProject, saveProject } from '../lib/projects/persistence';
@@ -25,7 +25,14 @@ import {
   type VisionSuggestion,
 } from '../lib/promo/suggest';
 import { analyzeArtwork } from '../lib/promo/ocrEngine';
-import { classifyReadout, mergeReadoutFields, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
+import { planCampaign, campaignFileName, type CampaignPiece, type CampaignPlan } from '../lib/promo/campaign';
+import { createExportRenderer, getConfiguredExportEngine } from '../lib/export/mediabunnyExporter';
+import { validateRenderResult } from '../lib/export/validate';
+import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
+import { resolveExportSettings } from '../lib/export/quality';
+import { buildSocialPosts, type SocialPost } from '../lib/export/socialPosts';
+import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
+import { classifyReadout, mergeReadoutFields, stripJunkEdges, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
@@ -117,6 +124,18 @@ function cleanName(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Untitled';
 }
 
+interface CampaignResult {
+  piece: CampaignPiece;
+  projectId: string;
+  posts: SocialPost[];
+  fileName: string;
+  /** built = project saved, ready to open; done = MP4 rendered here. */
+  status: 'built' | 'done' | 'failed';
+  url?: string;
+  blob?: Blob;
+  error?: string;
+}
+
 export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const { currentUser } = useAuth();
   const { tier } = useLicenseTier();
@@ -152,6 +171,13 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [phase, setPhase] = useState<'pick' | 'ready' | 'building'>('pick');
   const [status, setStatus] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [campaignResults, setCampaignResults] = useState<CampaignResult[]>([]);
+  const [campaignRunning, setCampaignRunning] = useState(false);
+  const [campaignStatus, setCampaignStatus] = useState('');
+  const [campaignPct, setCampaignPct] = useState(0);
+  const [campaignNote, setCampaignNote] = useState<string | null>(null);
+  const [copiedPieceId, setCopiedPieceId] = useState<string | null>(null);
+  const campaignAbortRef = useRef<AbortController | null>(null);
   const pickedRef = useRef<PickedFile[]>([]);
   pickedRef.current = picked;
 
@@ -467,10 +493,281 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     }
   }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily]);
 
+
+  /**
+   * Alternate hook pairs for the campaign, best first: a strong
+   * line the engine read but the fields didn't use, then the genre
+   * bank's next pair. The planner dedupes against the master pair —
+   * an "alt hook" that repeats the master is not an alt.
+   */
+  const currentAltPairs = useCallback((): Array<[string, string]> => {
+    const pairs: Array<[string, string]> = [];
+    const used = new Set(
+      [texts.hook1, texts.hook2, texts.sub, texts.cta]
+        .map((v) => (v ?? '').trim().toUpperCase())
+        .filter(Boolean),
+    );
+    const readout = lastReadoutRef.current;
+    if (readout) {
+      const candidate = readout.lines
+        .filter((l) => {
+          const t = stripJunkEdges(l.text).trim();
+          return l.confidence >= 55 && t.length >= 3 && t.length <= 40 && !used.has(t.toUpperCase());
+        })
+        .sort((a, b) => (b.box?.h ?? 0) - (a.box?.h ?? 0))[0];
+      if (candidate) pairs.push(splitHeadline(stripJunkEdges(candidate.text).trim().toUpperCase()));
+    }
+    const ctx = suggestCtxRef.current;
+    if (ctx) {
+      const h1 = fieldAlternates('hook1', ctx);
+      const h2 = fieldAlternates('hook2', ctx);
+      for (let i = 0; i < Math.min(h1.length, h2.length); i++) {
+        if (h1[i] || h2[i]) {
+          pairs.push([h1[i] ?? '', h2[i] ?? '']);
+          break;
+        }
+      }
+    }
+    return pairs;
+  }, [texts.hook1, texts.hook2, texts.sub, texts.cta]);
+
+  /**
+   * The Campaign Engine runner: plan the set, upload the artwork
+   * ONCE, build + save every piece's project, then render MP4s in
+   * place — inside the plan's daily export allowance, each render
+   * counted exactly like an editor export. Pieces past the limit
+   * stay saved as projects (one tap in the editor finishes them),
+   * and every piece carries its own ready-written social posts.
+   */
+  const handleCampaign = useCallback(async () => {
+    if (!currentUser || picked.length === 0 || !analysis || fileProblem || campaignRunning) return;
+    const uid = currentUser.uid;
+    const base = cleanName(picked[0].file.name);
+    const plan = planCampaign({
+      texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
+      masterRecipe: recipe,
+      masterFormatId: ratioId,
+      kind: analysis.suggestedKind,
+      altHookPairs: currentAltPairs(),
+      font: fontFamily,
+    });
+    setCampaignRunning(true);
+    setCampaignNote(null);
+    setCampaignResults([]);
+    setCampaignPct(0);
+    const controller = new AbortController();
+    campaignAbortRef.current = controller;
+    const results: CampaignResult[] = [];
+    try {
+      setCampaignStatus('Uploading your artwork once for the whole set…');
+      const assets: MediaAsset[] = [];
+      for (let i = 0; i < picked.length; i++) {
+        assets.push((await uploadMediaFile({ uid, file: picked[i].file })).asset);
+      }
+      const art = assets[0];
+      const extras = assets.slice(1);
+
+      let slices: SliceInput[] | null = null;
+      if (plan.pieces.some((pc) => pc.recipe === 'kinetic-build' || pc.recipe === 'logo-build')) {
+        const bands = recipeBands(analysis);
+        const featherPx = recipe === 'kinetic-build' ? Math.max(6, Math.round(picked[0].bitmap.height * 0.008)) : 0;
+        const sliceFiles = await sliceBandFiles(picked[0].bitmap, bands, base, { featherPx });
+        slices = [];
+        for (let i = 0; i < sliceFiles.length; i++) {
+          const up = await uploadMediaFile({ uid, file: sliceFiles[i] });
+          slices.push({ asset: up.asset, band: bands[i] });
+        }
+      }
+
+      let musicAsset: MediaAsset | null = null;
+      if (musicOn) {
+        try {
+          setCampaignStatus('Fitting the beat for the set…');
+          let musicFile: File | null = ownTrack;
+          if (!musicFile) {
+            try {
+              musicFile = await fetchPackTrackFile(packTrackForSkin(skin, packTrackId));
+            } catch {
+              musicFile = null;
+            }
+          }
+          if (!musicFile) {
+            const def = getLoopDef(PROMO_SKIN_LOOP[skin]);
+            if (def) musicFile = await renderLoopFile(def);
+          }
+          if (musicFile) {
+            const probed = await probeAudioDurationSeconds(musicFile);
+            const up = await uploadMediaFile({ uid, file: musicFile });
+            musicAsset =
+              probed && (!up.asset.durationSeconds || Math.abs(up.asset.durationSeconds - probed) > 0.75)
+                ? { ...up.asset, durationSeconds: probed }
+                : up.asset;
+          }
+        } catch {
+          musicAsset = null;
+        }
+      }
+
+      const readout = lastReadoutRef.current;
+      const built: Array<{ entry: CampaignResult; project: Project }> = [];
+      for (const piece of plan.pieces) {
+        if (controller.signal.aborted) break;
+        setCampaignStatus(`Building ${piece.label}…`);
+        const ratio = ASPECT_RATIO_OPTIONS.find((r) => r.id === piece.formatId) ?? ASPECT_RATIO_OPTIONS[1];
+        let project = await createProject(uid, `Viral Promo — ${base} (${piece.label})`, ratio.canvasWidth, ratio.canvasHeight, {
+          watermarkEnabled: tier !== 'lifetime',
+        });
+        const opts = { duration, fit, skin };
+        switch (piece.recipe) {
+          case 'slam':
+          case 'spin-slam':
+            project = buildSlamProject(project, art, piece.texts, { ...opts, extras, variant: piece.recipe === 'spin-slam' ? 'spin' : 'slam' });
+            break;
+          case 'countdown':
+            project = buildCountdownProject(project, art, piece.texts, { ...opts, extras });
+            break;
+          case 'newsflash':
+            project = buildNewsflashProject(project, art, piece.texts, opts);
+            break;
+          case 'versus':
+            project = buildVersusProject(project, assets[0], assets[1] ?? assets[0], piece.texts, opts);
+            break;
+          case 'lineup':
+            project = buildLineupProject(
+              project,
+              assets.map((asset, i) => ({ asset, name: cleanName(picked[i].file.name) })),
+              piece.texts,
+              opts,
+            );
+            break;
+          case 'flyer-stack':
+            project = buildStackProject(project, assets, piece.texts, opts);
+            break;
+          case 'logo-build':
+            project = buildLogoProject(project, slices ?? [], piece.texts, opts);
+            break;
+          default:
+            project = buildKineticProject(project, art, slices ?? [], piece.texts, { ...opts, extras });
+        }
+        if (musicAsset) project = addPromoMusic(project, musicAsset, duration);
+        if (readout) project = applyCameraTour(project, readout);
+        project = applyStageBackdrop(project);
+        await saveProject(project);
+        const entry: CampaignResult = {
+          piece,
+          projectId: project.id,
+          posts: buildSocialPosts(project),
+          fileName: campaignFileName(base, piece),
+          status: 'built',
+        };
+        results.push(entry);
+        built.push({ entry, project });
+        setCampaignResults([...results]);
+      }
+
+      // Render phase — same engine, same validation, same daily
+      // counter as an editor export.
+      const engine = getConfiguredExportEngine();
+      const renderer = createExportRenderer(engine);
+      await ensureFontsLoaded([fontFamily]);
+      let quotaHit = false;
+      for (const { entry, project } of built) {
+        if (controller.signal.aborted) break;
+        if (!canExportToday(uid, tier)) {
+          quotaHit = true;
+          break;
+        }
+        try {
+          setCampaignStatus(`Rendering ${entry.piece.label}…`);
+          setCampaignPct(0);
+          const output = resolveExportSettings(project.canvasWidth, project.canvasHeight, {
+            resolution: 'native',
+            frameRate: project.frameRate || 30,
+            quality: 'high',
+          });
+          const result = await renderer.render(project, {
+            signal: controller.signal,
+            output,
+            onProgress: (pr) => setCampaignPct(Math.round(pr.fraction * 100)),
+          });
+          const validation = validateRenderResult(result.blob, result.durationSeconds);
+          if (!validation.valid) throw new Error(validation.error || 'Export failed validation.');
+          let mp4 = result.blob;
+          if (engine !== 'mediabunny') mp4 = await transcodeWebmToMp4(result.blob, project.frameRate || 30);
+          recordExport(uid);
+          entry.blob = mp4;
+          entry.url = URL.createObjectURL(mp4);
+          entry.status = 'done';
+        } catch (err: any) {
+          if (controller.signal.aborted) break;
+          entry.status = 'failed';
+          entry.error = err?.message || 'This piece could not be rendered here — open its project to export it.';
+        }
+        setCampaignResults([...results]);
+      }
+
+      if (controller.signal.aborted) {
+        setCampaignNote('Campaign stopped — every piece built so far is saved above as its own project.');
+      } else if (quotaHit) {
+        setCampaignNote(
+          tier === 'lifetime'
+            ? 'The render queue stopped early — pieces above are saved as projects; open any of them to export.'
+            : "Today's free export limit stopped the render queue — nothing is lost: every piece is saved above as its own project, ready to open and export. Lifetime removes the daily limit.",
+        );
+      } else if (results.length > 0 && results.every((r) => r.status === 'done')) {
+        setCampaignNote('Campaign complete — every piece rendered, each with its post written under it.');
+      }
+    } catch (err: any) {
+      setCampaignNote(err?.message || 'The campaign could not be built. Your single Build button above still works as before.');
+    } finally {
+      campaignAbortRef.current = null;
+      setCampaignRunning(false);
+      setCampaignStatus('');
+      setCampaignPct(0);
+    }
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId]);
+
+  const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
+    if (!r.blob) return;
+    const file = new File([r.blob], r.fileName, { type: 'video/mp4' });
+    const nav = navigator as Navigator & { canShare?: (data: ShareData) => boolean };
+    if (nav.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], title: r.piece.label });
+      } catch {
+        /* the user closed the share sheet */
+      }
+    }
+  }, []);
+
+  const copyCampaignPost = useCallback(async (r: CampaignResult) => {
+    const text = r.posts[0]?.text ?? '';
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedPieceId(r.piece.id);
+      setTimeout(() => setCopiedPieceId((id) => (id === r.piece.id ? null : id)), 2000);
+    } catch {
+      /* clipboard unavailable — the post text is on screen to copy by hand */
+    }
+  }, []);
+
   const inputCls =
     'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-gold/60';
   const chipCls = (active: boolean) =>
     `px-3 py-1.5 rounded-lg border text-xs font-bold ${active ? 'bg-gold text-black border-gold' : 'bg-white/5 border-white/10 text-white/70'}`;
+
+  const planPreview: CampaignPlan | null =
+    phase !== 'pick' && analysis
+      ? planCampaign({
+          texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
+          masterRecipe: recipe,
+          masterFormatId: ratioId,
+          kind: analysis.suggestedKind,
+          altHookPairs: currentAltPairs(),
+          font: fontFamily,
+        })
+      : null;
 
   return (
     <div className="min-h-screen bg-[#070707] text-white">
@@ -743,9 +1040,117 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               )}
             </div>
 
+            {planPreview && (
+              <div className="mt-4 bg-white/5 border border-gold/30 rounded-xl p-4 space-y-3">
+                <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
+                  4 · Campaign — the whole set in one go
+                </label>
+                <p className="text-xs text-white/55">
+                  One upload, <span className="text-white font-bold">{planPreview.pieces.length} finished promos</span> —{' '}
+                  {planPreview.seriesKind === 'countdown'
+                    ? 'a master, two alternate hooks, a 7-day / 48-hour / day-of countdown ladder, and square + wide cuts.'
+                    : 'a master, two alternate hooks, a newsflash / story / offer ladder, and square + wide cuts.'}{' '}
+                  Every piece is saved as its own project, rendered here, and handed to you with its post already written.
+                </p>
+                <ul className="space-y-1">
+                  {planPreview.pieces.map((pc) => (
+                    <li key={pc.id} className="flex items-center gap-2 text-[11px]">
+                      <span className="text-white/85 font-bold">{pc.label}</span>
+                      <span className="px-1.5 py-0.5 rounded border border-white/15 text-white/45">{pc.formatId}</span>
+                      <span className="text-white/40">{pc.scheduleLabel}</span>
+                    </li>
+                  ))}
+                </ul>
+                {currentUser && tier !== 'lifetime' && (
+                  <p className="text-[11px] text-white/40">
+                    Free plan: {exportsRemainingToday(currentUser.uid, tier)} exports left today — the campaign renders what
+                    today's limit allows and saves every project, so nothing is lost.
+                  </p>
+                )}
+                {campaignRunning ? (
+                  <div className="flex items-center gap-2">
+                    <p className="flex-1 text-xs text-gold font-bold">
+                      {campaignStatus}
+                      {campaignPct > 0 ? ` — ${campaignPct}%` : ''}
+                    </p>
+                    <button
+                      onClick={() => campaignAbortRef.current?.abort()}
+                      className="min-h-[40px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/70"
+                    >
+                      Stop
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => void handleCampaign()}
+                    disabled={phase === 'building' || !!fileProblem}
+                    className="w-full min-h-[48px] py-3 rounded-lg border border-gold bg-gold/15 hover:bg-gold/25 disabled:opacity-50 text-gold text-sm font-black uppercase tracking-wide"
+                  >
+                    Build the full campaign ({planPreview.pieces.length} promos)
+                  </button>
+                )}
+                {campaignNote && <p className="text-[11px] text-white/50">{campaignNote}</p>}
+                {campaignResults.length > 0 && (
+                  <div className="space-y-2 pt-1">
+                    {campaignResults.map((r) => (
+                      <div key={r.piece.id} className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-black uppercase tracking-wide text-white">{r.piece.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded border border-white/15 text-white/45">{r.piece.formatId}</span>
+                          <span className="text-[10px] text-white/40">{r.piece.scheduleLabel}</span>
+                          <span
+                            className={`ml-auto text-[10px] font-bold uppercase ${
+                              r.status === 'done' ? 'text-gold' : r.status === 'failed' ? 'text-red-400' : 'text-white/50'
+                            }`}
+                          >
+                            {r.status === 'done' ? 'Rendered' : r.status === 'failed' ? 'Render failed here' : 'Project saved'}
+                          </span>
+                        </div>
+                        {r.error && <p className="text-[11px] text-red-300/80">{r.error}</p>}
+                        <div className="flex flex-wrap gap-2">
+                          {r.status === 'done' && r.url && (
+                            <>
+                              <a
+                                href={r.url}
+                                download={r.fileName}
+                                className="min-h-[36px] inline-flex items-center px-3 rounded-lg bg-gold text-black text-[11px] font-black uppercase"
+                              >
+                                Save MP4
+                              </a>
+                              <button
+                                onClick={() => void shareCampaignPiece(r)}
+                                className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                              >
+                                Share
+                              </button>
+                            </>
+                          )}
+                          <button
+                            onClick={() => void copyCampaignPost(r)}
+                            className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                          >
+                            {copiedPieceId === r.piece.id ? 'Post copied ✓' : 'Copy its post'}
+                          </button>
+                          <button
+                            onClick={() => onOpenProject(r.projectId)}
+                            className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                          >
+                            Open in editor
+                          </button>
+                        </div>
+                        {r.posts[0] && (
+                          <p className="text-[11px] text-white/45 whitespace-pre-line leading-relaxed">{r.posts[0].text}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               onClick={() => void handleBuild()}
-              disabled={phase === 'building' || !!fileProblem}
+              disabled={phase === 'building' || !!fileProblem || campaignRunning}
               className="mt-6 w-full py-3 min-h-[48px] bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black text-sm font-black uppercase tracking-wide"
             >
               {phase === 'building' ? status || 'Building…' : 'Build my promo'}
