@@ -15,7 +15,7 @@
  * (the locked templates standard — written copy like hashtags may
  * keep it, rendered type uses "party" wording).
  */
-import type { PromoTexts } from './recipes';
+import type { PromoSkinId, PromoTexts } from './recipes';
 import { detectPostGenre, type PostGenre } from '../export/socialPosts';
 
 export type SuggestionField = 'hook1' | 'hook2' | 'sub' | 'cta';
@@ -319,4 +319,29 @@ export async function fetchVisionRead(bitmap: ImageBitmap, idToken: string): Pro
   if (Date.now() + 2_000 > budgetEndsAt) return first;
   await new Promise((resolve) => setTimeout(resolve, 1500));
   return requestVisionRead(base64, idToken, fetch, remaining());
+}
+
+/**
+ * The design-suggested skin (R16): the readout's detected genre
+ * picks the stage dressing the way a designer would — gospel art
+ * gets light, trades and business get clean corporate, the party
+ * genres keep their heat. Always a SUGGESTION: applied only until
+ * the user picks a skin themselves.
+ */
+export function suggestedSkinFor(genre: string, kind?: string): PromoSkinId {
+  switch (genre) {
+    case 'gospel':
+      return 'gospel-light';
+    case 'soca':
+    case 'caribbean':
+      return 'soca-shine';
+    case 'trades':
+    case 'realestate':
+    case 'business':
+      return 'corporate-clean';
+    case 'dancehall':
+      return 'dancehall-raw';
+    default:
+      return kind === 'portrait' ? 'soca-shine' : 'dancehall-raw';
+  }
 }

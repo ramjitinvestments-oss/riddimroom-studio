@@ -12,19 +12,72 @@ const POSTER: OcrLine[] = [
   { text: 'TICKETS OUT NOW', confidence: 96, y: 0.9 },
 ];
 
-const BANNER: OcrLine[] = [
-  { text: '"The Standard of Excellence"', confidence: 46, y: 0.1 },
-  { text: 'REALTOR', confidence: 45, y: 0.3 },
-  { text: "LET'S TALK ABOUT YOUR NEXT MOVE.", confidence: 60, y: 0.55 },
-  { text: '727-623-8398', confidence: 67, y: 0.7 },
-  { text: 'Se habla espanol BUY SELL INVEST | RELOCATE', confidence: 72, y: 0.85 },
-];
+const BANNER_AUTO: OcrLine[] = [
+    { text: "Ve Ni - - |", confidence: 31, y: 0, box: { x: 0, y: 0, w: 0.924, h: 0.087 } },
+    { text: "SY | RutenbergE| gil", confidence: 2, y: 0.154, box: { x: 0.042, y: 0.154, w: 0.958, h: 0.117 } },
+    { text: "| i | A A a - y J Fo I \"The Standard of Excellence\u201d 9 = L 3 Y : i < t \u00bb Ls", confidence: 46, y: 0.248, box: { x: 0, y: 0.248, w: 0.986, h: 0.097 } },
+    { text: "0 FS Ae Sr", confidence: 19, y: 0.333, box: { x: 0.004, y: 0.333, w: 0.98, h: 0.133 } },
+    { text: "; | ee | REALTOR \u2014\u2014 VN wl [as ME", confidence: 45, y: 0.507, box: { x: 0.02, y: 0.507, w: 0.914, h: 0.122 } },
+    { text: "3 ' / LET'S TALK ABOUT YOUR NEXT MOVE. EE Tae -", confidence: 60, y: 0.609, box: { x: 0.035, y: 0.609, w: 0.965, h: 0.122 } },
+    { text: ": af o | 727-623-8398 \u201cH | p | 22: | A)", confidence: 67, y: 0.728, box: { x: 0, y: 0.728, w: 0.956, h: 0.14 } },
+    { text: "p~ - (=) Se habla espaiiol BUY SELL INVEST | RELOCATE", confidence: 72, y: 0.818, box: { x: 0.119, y: 0.818, w: 0.85, h: 0.077 } }
+    ];
 
-const LOGO: OcrLine[] = [
-  { text: 'S OUNDS +H DO', confidence: 70, y: 0.3 },
-  { text: 'LIVE EVENT PRODUCTION', confidence: 96, y: 0.55 },
-  { text: 'SOUND LIGHTING STAGE TRUSS', confidence: 79, y: 0.7 },
-];
+const BANNER_SPARSE: OcrLine[] = [
+    { text: "\\", confidence: 37, y: 0.01, box: { x: 0, y: 0.01, w: 0.012, h: 0.062 } },
+    { text: "charles", confidence: 92, y: 0.089, box: { x: 0.473, y: 0.089, w: 0.104, h: 0.076 } },
+    { text: "$7", confidence: 21, y: 0.156, box: { x: 0.893, y: 0.156, w: 0.025, h: 0.035 } },
+    { text: "RUTENBERG", confidence: 91, y: 0.19, box: { x: 0.444, y: 0.19, w: 0.14, h: 0.072 } },
+    { text: "&", confidence: 37, y: 0.298, box: { x: 0.224, y: 0.298, w: 0.016, h: 0.043 } },
+    { text: "\u2018The Standard of Excellence", confidence: 87, y: 0.265, box: { x: 0.45, y: 0.265, w: 0.145, h: 0.058 } },
+    { text: ">", confidence: 40, y: 0.333, box: { x: 0.798, y: 0.333, w: 0.033, h: 0.034 } },
+    { text: "1.", confidence: 59, y: 0.388, box: { x: 0.847, y: 0.388, w: 0.019, h: 0.047 } },
+    { text: "iam", confidence: 0, y: 0.408, box: { x: 0.954, y: 0.408, w: 0.031, h: 0.029 } },
+    { text: "|", confidence: 34, y: 0.381, box: { x: 0.955, y: 0.381, w: 0.023, h: 0.03 } },
+    { text: "=", confidence: 49, y: 0.367, box: { x: 0.881, y: 0.367, w: 0.053, h: 0.117 } },
+    { text: "Ne\u201d wf folen Cirlion +5", confidence: 20, y: 0.343, box: { x: 0.203, y: 0.343, w: 0.574, h: 0.256 } },
+    { text: "Ir", confidence: 55, y: 0.438, box: { x: 0.945, y: 0.438, w: 0.053, h: 0.168 } },
+    { text: "REEFARISE ER", confidence: 0, y: 0.568, box: { x: 0.46, y: 0.568, w: 0.143, h: 0.037 } },
+    { text: "Ti . ol al", confidence: 46, y: 0.441, box: { x: 0.776, y: 0.441, w: 0.177, h: 0.234 } },
+    { text: "LET'S TALK ABOUT YOUR NEXT MOVE.", confidence: 87, y: 0.656, box: { x: 0.376, y: 0.656, w: 0.312, h: 0.028 } },
+    { text: "_\u2014", confidence: 38, y: 0.689, box: { x: 0.821, y: 0.689, w: 0.012, h: 0.008 } },
+    { text: "\u201ca", confidence: 33, y: 0.685, box: { x: 0.981, y: 0.685, w: 0.019, h: 0.009 } },
+    { text: "aan", confidence: 11, y: 0.797, box: { x: 0.849, y: 0.797, w: 0.028, h: 0.026 } },
+    { text: "0\u00aee", confidence: 27, y: 0.773, box: { x: 0.851, y: 0.773, w: 0.024, h: 0.026 } },
+    { text: "QO | 727-623-8398", confidence: 80, y: 0.728, box: { x: 0.41, y: 0.728, w: 0.238, h: 0.096 } },
+    { text: "0)", confidence: 14, y: 0.769, box: { x: 0.711, y: 0.769, w: 0.026, h: 0.062 } },
+    { text: "BUY", confidence: 97, y: 0.846, box: { x: 0.712, y: 0.846, w: 0.024, h: 0.022 } },
+    { text: "SEL", confidence: 60, y: 0.846, box: { x: 0.778, y: 0.846, w: 0.028, h: 0.022 } },
+    { text: "L |", confidence: 37, y: 0.769, box: { x: 0.78, y: 0.769, w: 0.047, h: 0.079 } },
+    { text: "INVEST", confidence: 97, y: 0.846, box: { x: 0.841, y: 0.846, w: 0.044, h: 0.022 } },
+    { text: "RELOCATE", confidence: 96, y: 0.846, box: { x: 0.908, y: 0.846, w: 0.06, h: 0.022 } },
+    { text: "I\u00bb", confidence: 50, y: 0.777, box: { x: 0.919, y: 0.777, w: 0.037, h: 0.055 } },
+    { text: "WN", confidence: 0, y: 0.644, box: { x: 0.003, y: 0.644, w: 0.163, h: 0.332 } },
+    { text: "\u00a9 Se habla espafiol", confidence: 69, y: 0.839, box: { x: 0.465, y: 0.839, w: 0.137, h: 0.052 } },
+    { text: "a", confidence: 53, y: 0.933, box: { x: 0.161, y: 0.933, w: 0.119, h: 0.067 } },
+    { text: "FE", confidence: 0, y: 0.917, box: { x: 0.928, y: 0.917, w: 0.072, h: 0.083 } }
+    ];
+
+const LOGO_AUTO: OcrLine[] = [
+    { text: "S OUNDS +H DO", confidence: 70, y: 0.529, box: { x: 0.201, y: 0.529, w: 0.609, h: 0.044 } },
+    { text: "SESES\u2014\u2014\u2014 (S\u2014", confidence: 0, y: 0.603, box: { x: 0.173, y: 0.603, w: 0.654, h: 0.032 } },
+    { text: "LIVE EVENT PRODUCTION", confidence: 96, y: 0.662, box: { x: 0.246, y: 0.662, w: 0.51, h: 0.021 } },
+    { text: "SOUND LJ LIGHTING LJ STAGE \u00b0 TRUSS", confidence: 79, y: 0.708, box: { x: 0.212, y: 0.708, w: 0.575, h: 0.025 } }
+    ];
+
+const LOGO_SPARSE: OcrLine[] = [
+    { text: "~~", confidence: 54, y: 0.244, box: { x: 0.437, y: 0.244, w: 0.175, h: 0.11 } },
+    { text: "S OUNDS HD", confidence: 68, y: 0.529, box: { x: 0.201, y: 0.529, w: 0.609, h: 0.044 } },
+    { text: "&", confidence: 62, y: 0.603, box: { x: 0.473, y: 0.603, w: 0.048, h: 0.032 } },
+    { text: "LIVE EVENT PRODUCTION", confidence: 96, y: 0.662, box: { x: 0.246, y: 0.662, w: 0.51, h: 0.021 } },
+    { text: "SOUND", confidence: 96, y: 0.712, box: { x: 0.212, y: 0.712, w: 0.083, h: 0.014 } },
+    { text: "eo", confidence: 20, y: 0.714, box: { x: 0.327, y: 0.714, w: 0.007, h: 0.011 } },
+    { text: "LIGHTING", confidence: 96, y: 0.712, box: { x: 0.366, y: 0.712, w: 0.121, h: 0.014 } },
+    { text: "\u00b0", confidence: 50, y: 0.714, box: { x: 0.519, y: 0.714, w: 0.007, h: 0.011 } },
+    { text: "STAGE", confidence: 96, y: 0.712, box: { x: 0.558, y: 0.712, w: 0.079, h: 0.014 } },
+    { text: "\u00b0", confidence: 64, y: 0.714, box: { x: 0.669, y: 0.714, w: 0.007, h: 0.011 } },
+    { text: "TRUSS", confidence: 95, y: 0.712, box: { x: 0.708, y: 0.712, w: 0.079, h: 0.014 } }
+    ];
 
 describe('readout classification on the owner proof fixtures', () => {
   it('the concert flyer yields its own hook, sub and CTA', () => {
@@ -36,12 +89,16 @@ describe('readout classification on the owner proof fixtures', () => {
     expect(r.genre).toBe('soca');
   });
 
-  it('the realtor banner: its own phone number becomes the CTA (phone beats slogan)', () => {
-    const r = classifyReadout(BANNER, { kind: 'flyer', fileName: 'banner.png' });
-    expect(r.phone).toBe('727-623-8398');
-    expect(r.fields.cta).toBe('CALL 727-623-8398');
+  it('the realtor banner (FULL fresh dual-pass capture, R16): headline, tagline, phone CTA — all from the art', () => {
+    const r = classifyReadout(mergeLineSets(BANNER_AUTO, BANNER_SPARSE), { kind: 'flyer', fileName: '1000096383_0_1bw4.png' });
     expect(r.genre).toBe('realestate');
-    expect(r.lines.length).toBeGreaterThanOrEqual(4);
+    expect(r.phone).toBe('727-623-8398');
+    expect(r.fields.hook1).toBe("LET'S TALK ABOUT");
+    expect(r.fields.hook2).toBe('YOUR NEXT MOVE.');
+    expect(r.fields.sub).toBe('The Standard of Excellence');
+    expect(r.fields.cta).toBe('CALL 727-623-8398');
+    expect(r.sources).toEqual({ hook1: 'art', hook2: 'art', sub: 'art', cta: 'art' });
+    expect(JSON.stringify(r.fields)).not.toMatch(/RutenbergE|espaiiol|§/);
   });
 
   it('PROVENANCE LOCK: party bank copy cannot survive a trades read', () => {
@@ -75,11 +132,20 @@ describe('readout classification on the owner proof fixtures', () => {
     expect(merged.hook2).toBe('TWO SOUNDS.');
   });
 
-  it('the logo yields its tagline as headline and a bank CTA', () => {
-    const r = classifyReadout(LOGO, { kind: 'logo', fileName: 'powerline.png' });
+  it('the Powerline logo (FULL fresh dual-pass capture, R16): headline + services sub, suggested CTA labelled as such', () => {
+    const r = classifyReadout(mergeLineSets(LOGO_AUTO, LOGO_SPARSE), { kind: 'logo', fileName: '1000092505_1_fyoh.png' });
     expect(r.headline).toBe('LIVE EVENT PRODUCTION');
     expect(r.genre).toBe('business');
+    expect(r.fields.sub).toContain('SOUND');
+    expect(r.fields.sub).toContain('TRUSS');
     expect(r.fields.cta).toBeTruthy();
+    expect(r.sources.cta).toBe('suggested');
+    expect(r.sources.hook1).toBe('art');
+  });
+
+  it('provenance: the poster fields are all the artwork\'s own words', () => {
+    const r = classifyReadout(POSTER, { kind: 'flyer', fileName: 'poster.png' });
+    expect(r.sources).toEqual({ hook1: 'art', hook2: 'art', sub: 'art', cta: 'art' });
   });
 
 

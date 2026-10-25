@@ -20,19 +20,20 @@ import {
   fieldAlternates,
   mergeIntoUntouched,
   splitHeadline,
+  suggestedSkinFor,
   type SuggestionContext,
   type SuggestionField,
   type VisionSuggestion,
 } from '../lib/promo/suggest';
 import { analyzeArtwork } from '../lib/promo/ocrEngine';
-import { planCampaign, campaignFileName, type CampaignPiece, type CampaignPlan } from '../lib/promo/campaign';
+import { parseEventDate, planCampaign, campaignFileName, type CampaignPiece, type CampaignPlan } from '../lib/promo/campaign';
 import { createExportRenderer, getConfiguredExportEngine } from '../lib/export/mediabunnyExporter';
 import { validateRenderResult } from '../lib/export/validate';
 import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
 import { resolveExportSettings } from '../lib/export/quality';
 import { buildSocialPosts, type PostGenre, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
-import { classifyReadout, mergeReadoutFields, stripJunkEdges, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
+import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
@@ -150,6 +151,12 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [suggesting, setSuggesting] = useState(false);
   const [analyzePct, setAnalyzePct] = useState<number | null>(null);
   const [readLines, setReadLines] = useState<OcrLine[]>([]);
+  /** R16 provenance: where each field's words came from. */
+  const [fieldSources, setFieldSources] = useState<Partial<Record<SuggestionField, FieldSource | 'yours'>>>({});
+  /** R16: the engine read too little — ask for the headline once. */
+  const [needsHeadlineAsk, setNeedsHeadlineAsk] = useState(false);
+  const [askValue, setAskValue] = useState('');
+  const skinTouchedRef = useRef(false);
   const touchedRef = useRef<Set<string>>(new Set());
   const visionRef = useRef<VisionSuggestion | null>(null);
   const suggestCtxRef = useRef<SuggestionContext | null>(null);
@@ -186,6 +193,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     void ensureFontsLoaded();
     const kit = loadBrandKit();
     if (kit) {
+      skinTouchedRef.current = true; // a saved kit is the user's own choice
       setSkin(kit.skinId);
       setTexts((t) => ({ ...t, cta: kit.ctaText, sub: kit.subText }));
       setKitNote('Brand defaults loaded from this device.');
@@ -216,6 +224,17 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     lastReadoutRef.current = result;
     setReadLines(result.lines);
     setTexts((t) => mergeReadoutFields(t, touchedRef.current, result));
+    setFieldSources((prev) => {
+      const next = { ...prev };
+      for (const f of ['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]) {
+        if (touchedRef.current.has(f)) continue;
+        if (result.fields[f]) next[f] = result.sources[f] ?? 'art';
+        else delete next[f];
+      }
+      return next;
+    });
+    if (!skinTouchedRef.current) setSkin(suggestedSkinFor(result.genre, suggestCtxRef.current?.kind));
+    setNeedsHeadlineAsk(!result.headline && result.lines.length < 3);
     setAutoNote(
       result.headline
         ? 'Words read from your artwork itself — tap any line to make it yours.'
@@ -231,7 +250,15 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     lastBitmapRef.current = bitmap;
     visionRef.current = null;
     lastReadoutRef.current = null;
-    setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bankSuggestion(ctx)));
+    const bank = bankSuggestion(ctx);
+    setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bank));
+    setFieldSources((prev) => {
+      const next = { ...prev };
+      for (const f of ['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]) {
+        if (!touchedRef.current.has(f) && bank[f]) next[f] = 'suggested';
+      }
+      return next;
+    });
     setAutoNote('Words suggested from your artwork type — tap any line to make it yours.');
 
     if (!force && cacheKey) {
@@ -284,6 +311,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       placed exactly where the user wants it. Counts as the user's
       own edit, so later auto-fills never overwrite it. */
   const assignReadLine = useCallback((target: 'hook' | 'sub' | 'cta', text: string) => {
+    setFieldSources((prev) => ({
+      ...prev,
+      ...(target === 'hook' ? { hook1: 'art' as const, hook2: 'art' as const } : { [target]: 'art' as const }),
+    }));
     if (target === 'hook') {
       const [h1, h2] = splitHeadline(text);
       touchedRef.current.add('hook1');
@@ -306,7 +337,11 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     const alternates = Array.from(
       new Set([visionValue, ...fieldAlternates(field, ctx)].filter((v): v is string => !!v && v.length > 0)),
     );
-    setTexts((t) => ({ ...t, [field]: cycleAlternate(alternates, t[field] ?? '') }));
+    setTexts((t) => {
+      const value = cycleAlternate(alternates, t[field] ?? '');
+      setFieldSources((prev) => ({ ...prev, [field]: visionValue && value === visionValue ? ('art' as const) : ('suggested' as const) }));
+      return { ...t, [field]: value };
+    });
   }, []);
 
   const handleFiles = useCallback(async (files: FileList | File[]) => {
@@ -541,6 +576,28 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   }, []);
 
   /**
+   * Alternate sub lines for the campaign, ART FIRST (R16): the
+   * artwork's own unused read lines — venue, date, brand lines —
+   * rotate before any bank line is borrowed.
+   */
+  const campaignAltSubs = useCallback((): string[] => {
+    const used = new Set(
+      [texts.hook1, texts.hook2, texts.sub, texts.cta].map((v) => (v ?? '').trim().toUpperCase()).filter(Boolean),
+    );
+    const fromArt: string[] = [];
+    const readout = lastReadoutRef.current;
+    if (readout) {
+      const lines = readout.lines
+        .map((l) => ({ ...l, text: stripJunkEdges(l.text).trim() }))
+        .filter((l) => l.confidence >= 50 && isCleanLine(l.text) && l.text.length >= 3 && l.text.length <= 42 && !used.has(l.text.toUpperCase()))
+        .sort((a, b) => (b.box?.h ?? 0) - (a.box?.h ?? 0));
+      for (const l of lines) if (!fromArt.includes(l.text)) fromArt.push(l.text);
+    }
+    const bank = suggestCtxRef.current ? fieldAlternates('sub', suggestCtxRef.current) : [];
+    return [...fromArt, ...bank.filter((b) => !fromArt.some((a) => a.toUpperCase() === b.toUpperCase()))];
+  }, [texts.hook1, texts.hook2, texts.sub, texts.cta]);
+
+  /**
    * The Campaign Engine runner: plan the set, upload the artwork
    * ONCE, build + save every piece's project, then render MP4s in
    * place — inside the plan's daily export allowance, each render
@@ -558,9 +615,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       masterFormatId: ratioId,
       kind: analysis.suggestedKind,
       altHookPairs: currentAltPairs(),
-      altSubs: suggestCtxRef.current ? fieldAlternates('sub', suggestCtxRef.current) : [],
+      altSubs: campaignAltSubs(),
       altCtas: suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : [],
       genre: detectedPostGenre(),
+      eventDate: parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
       font: fontFamily,
     });
     setCampaignRunning(true);
@@ -737,7 +795,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -777,9 +835,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           masterFormatId: ratioId,
           kind: analysis.suggestedKind,
           altHookPairs: currentAltPairs(),
-          altSubs: suggestCtxRef.current ? fieldAlternates('sub', suggestCtxRef.current) : [],
+          altSubs: campaignAltSubs(),
           altCtas: suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : [],
           genre: detectedPostGenre(),
+          eventDate: parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
           font: fontFamily,
         })
       : null;
@@ -904,7 +963,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Skin</span>
                 {(Object.keys(PROMO_SKINS) as PromoSkinId[]).map((id) => (
-                  <button key={id} onClick={() => setSkin(id)} className={chipCls(skin === id)}>
+                  <button key={id} onClick={() => { skinTouchedRef.current = true; setSkin(id); }} className={chipCls(skin === id)}>
                     {PROMO_SKINS[id].label}
                   </button>
                 ))}
@@ -984,6 +1043,32 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   ))}
                 </select>
               </label>
+              {needsHeadlineAsk && !texts.hook1 && (
+                <div className="rounded-lg border border-gold/40 bg-gold/10 p-3 space-y-2">
+                  <p className="text-xs text-gold font-bold">The engine couldn't read this artwork's headline.</p>
+                  <p className="text-[11px] text-white/60">Type it exactly as printed — everything else still builds from the read.</p>
+                  <div className="flex gap-2">
+                    <input
+                      className={inputCls}
+                      placeholder="The headline, as printed"
+                      value={askValue}
+                      onChange={(e) => setAskValue(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      disabled={!askValue.trim()}
+                      onClick={() => {
+                        assignReadLine('hook', askValue.trim().toUpperCase());
+                        setFieldSources((prev) => ({ ...prev, hook1: 'yours', hook2: 'yours' }));
+                        setNeedsHeadlineAsk(false);
+                      }}
+                      className="shrink-0 px-3 rounded-lg bg-gold text-black text-xs font-bold disabled:opacity-50"
+                    >
+                      Use it
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {(
                   [
@@ -993,10 +1078,12 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                     ['sub', 'Sub line — date • venue • city'],
                   ] as Array<[SuggestionField, string]>
                 ).map(([field, placeholder]) => (
-                  <div key={field} className="relative">
+                  <div key={field}>
+                    <div className="relative">
                     <input className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
                       onChange={(e) => {
                         touchedRef.current.add(field);
+                        setFieldSources((prev) => ({ ...prev, [field]: 'yours' as const }));
                         setTexts((t) => ({ ...t, [field]: e.target.value }));
                       }} />
                     <button
@@ -1008,6 +1095,16 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                     >
                       <RefreshCw size={14} />
                     </button>
+                    </div>
+                    {(texts[field] ?? '').trim() && fieldSources[field] && (
+                      <p className={`mt-1 text-[10px] font-bold uppercase tracking-wider ${fieldSources[field] === 'art' ? 'text-gold/80' : 'text-white/35'}`}>
+                        {fieldSources[field] === 'art'
+                          ? 'From your artwork'
+                          : fieldSources[field] === 'yours'
+                            ? 'Your words'
+                            : 'Suggested — tap ↻ for another'}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>

@@ -69,7 +69,64 @@ export interface CampaignInput {
   /** The genre the artwork's own words detected: when the caller
       has no pools, the planner draws them from this genre's bank. */
   genre?: PostGenre;
+  /** The event's real calendar date, parsed from the artwork's own
+      words — schedule labels become actual post dates. */
+  eventDate?: Date | null;
   font?: string;
+}
+
+const MONTH_INDEX: Record<string, number> = {
+  JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+};
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Parse the event date out of the artwork's own words — "SAT - DEC
+ * 20 - THE GRAND HALL", "DEC 20 2026", "12/20". A yearless date
+ * means its NEXT occurrence (a flyer is always for the future).
+ * Returns null when no real date is printed.
+ */
+export function parseEventDate(
+  texts: { sub?: string; hook1?: string; hook2?: string },
+  now: Date = new Date(),
+): Date | null {
+  const hay = [texts.sub, texts.hook1, texts.hook2].filter(Boolean).join(' ');
+  let month = -1;
+  let day = 0;
+  let year: number | undefined;
+  const named = hay.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s*(20\d\d))?/i);
+  if (named) {
+    month = MONTH_INDEX[named[1].toUpperCase()];
+    day = parseInt(named[2], 10);
+    year = named[3] ? parseInt(named[3], 10) : undefined;
+  } else {
+    const numeric = hay.match(/\b(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?\b/);
+    if (!numeric) return null;
+    month = parseInt(numeric[1], 10) - 1;
+    day = parseInt(numeric[2], 10);
+    if (numeric[3]) {
+      const y = parseInt(numeric[3], 10);
+      year = y < 100 ? 2000 + y : y;
+    }
+  }
+  if (month < 0 || month > 11 || day < 1 || day > 31) return null;
+  let date = new Date(year ?? now.getFullYear(), month, day, 12);
+  if (Number.isNaN(date.getTime()) || date.getMonth() !== month) return null;
+  if (!year && date.getTime() < now.getTime() - 36 * 3600 * 1000) {
+    date = new Date(now.getFullYear() + 1, month, day, 12);
+  }
+  return date;
+}
+
+function fmtDay(d: Date): string {
+  return `${WEEKDAY_SHORT[d.getDay()]} ${MONTH_SHORT[d.getMonth()]} ${d.getDate()}`;
+}
+
+function daysBefore(d: Date, n: number): Date {
+  const x = new Date(d.getTime());
+  x.setDate(x.getDate() - n);
+  return x;
 }
 
 /** Recipes a campaign piece can build from shared single-art assets. */
@@ -104,6 +161,7 @@ function samePair(a: [string, string], b: [string, string]): boolean {
 
 export function planCampaign(input: CampaignInput): CampaignPlan {
   const base = clean(input.texts);
+  const eventDate = input.eventDate ?? null;
   const font = input.font ?? input.texts.font;
   const withFont = (t: Required<Omit<PromoTexts, 'font'>>): PromoTexts => ({ ...t, font });
   const masterPair: [string, string] = [base.hook1, base.hook2];
@@ -164,7 +222,11 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     recipe: input.masterRecipe,
     formatId: input.masterFormatId,
     texts: base,
-    scheduleLabel: event ? 'Post on the day — the main push' : 'Launch day — the main push',
+    scheduleLabel: event
+      ? eventDate
+        ? `Post ${fmtDay(eventDate)} — the main push`
+        : 'Post on the day — the main push'
+      : 'Launch day — the main push',
     hookChanged: false,
   });
 
@@ -183,7 +245,7 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       sub: takeSub() ?? base.sub,
       cta: takeCta() ?? base.cta,
     },
-    scheduleLabel: event ? 'Post 5 days before' : 'Day 2',
+    scheduleLabel: event ? (eventDate ? `Post ${fmtDay(daysBefore(eventDate, 5))}` : 'Post 5 days before') : 'Day 2',
     hookChanged: !!alt1Pair,
   });
 
@@ -212,10 +274,10 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
         scheduleLabel,
         hookChanged: true,
       });
-    countdown('series-7d', 'Countdown — 7 days to go', 'countdown-7-days', ['7 DAYS', 'TO GO'], cd7Sub, base.cta, 'Post 7 days before');
-    countdown('series-48h', 'Countdown — 48 hours to go', 'countdown-48-hours', ['48 HOURS', 'TO GO'], cd48Sub, base.cta, 'Post 48 hours before');
+    countdown('series-7d', 'Countdown — 7 days to go', 'countdown-7-days', ['7 DAYS', 'TO GO'], cd7Sub, base.cta, eventDate ? `Post ${fmtDay(daysBefore(eventDate, 7))}` : 'Post 7 days before');
+    countdown('series-48h', 'Countdown — 48 hours to go', 'countdown-48-hours', ['48 HOURS', 'TO GO'], cd48Sub, base.cta, eventDate ? `Post ${fmtDay(daysBefore(eventDate, 2))}` : 'Post 48 hours before');
     // Day-of pushes the ask: its CTA rotates to the next phrasing.
-    countdown('series-day', 'Countdown — today is the day', 'countdown-day-of', ['TODAY', 'IS THE DAY'], cdDaySub, takeCta() ?? base.cta, 'Post on the day — morning');
+    countdown('series-day', 'Countdown — today is the day', 'countdown-day-of', ['TODAY', 'IS THE DAY'], cdDaySub, takeCta() ?? base.cta, eventDate ? `Post ${fmtDay(eventDate)} — morning` : 'Post on the day — morning');
   } else {
     push({
       id: 'series-news',
@@ -269,7 +331,7 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       sub: takeSub() ?? base.sub,
       cta: takeCta() ?? base.cta,
     },
-    scheduleLabel: event ? 'Post the day before' : 'Day 4',
+    scheduleLabel: event ? (eventDate ? `Post ${fmtDay(daysBefore(eventDate, 1))}` : 'Post the day before') : 'Day 4',
     hookChanged: !!alt2Pair,
   });
 

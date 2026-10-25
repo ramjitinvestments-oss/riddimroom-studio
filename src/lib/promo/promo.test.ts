@@ -201,7 +201,7 @@ describe('format fit (R15)', () => {
     if (!item) throw new Error('hero item missing');
     const asset = project.mediaAssets[assetId];
     const w = item.scale * project.canvasWidth * 0.25;
-    return { w, h: (w * asset.height) / asset.width };
+    return { w, h: (w * (asset.height ?? 1)) / (asset.width ?? 1) };
   };
 
   it('slam fits whole art by default on a square stage — no crop', () => {

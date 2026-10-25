@@ -30,8 +30,14 @@ export interface OcrLine {
   box?: { x: number; y: number; w: number; h: number };
 }
 
+export type FieldSource = 'art' | 'suggested';
+
 export interface ReadoutResult {
   fields: Partial<PromoTexts>;
+  /** Where each filled field came from — the artwork's own words
+      ('art') or a suggestion the genre bank supplied ('suggested').
+      The UI labels every field with this; no silent substitution. */
+  sources: Partial<Record<'hook1' | 'hook2' | 'sub' | 'cta', FieldSource>>;
   genre: string;
   /** Every usable line the engine read, top to bottom. */
   lines: OcrLine[];
@@ -132,7 +138,7 @@ export function stripJunkEdges(text: string): string {
   while (tokens.length > 1 && isJunk(tokens[tokens.length - 1]) && tokens.slice(0, -1).some((t) => letters(t) >= 3)) tokens.pop();
   // Trim symbol junk at the very edges (quotes, slashes, equals) —
   // sentence punctuation the designer printed (. ! ?) is content.
-  return tokens.join(' ').replace(/^[\s="'<>\/\\|_=~#*-]+|[\s="'<>\/\\|_=~#*-]+$/g, '');
+  return tokens.join(' ').replace(/^[\s="'<>\/\\|_=~#*\u2018\u2019\u201C\u201D\u00AB\u00BB-]+|[\s="'<>\/\\|_=~#*\u2018\u2019\u201C\u201D\u00AB\u00BB-]+$/g, '');
 }
 
 /**
@@ -143,6 +149,12 @@ export function stripJunkEdges(text: string): string {
  * line's tokens is a duplicate and drops; genuinely new fragments
  * in a shared y-band join (x order) into a synthetic line.
  */
+/** Squash for comparison: case, quotes and punctuation removed so
+    "LET'S" in one pass matches "LETS" in the other. */
+function squash(text: string): string {
+  return text.toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+}
+
 export function mergeLineSets(primary: OcrLine[], extra: OcrLine[]): OcrLine[] {
   const out = [...primary];
   const contained = (inner: OcrLine, outer: OcrLine) => {
@@ -153,16 +165,43 @@ export function mergeLineSets(primary: OcrLine[], extra: OcrLine[]): OcrLine[] {
   };
   const fresh: OcrLine[] = [];
   for (const l of extra) {
-    const dup = out.some(
-      (o) => contained(l, o) && o.text.toUpperCase().includes(l.text.toUpperCase().replace(/[^A-Z ]/g, '').trim().split(' ')[0] || '\u0000'),
+    const parent = out.find(
+      (o) => contained(l, o) && squash(o.text).includes(squash(l.text).split(' ')[0] || '\u0000'),
     );
-    if (!dup && l.text.trim().length >= 2) fresh.push(l);
+    if (parent && squash(parent.text).includes(squash(l.text))) {
+      // The sparse read found a phrase INSIDE a noisier auto line.
+      const coverage = squash(l.text).length / Math.max(1, squash(parent.text).length);
+      if (coverage >= 0.6 && l.confidence > parent.confidence) {
+        // Mostly the same line, read better: the clean version wins
+        // (the realtor banner's CTA line arrived garbled in the auto
+        // pass and pristine in the sparse pass).
+        parent.text = l.text;
+        parent.confidence = l.confidence;
+        continue;
+      }
+      if (l.text.trim().split(/\s+/).length >= 2) {
+        // A clean multi-word phrase buried in noise: keep it as its
+        // own line — it will outscore its noisy parent on merit.
+        if (l.text.trim().length >= 2) fresh.push(l);
+        continue;
+      }
+      // A single word that merely repeats a token of the parent
+      // (G.S.Y.M.'s SAVED inside "5 SAVED MIND") is a true duplicate.
+      continue;
+    }
+    if (!parent && l.text.trim().length >= 2) fresh.push(l);
   }
   // Join fresh fragments that share a y-band into synthetic lines.
   const used = new Set<OcrLine>();
   for (const l of fresh) {
     if (used.has(l)) continue;
-    const band = fresh.filter((o) => !used.has(o) && Math.abs((o.box?.y ?? o.y) - (l.box?.y ?? l.y)) < 0.055);
+    const band = fresh.filter((o) => {
+      if (used.has(o)) return false;
+      if (!l.box || !o.box) return Math.abs(o.y - l.y) < 0.055;
+      const centerGap = Math.abs(o.box.y + o.box.h / 2 - (l.box.y + l.box.h / 2));
+      const heightRatio = Math.max(o.box.h, l.box.h) / Math.max(0.004, Math.min(o.box.h, l.box.h));
+      return centerGap <= 0.03 && heightRatio <= 2.5;
+    });
     band.forEach((o) => used.add(o));
     if (band.length === 1) {
       out.push(band[0]);
@@ -181,6 +220,43 @@ export function mergeLineSets(primary: OcrLine[], extra: OcrLine[]): OcrLine[] {
     }
   }
   return out;
+}
+
+/** Visual weight: display type is TALL — a line's box height is the
+    design's own statement of what matters. Height leads, area
+    supports. Lines without boxes (legacy reads) weigh 0 and the
+    confidence/position scoring decides, as before. */
+function visualWeight(l: OcrLine): number {
+  if (!l.box) return 0;
+  return l.box.h * 220 + l.box.w * l.box.h * 60;
+}
+
+function headlineScore(l: OcrLine): number {
+  return l.confidence + (1 - l.y) * 25 + uppercaseRatio(l.text) * 15 + visualWeight(l) - Math.abs(l.text.length - 18) * 0.5;
+}
+
+/** A headline is words, not numbers — digit-heavy lines (prices,
+    phone fragments) never lead a promo. */
+function isWordLine(l: OcrLine): boolean {
+  const nonSpace = l.text.replace(/\s/g, '');
+  return nonSpace.length > 0 && letterCount(l.text) * 2 >= nonSpace.length;
+}
+
+function realWordCount(l: OcrLine): number {
+  return l.text.split(/\s+/).map((t) => t.replace(/[^A-Za-z]/g, '')).filter((t) => t.length >= 3).length;
+}
+
+/** A DESIGNED phrase: at least two real words and every token
+    mostly letters. A word-cloud row ("TILE F333 PAINTING") fails —
+    one garbled token disqualifies the phrase, though its clean
+    words still compete as fragments. */
+function isDesignedPhrase(l: OcrLine): boolean {
+  if (realWordCount(l) < 2) return false;
+  return l.text.split(/\s+/).every((t) => {
+    const letters = t.replace(/[^A-Za-z]/g, '').length;
+    const alnum = t.replace(/[^A-Za-z0-9]/g, '').length;
+    return letters >= 2 && letters / Math.max(1, alnum) >= 0.8;
+  });
 }
 
 export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): ReadoutResult {
@@ -231,23 +307,33 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
   const bank = bankSuggestion(ctx);
   const detectedCta = (POST_GENRES as string[]).includes(genre) ? bankCtaForGenre(genre as PostGenre) : bank.cta;
 
-  const ctaLine = work.find(
-    (l) => CTA_HINT.test(l.text) && CTA_START.test(l.text) && isCleanLine(l.text) && l.confidence >= 55 && l.text.length <= VERBATIM_CTA_MAX_CHARS,
-  );
+  const ctaLine = phone
+    ? undefined
+    : work.find(
+        (l) => CTA_HINT.test(l.text) && CTA_START.test(l.text) && isCleanLine(l.text) && l.confidence >= 55 && l.text.length <= VERBATIM_CTA_MAX_CHARS,
+      );
   let subLine = work.find((l) => l !== ctaLine && SUB_HINT.test(l.text));
 
   const headlineCandidates = work.filter(
-    (l) => l !== ctaLine && l !== subLine && l.confidence >= HEADLINE_MIN_CONFIDENCE && isCleanLine(l.text) && l.text.length >= 3 && l.text.length <= 42,
+    (l) => l !== ctaLine && l !== subLine && l.confidence >= HEADLINE_MIN_CONFIDENCE && isCleanLine(l.text) && isWordLine(l) && l.text.length >= 3 && l.text.length <= 42,
   );
   let headline = '';
   let headlineLine: OcrLine | undefined;
-  let bestScore = -Infinity;
-  for (const l of headlineCandidates) {
-    const score = l.confidence + (1 - l.y) * 25 + uppercaseRatio(l.text) * 15 - Math.abs(l.text.length - 18) * 0.5;
-    if (score > bestScore) {
-      bestScore = score;
-      headline = l.text;
-      headlineLine = l;
+  {
+    let bestPhrase: { l: OcrLine; score: number } | undefined;
+    let bestOther: { l: OcrLine; score: number } | undefined;
+    for (const l of headlineCandidates) {
+      const score = headlineScore(l);
+      if (isDesignedPhrase(l)) {
+        if (!bestPhrase || score > bestPhrase.score) bestPhrase = { l, score };
+      } else if (!bestOther || score > bestOther.score) {
+        bestOther = { l, score };
+      }
+    }
+    const pick = bestPhrase && (!bestOther || bestOther.score <= bestPhrase.score + 30) ? bestPhrase : bestOther ?? bestPhrase;
+    if (pick) {
+      headline = pick.l.text;
+      headlineLine = pick.l;
     }
   }
 
@@ -272,35 +358,72 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
   // an empty gap or a borrowed bank line.
   let secondary: OcrLine | undefined;
   if (!subLine && !servicesSub && headline) {
-    let best = -Infinity;
-    for (const l of work) {
-      if (l === headlineLine || l === ctaLine || l === phoneLine) continue;
-      if (l.confidence < 55 || !isCleanLine(l.text) || l.text.length < 3 || l.text.length > 42) continue;
-      if (l.text.toUpperCase() === headline.toUpperCase()) continue;
-      const score = l.confidence + (1 - l.y) * 25 + uppercaseRatio(l.text) * 15 - Math.abs(l.text.length - 18) * 0.5;
-      if (score > best) {
-        best = score;
-        secondary = l;
+    const eligible = work.filter(
+      (l) =>
+        l !== headlineLine && l !== ctaLine && l !== phoneLine &&
+        l.confidence >= 55 && isCleanLine(l.text) && isWordLine(l) &&
+        l.text.length >= 3 && l.text.length <= 42 &&
+        l.text.toUpperCase() !== headline.toUpperCase(),
+    );
+    // A details line is a PHRASE first: designed phrases, then any
+    // multi-word line, and only then a lone fragment (a brand
+    // sign-off like RIDDIMROOM still lands when nothing else read).
+    const tiers = [
+      eligible.filter(isDesignedPhrase),
+      eligible.filter((l) => realWordCount(l) >= 2),
+      eligible,
+    ];
+    for (const tier of tiers) {
+      let best = -Infinity;
+      for (const l of tier) {
+        const score = headlineScore(l);
+        if (score > best) {
+          best = score;
+          secondary = l;
+        }
       }
+      if (secondary) break;
     }
   }
 
   const fields: Partial<PromoTexts> = {};
+  const sources: ReadoutResult['sources'] = {};
   if (headline) {
     const [hook1, hook2] = splitHeadline(headline);
     fields.hook1 = hook1;
-    if (hook2) fields.hook2 = hook2;
+    sources.hook1 = 'art';
+    if (hook2) {
+      fields.hook2 = hook2;
+      sources.hook2 = 'art';
+    }
   }
-  if (subLine) fields.sub = subLine.text;
-  else if (servicesSub) fields.sub = servicesSub;
-  else if (secondary) fields.sub = secondary.text;
-  if (phone) fields.cta = `CALL ${phone}`;
-  else if (ctaLine) fields.cta = ctaLine.text;
-  else if (genre === 'trades') fields.cta = 'CALL US TODAY';
-  else fields.cta = detectedCta;
+  if (subLine) {
+    fields.sub = subLine.text;
+    sources.sub = 'art';
+  } else if (servicesSub) {
+    fields.sub = servicesSub;
+    sources.sub = 'art';
+  } else if (secondary) {
+    fields.sub = secondary.text;
+    sources.sub = 'art';
+  }
+  if (phone) {
+    fields.cta = `CALL ${phone}`;
+    sources.cta = 'art';
+  } else if (ctaLine) {
+    fields.cta = ctaLine.text;
+    sources.cta = 'art';
+  } else if (genre === 'trades') {
+    fields.cta = 'CALL US TODAY';
+    sources.cta = 'suggested';
+  } else {
+    fields.cta = detectedCta;
+    sources.cta = 'suggested';
+  }
 
   return {
     fields,
+    sources,
     genre,
     lines,
     headline,

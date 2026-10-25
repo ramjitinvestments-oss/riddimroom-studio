@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { planCampaign, campaignFileName } from './campaign';
+import { campaignFileName, parseEventDate, planCampaign } from './campaign';
 
 const FLYER_TEXTS = {
   hook1: 'ONE NIGHT.',
@@ -199,5 +199,36 @@ describe('planCampaign — guards', () => {
     });
     expect(plan.pieces.every((p) => p.scheduleLabel.length > 3)).toBe(true);
     expect(new Set(plan.pieces.map((p) => p.slug)).size).toBe(plan.pieces.length);
+  });
+});
+
+describe('parseEventDate + dated schedule labels (R16)', () => {
+  const now = new Date(2026, 9, 25, 12); // Oct 25 2026
+  it('parses the poster date line and rolls yearless dates to the next occurrence', () => {
+    const d = parseEventDate({ sub: 'SAT - DEC 20 - THE GRAND HALL' }, now);
+    expect(d?.getFullYear()).toBe(2026);
+    expect(d?.getMonth()).toBe(11);
+    expect(d?.getDate()).toBe(20);
+    expect(parseEventDate({ sub: 'JAN 5' }, now)?.getFullYear()).toBe(2027);
+    expect(parseEventDate({ sub: '12/20/2027' }, now)?.getFullYear()).toBe(2027);
+    expect(parseEventDate({ sub: 'THE GRAND HALL' }, now)).toBeNull();
+    expect(parseEventDate({ sub: 'FEB 30' }, now)).toBeNull();
+  });
+
+  it('the campaign schedule names real post dates', () => {
+    const plan = planCampaign({
+      texts: { hook1: 'ONE NIGHT.', hook2: 'TWO SOUNDS.', sub: 'SAT - DEC 20 - THE GRAND HALL', cta: 'TICKETS OUT NOW' },
+      masterRecipe: 'slam',
+      masterFormatId: '9:16',
+      kind: 'flyer',
+      eventDate: parseEventDate({ sub: 'SAT - DEC 20 - THE GRAND HALL' }, now),
+    });
+    const byId = Object.fromEntries(plan.pieces.map((p) => [p.id, p.scheduleLabel]));
+    expect(byId['master']).toBe('Post Sun Dec 20 — the main push');
+    expect(byId['series-7d']).toBe('Post Sun Dec 13');
+    expect(byId['series-48h']).toBe('Post Fri Dec 18');
+    expect(byId['series-day']).toBe('Post Sun Dec 20 — morning');
+    expect(byId['alt-1']).toBe('Post Tue Dec 15');
+    expect(byId['alt-2']).toBe('Post Sat Dec 19');
   });
 });
