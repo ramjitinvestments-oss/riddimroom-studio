@@ -19,6 +19,7 @@
 
 import type { ColorGradeSettings, ImageTimelineItem, MediaAsset, Project } from '../../types/timeline';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../timeline/utils';
+import { dealTreatments } from './deck';
 import { addTextItem } from '../timeline/insert';
 import { getGradePreset } from '../grades';
 import type { Band } from './analyze';
@@ -52,6 +53,8 @@ export interface PromoBuildOpts {
   /** 'fit' = whole artwork visible (default, text-safe). 'fill' = cover the screen, edges may crop. */
   fit?: 'fit' | 'fill';
   skin?: PromoSkinId;
+  /** Extra photos for the photo-cut montage in single-art recipes. */
+  extras?: MediaAsset[];
 }
 
 export interface PromoTexts {
@@ -59,6 +62,8 @@ export interface PromoTexts {
   hook2?: string;
   cta?: string;
   sub?: string;
+  /** Premium font family for the added type (lib/fonts). */
+  font?: string;
 }
 
 export interface SliceInput {
@@ -162,13 +167,13 @@ function addHookTexts(project: Project, texts: PromoTexts, accent: string, until
   if (texts.hook1) {
     next = addTextItem(next, {
       text: texts.hook1, atTime: 0.25, durationSeconds: Math.min(1.9, Math.max(0.8, until)),
-      role: 'title', fontSize: 92, color: '#ffffff', position: { x: 50, y: 9 },
+      role: 'title', fontSize: 92, color: '#ffffff', position: { x: 50, y: 9 }, font: texts.font,
     });
   }
   if (texts.hook2) {
     next = addTextItem(next, {
       text: texts.hook2, atTime: 0.85, durationSeconds: Math.min(1.9, Math.max(0.8, until)),
-      role: 'title', fontSize: 92, color: accent, position: { x: 50, y: 16.5 },
+      role: 'title', fontSize: 92, color: accent, position: { x: 50, y: 16.5 }, font: texts.font,
     });
   }
   return next;
@@ -179,15 +184,49 @@ function addCtaTexts(project: Project, texts: PromoTexts, accent: string, from: 
   if (texts.cta) {
     next = addTextItem(next, {
       text: texts.cta, atTime: from, durationSeconds: Math.max(0.5, duration - from),
-      role: 'title', fontSize: 72, color: '#ffffff', position: { x: 50, y: 83 },
+      role: 'title', fontSize: 72, color: '#ffffff', position: { x: 50, y: 83 }, font: texts.font,
     });
   }
   if (texts.sub) {
     next = addTextItem(next, {
       text: texts.sub, atTime: from + 0.55, durationSeconds: Math.max(0.5, duration - from - 0.55),
-      role: 'overlay', fontSize: 44, color: accent, position: { x: 50, y: 89.5 },
+      role: 'overlay', fontSize: 44, color: accent, position: { x: 50, y: 89.5 }, font: texts.font,
     });
   }
+  return next;
+}
+
+/**
+ * PHOTO CUTS — the montage for single-art recipes: extra photos cut
+ * in full-bleed across [from, to], each dealt its own entrance +
+ * drift from the animation deck (never the same treatment twice in
+ * a row). Cuts shorter than 0.7s are skipped — extras beyond the
+ * window's capacity simply don't make the cut.
+ */
+function addPhotoCuts(
+  project: Project,
+  trackId: string,
+  extras: MediaAsset[],
+  from: number,
+  to: number,
+  skin: SkinResolved,
+  zBase: number,
+): Project {
+  let next = project;
+  const windowSeconds = to - from;
+  if (windowSeconds <= 0 || extras.length === 0) return next;
+  const usable = extras.slice(0, Math.max(1, Math.floor(windowSeconds / 0.7)));
+  const seg = windowSeconds / usable.length;
+  const dealt = dealTreatments(usable.length);
+  usable.forEach((asset, i) => {
+    const cover = artRect(next, asset, 'fill');
+    next = addItem(next, imageItem(next, trackId, asset, cover, {
+      startTime: from + i * seg, endTime: from + (i + 1) * seg, zIndex: zBase + i,
+      animation: { entrance: dealt[i].entrance, intensity: skin.energy },
+      motion: { ...dealt[i].drift, intensity: skin.energy },
+      fade: { fadeInDuration: 0.1, fadeOutDuration: 0 }, colorGrade: skin.grade,
+    }));
+  });
   return next;
 }
 
@@ -218,12 +257,13 @@ export function buildKineticProject(
 
   const buildEnd = D * 0.6;
   const stagger = 0.32 / skin.energy;
+  const sliceDeck = dealTreatments(slices.length);
   slices.forEach((slice, i) => {
     const bandCenterYPx = topPx + ((slice.band.y0 + slice.band.y1) / 2) * rect.heightPx;
     const bandRect = rectFor(next, slice.asset, rect.widthPx, W / 2, bandCenterYPx);
     next = addItem(next, imageItem(next, trackId, slice.asset, bandRect, {
       startTime: 1.0 + i * stagger, endTime: buildEnd, zIndex: 10 + i,
-      animation: { entrance: i % 2 === 0 ? 'slide-left' : 'slide-right', intensity: skin.energy },
+      animation: { entrance: sliceDeck[i].entrance, intensity: skin.energy },
       fade: { fadeInDuration: 0.12, fadeOutDuration: 0 }, colorGrade: skin.grade,
     }));
   });
@@ -233,15 +273,22 @@ export function buildKineticProject(
     motion: { type: 'light-sweep', intensity: Math.min(2, 1.2 * skin.energy) }, colorGrade: skin.grade,
   }));
 
+  const extras = opts?.extras ?? [];
+  const cutsWindow = extras.length > 0 ? D * 0.2 : 0;
+  const cardStart = buildEnd + cutsWindow;
+  if (extras.length > 0) {
+    next = withAssets(next, extras);
+    next = addPhotoCuts(next, trackId, extras, buildEnd, cardStart, skin, 45);
+  }
   const cardRect = rectFor(next, art, W * 0.8, W / 2, H * 0.42);
   next = addItem(next, imageItem(next, trackId, art, cardRect, {
-    startTime: buildEnd, endTime: D, zIndex: 50,
+    startTime: cardStart, endTime: D, zIndex: 50,
     fade: { fadeInDuration: 0.3, fadeOutDuration: 0 }, colorGrade: skin.grade,
     endTransform: { position: { x: cardRect.cx, y: cardRect.cy }, scale: cardRect.scale * 1.03, opacity: 1, eased: true },
   }));
 
   next = addHookTexts(next, texts, skin.accent, D * 0.2);
-  next = addCtaTexts(next, texts, skin.accent, buildEnd + 0.15, D);
+  next = addCtaTexts(next, texts, skin.accent, cardStart + 0.15, D);
   return next;
 }
 
@@ -342,13 +389,19 @@ export function buildSlamProject(
   const split = D * 0.62;
   const spin = opts?.variant === 'spin';
 
+  const extras = opts?.extras ?? [];
+  const heroEnd = extras.length > 0 ? D * 0.34 : split;
+  if (extras.length > 0) next = withAssets(next, extras);
   next = addItem(next, imageItem(next, trackId, art, cover, {
-    startTime: 0, endTime: split, zIndex: 10,
+    startTime: 0, endTime: heroEnd, zIndex: 10,
     motion: spin ? { type: 'flash', intensity: 1 } : { type: 'punch-zoom', intensity: 1.1 * skin.energy },
     animation: spin ? { entrance: 'spin', intensity: skin.energy } : undefined,
     colorGrade: skin.grade,
     endTransform: { position: { x: cover.cx, y: cover.cy }, scale: cover.scale * 1.1, opacity: 1, eased: true },
   }));
+  if (extras.length > 0) {
+    next = addPhotoCuts(next, trackId, extras, heroEnd, split, skin, 12);
+  }
   next = addItem(next, imageItem(next, trackId, art, { ...cover, scale: cover.scale * 0.97 }, {
     startTime: split, endTime: D, zIndex: 11,
     motion: { type: 'vignette', intensity: 1 },
@@ -383,6 +436,11 @@ export function buildCountdownProject(
 
   const countEnd = D * 0.55;
   const step = countEnd / 3;
+  const cdExtras = opts?.extras ?? [];
+  if (cdExtras.length > 0) {
+    next = withAssets(next, cdExtras);
+    next = addPhotoCuts(next, trackId, cdExtras, 0.3, countEnd + (D - countEnd) * 0.3, skin, 12);
+  }
   ['3', '2', '1'].forEach((n, i) => {
     next = addTextItem(next, {
       text: n, atTime: 0.3 + i * step, durationSeconds: step,
@@ -393,7 +451,7 @@ export function buildCountdownProject(
   if (texts.hook1) {
     next = addTextItem(next, {
       text: texts.hook1, atTime: countEnd + 0.1, durationSeconds: D - countEnd - 0.1,
-      role: 'title', fontSize: 96, color: '#ffffff', position: { x: 50, y: 30 },
+      role: 'title', fontSize: 96, color: '#ffffff', position: { x: 50, y: 30 }, font: texts.font,
     });
   }
   next = addCtaTexts(next, texts, skin.accent, countEnd + 0.3, D);
@@ -465,22 +523,24 @@ export function buildLineupProject(
   }));
   next = addHookTexts(next, texts, skin.accent, seg * 0.5);
 
+  const soloDeck = dealTreatments(solos.length);
   solos.forEach((entry, i) => {
     const start = seg * (i + 1);
     const cover = artRect(next, entry.asset, 'fill');
     next = addItem(next, imageItem(next, trackId, entry.asset, cover, {
       startTime: start, endTime: start + seg, zIndex: 20 + i,
-      motion: { type: 'slow-zoom-in', intensity: skin.energy },
+      animation: { entrance: soloDeck[i].entrance, intensity: skin.energy },
+      motion: { ...soloDeck[i].drift, intensity: skin.energy },
       fade: { fadeInDuration: 0.15, fadeOutDuration: 0 }, colorGrade: skin.grade,
     }));
     next = addTextItem(next, {
       text: entry.name.toUpperCase(), atTime: start + 0.1, durationSeconds: seg - 0.1,
-      role: 'title', fontSize: 96, color: '#ffffff', position: { x: 50, y: 11 },
+      role: 'title', fontSize: 96, color: '#ffffff', position: { x: 50, y: 11 }, font: texts.font,
     });
     if (texts.hook2) {
       next = addTextItem(next, {
         text: texts.hook2, atTime: start + 0.35, durationSeconds: seg - 0.35,
-        role: 'overlay', fontSize: 46, color: skin.accent, position: { x: 50, y: 17.5 },
+        role: 'overlay', fontSize: 46, color: skin.accent, position: { x: 50, y: 17.5 }, font: texts.font,
       });
     }
   });
@@ -555,12 +615,13 @@ export function buildStackProject(
   const H = next.canvasHeight;
   const rotations = [-7, 5, -3, 0, 6, -5];
 
+  const stackDeck = dealTreatments(arts.length);
   arts.forEach((art, i) => {
     const rect = rectFor(next, art, W * 0.62, W / 2, H * 0.44);
     next = addItem(next, imageItem(next, trackId, art, rect, {
       startTime: 0.4 + i * (0.5 / skin.energy), endTime: D, zIndex: 10 + i,
       rotation: rotations[i % rotations.length],
-      animation: { entrance: 'pop', intensity: skin.energy },
+      animation: { entrance: stackDeck[i].entrance, intensity: skin.energy },
       fade: { fadeInDuration: 0.15, fadeOutDuration: 0 }, colorGrade: skin.grade,
     }));
   });

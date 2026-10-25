@@ -12,7 +12,7 @@ import { ASPECT_RATIO_OPTIONS } from '../lib/aspectRatios';
 import { createProject, saveProject } from '../lib/projects/persistence';
 import { uploadMediaFile } from '../lib/media/upload';
 import { getLoopDef, renderLoopFile, LOOP_DURATION_SECONDS } from '../lib/media/loops';
-import { fetchPackTrackFile, packTrackForSkin, probeAudioDurationSeconds } from '../lib/media/tracks';
+import { fetchPackTrackFile, packTrackForSkin, probeAudioDurationSeconds, PROMO_PACK_SHELVES } from '../lib/media/tracks';
 import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
 import {
   bankSuggestion,
@@ -25,6 +25,7 @@ import {
   type VisionSuggestion,
 } from '../lib/promo/suggest';
 import { RefreshCw } from 'lucide-react';
+import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset, Project } from '../types/timeline';
 
@@ -133,6 +134,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   currentUserRef.current = currentUser;
   const lastBitmapRef = useRef<ImageBitmap | null>(null);
   const [ownTrack, setOwnTrack] = useState<File | null>(null);
+  const [packTrackId, setPackTrackId] = useState<string | null>(null);
+  const [fontFamily, setFontFamily] = useState<string>(DEFAULT_PROMO_FONT);
   const ownTrackInputRef = useRef<HTMLInputElement | null>(null);
   const [duration, setDuration] = useState(12);
   const [musicOn, setMusicOn] = useState(true);
@@ -145,6 +148,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
   // Brand kit: prefill this device's saved defaults once, on mount.
   useEffect(() => {
+    void ensureFontsLoaded();
     const kit = loadBrandKit();
     if (kit) {
       setSkin(kit.skinId);
@@ -197,7 +201,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     } else if (read.outcome === 'busy') {
       setAutoNote('The artwork reader was busy — suggested words are in. Tap “Read my artwork” to try the read again.');
     } else {
-      setAutoNote("The artwork read didn't complete — suggested words are in. Tap “Read my artwork” to try again.");
+      setAutoNote(
+        `The artwork read didn't complete${read.reason ? ` — ${read.reason}` : ''}. Suggested words are in; tap “Read my artwork” to try again.`,
+      );
     }
   }, []);
 
@@ -222,7 +228,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setError(null);
     try {
-      const list = Array.from(files).slice(0, 6);
+      const list = Array.from(files).slice(0, 10);
       if (list.length === 0) return;
       const results: PickedFile[] = [];
       let firstAnalysis: ArtworkAnalysis | null = null;
@@ -264,8 +270,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       ? 'Versus needs exactly 2 artworks.'
       : recipeMeta.need === 'lineup' && picked.length < 2
         ? 'Lineup needs the poster plus at least 1 more artwork.'
-        : recipeMeta.need === 'stack' && (picked.length < 2 || picked.length > 4)
-          ? 'Flyer Stack needs 2 to 4 artworks.'
+        : recipeMeta.need === 'stack' && (picked.length < 2 || picked.length > 6)
+          ? 'Flyer Stack needs 2 to 6 artworks.'
           : null;
 
   const handleBuild = useCallback(async () => {
@@ -282,6 +288,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         hook2: texts.hook2?.trim() || undefined,
         cta: texts.cta?.trim() || undefined,
         sub: texts.sub?.trim() || undefined,
+        font: fontFamily,
       };
       const buildOpts = { duration, fit, skin };
       setStatus('Creating your project…');
@@ -294,12 +301,22 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         return (await uploadMediaFile({ uid, file: p.file })).asset;
       };
 
+      const uploadExtras = async (): Promise<MediaAsset[]> => {
+        const extras: MediaAsset[] = [];
+        for (let i = 1; i < picked.length; i++) {
+          extras.push(await upload(picked[i], `photo ${i + 1} of ${picked.length}`));
+        }
+        return extras;
+      };
+
       if (recipe === 'slam' || recipe === 'spin-slam') {
         const art = await upload(first, 'your artwork');
-        project = buildSlamProject(project, art, cleanTexts, { ...buildOpts, variant: recipe === 'spin-slam' ? 'spin' : 'slam' });
+        const extras = await uploadExtras();
+        project = buildSlamProject(project, art, cleanTexts, { ...buildOpts, extras, variant: recipe === 'spin-slam' ? 'spin' : 'slam' });
       } else if (recipe === 'countdown') {
         const art = await upload(first, 'your artwork');
-        project = buildCountdownProject(project, art, cleanTexts, buildOpts);
+        const extras = await uploadExtras();
+        project = buildCountdownProject(project, art, cleanTexts, { ...buildOpts, extras });
       } else if (recipe === 'newsflash') {
         const art = await upload(first, 'your artwork');
         project = buildNewsflashProject(project, art, cleanTexts, buildOpts);
@@ -336,7 +353,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           project = buildLogoProject(project, slices, cleanTexts, buildOpts);
         } else {
           const art = await upload(first, 'your artwork');
-          project = buildKineticProject(project, art, slices, cleanTexts, buildOpts);
+          const extras = await uploadExtras();
+          project = buildKineticProject(project, art, slices, cleanTexts, { ...buildOpts, extras });
         }
       }
 
@@ -352,7 +370,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           let musicFile: File | null = ownTrack;
           if (!musicFile) {
             try {
-              musicFile = await fetchPackTrackFile(packTrackForSkin(skin));
+              musicFile = await fetchPackTrackFile(packTrackForSkin(skin, packTrackId));
             } catch {
               musicFile = null;
             }
@@ -382,7 +400,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setError(err?.message || 'The promo could not be built. Try again.');
       setPhase('ready');
     }
-  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack]);
+  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily]);
 
   const inputCls =
     'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-gold/60';
@@ -516,15 +534,22 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Beat</span>
-                <button
-                  onClick={() => {
+                <select
+                  aria-label="Pack track"
+                  value={packTrackForSkin(skin, packTrackId).id}
+                  onChange={(e) => {
+                    setPackTrackId(e.target.value);
                     setOwnTrack(null);
                     setMusicOn(true);
                   }}
-                  className={chipCls(musicOn && !ownTrack)}
+                  className={`min-h-[36px] rounded-lg border px-2 text-xs font-bold focus:outline-none focus:border-gold/60 ${musicOn && !ownTrack ? 'bg-gold text-black border-gold' : 'bg-white/5 border-white/10 text-white/80'}`}
                 >
-                  {packTrackForSkin(skin).title} — {packTrackForSkin(skin).artist}
-                </button>
+                  {PROMO_PACK_SHELVES[skin].map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title} — {t.artist}
+                    </option>
+                  ))}
+                </select>
                 <button onClick={() => ownTrackInputRef.current?.click()} className={chipCls(musicOn && !!ownTrack)}>
                   {ownTrack ? `Your track: ${ownTrack.name}` : 'Your own track'}
                 </button>
@@ -553,7 +578,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 </button>
                 {musicOn && !ownTrack && (
                   <span className="text-[11px] text-white/40">
-                    A real recording ({packTrackForSkin(skin).license}), fitted to your promo's length.
+                    A real recording ({packTrackForSkin(skin, packTrackId).license}), fitted to your promo's length.
                   </span>
                 )}
                 {musicOn && ownTrack && (
@@ -565,6 +590,22 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
             <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
               <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
                 3 · Your words — auto-filled from your artwork, edit anything
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Type style — premium fonts</span>
+                <select
+                  aria-label="Promo font"
+                  value={fontFamily}
+                  onChange={(e) => setFontFamily(e.target.value)}
+                  className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-gold/60"
+                  style={{ fontFamily: fontFamily }}
+                >
+                  {FONT_OPTIONS.map((f) => (
+                    <option key={f.family} value={f.family}>
+                      {f.label} — {f.vibe}
+                    </option>
+                  ))}
+                </select>
               </label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {(

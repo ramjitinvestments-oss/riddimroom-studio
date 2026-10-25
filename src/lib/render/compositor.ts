@@ -36,6 +36,7 @@
  */
 
 import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSettings, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import { canvasFontStack } from '../fonts';
 import { getItemsAtTime } from '../timeline/utils';
 import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle } from '../captions/styles';
@@ -1107,7 +1108,7 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
   applyTransformedDraw(
     ctx,
     (c) => {
-      c.font = `${effectiveFontSize}px Arial, Helvetica, sans-serif`;
+      c.font = `${effectiveFontSize}px ${canvasFontStack(item.font)}`;
       c.fillStyle = item.color;
       c.textAlign = 'center';
       c.textBaseline = 'middle';

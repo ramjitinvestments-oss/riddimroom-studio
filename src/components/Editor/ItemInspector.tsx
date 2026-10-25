@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { FONT_OPTIONS } from '../../lib/fonts';
 import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, Crop, Frame, X } from 'lucide-react';
 import { SlotTrimPicker } from './SlotTrimPicker';
 import { ReframePicker } from './ReframePicker';
@@ -193,6 +194,22 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               );
             })}
           </div>
+          <label className="flex flex-col gap-1">
+            Font
+            <select
+              aria-label="Text font"
+              value={item.font}
+              onChange={(e) => patch({ font: e.target.value })}
+              className="min-h-11 bg-white/10 rounded px-2 py-1 text-white focus:outline-none focus:border-gold/60"
+            >
+              <option value="Arial">Classic (Arial)</option>
+              {FONT_OPTIONS.map((f) => (
+                <option key={f.family} value={f.family}>
+                  {f.label} — {f.vibe}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="flex flex-col gap-1">
             Text
             <textarea

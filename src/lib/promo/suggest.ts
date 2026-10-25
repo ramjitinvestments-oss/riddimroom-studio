@@ -124,7 +124,7 @@ export function splitHeadline(headline: string): [string, string] {
 }
 
 /** The instant, offline suggestion — hook + CTA are never empty. */
-export function bankSuggestion(ctx: SuggestionContext): Required<PromoTexts> {
+export function bankSuggestion(ctx: SuggestionContext): Pick<Required<PromoTexts>, 'hook1' | 'hook2' | 'sub' | 'cta'> {
   const genre = genreForContext(ctx);
   const bank = BANKS[genre];
   const nameWords = cleanNameWords(ctx.fileName);
@@ -193,6 +193,8 @@ export type VisionReadOutcome = 'ok' | 'not-configured' | 'busy' | 'failed';
 export interface VisionReadResult {
   outcome: VisionReadOutcome;
   suggestion: VisionSuggestion | null;
+  /** Short provider reason on a 'failed' outcome — shown in the UI note. */
+  reason?: string;
 }
 
 type Fetcher = (input: string, init: RequestInit) => Promise<Response>;
@@ -234,7 +236,7 @@ export async function requestVisionRead(
     }
     if (data?.code === 'not_configured') return { outcome: 'not-configured', suggestion: null };
     if (data?.code === 'busy') return { outcome: 'busy', suggestion: null };
-    return { outcome: 'failed', suggestion: null };
+    return { outcome: 'failed', suggestion: null, reason: typeof data?.reason === 'string' ? data.reason : undefined };
   } catch {
     return { outcome: 'failed', suggestion: null };
   }

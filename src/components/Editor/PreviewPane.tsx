@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { canvasFontStack, ensureFontsLoaded } from '../../lib/fonts';
 import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
 import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
@@ -215,6 +216,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
 
   // Main render/clock loop. Runs continuously while mounted so the canvas
   // stays correct after edits even while paused, not just while playing.
+  useEffect(() => { void ensureFontsLoaded(); }, []);
   useEffect(() => {
     // Throttled state commit (see the refs declared above): at most one
     // `onTimeChange` per 100ms of wall clock while playing; `force`
@@ -566,11 +568,11 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   // you. Bounding boxes are computed with `getItemBoundsPercent` — the same
   // geometry `drawFrame` itself uses — so the box always matches what's
   // actually drawn, never a second approximation of it.
-  const measureText = useCallback((text: string, effectiveFontSize: number): { width: number; height: number } => {
+  const measureText = useCallback((text: string, effectiveFontSize: number, fontFamily?: string): { width: number; height: number } => {
     if (!measureCanvasRef.current) measureCanvasRef.current = document.createElement('canvas');
     const ctx = measureCanvasRef.current.getContext('2d');
     if (!ctx) return { width: effectiveFontSize * Math.max(1, text.length) * 0.55, height: effectiveFontSize * 1.2 };
-    ctx.font = `${effectiveFontSize}px Arial, Helvetica, sans-serif`;
+    ctx.font = `${effectiveFontSize}px ${canvasFontStack(fontFamily)}`;
     const width = ctx.measureText(text || ' ').width;
     return { width: Math.max(width, 4), height: effectiveFontSize * 1.2 };
   }, []);
@@ -599,7 +601,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         // `.scale` used to be a dead field for text items — see the fix in
         // compositor.ts's drawTextItem — so the on-canvas box must use the
         // same effective (fontSize * scale) size that now actually renders.
-        const { width, height } = measureText(item.text, item.fontSize * item.scale);
+        const { width, height } = measureText(item.text, item.fontSize * item.scale, item.font);
         const bounds = getItemBoundsPercent(item, 'text', project.canvasWidth, project.canvasHeight, { textWidthPx: width, textHeightPx: height });
         return { ...bounds, type: 'text', itemId: item.id, scale: item.scale, rotation: item.rotation };
       }

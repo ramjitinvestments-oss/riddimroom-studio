@@ -100,8 +100,10 @@ describe('vision read outcome mapping', () => {
 
 describe('real music pack integrity', () => {
   it('every skin maps to a verified, credited, fetchable track', async () => {
-    const { PROMO_PACK_TRACKS, creditForFileName, packTrackForSkin } = await import('../media/tracks');
-    for (const track of Object.values(PROMO_PACK_TRACKS)) {
+    const { ALL_PACK_TRACKS, PROMO_PACK_SHELVES, creditForFileName, packTrackForSkin } = await import('../media/tracks');
+    expect(ALL_PACK_TRACKS).toHaveLength(12);
+    for (const shelf of Object.values(PROMO_PACK_SHELVES)) expect(shelf).toHaveLength(3);
+    for (const track of ALL_PACK_TRACKS) {
       expect(track.url).toMatch(/^https:\/\/upload\.wikimedia\.org\//);
       expect(track.license).toContain('CC BY');
       expect(track.credit).toContain(track.artist);
@@ -109,6 +111,8 @@ describe('real music pack integrity', () => {
     }
     expect(packTrackForSkin('dancehall-raw').title).toBe('Tea Roots');
     expect(packTrackForSkin('soca-shine').title).toBe('Beach Party');
+    expect(packTrackForSkin('dancehall-raw', 'dub-feral').title).toBe('Dub Feral');
+    expect(packTrackForSkin('dancehall-raw', 'bogus-id').title).toBe('Tea Roots');
     expect(creditForFileName('some-user-upload.mp3')).toBeNull();
   });
 });

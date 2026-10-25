@@ -13,7 +13,7 @@
  * suggestion the user can edit — nothing here is published as-is
  * without the user's own eyes on it in the form.
  */
-import { GoogleGenAI, createPartFromBase64, createPartFromText, createUserContent, Type } from '@google/genai';
+import { GoogleGenAI, createPartFromText, createPartFromUri, createUserContent, Type } from '@google/genai';
 
 export class PromoVisionConfigurationError extends Error {
   constructor(message: string) {
@@ -83,6 +83,28 @@ export function sanitizePromoSuggestion(raw: unknown): PromoImageSuggestion {
   };
 }
 
+const FILE_READY_POLL_INTERVAL_MS = 1000;
+const FILE_READY_TIMEOUT_MS = 30_000;
+
+async function waitUntilActive(ai: GoogleGenAI, name: string): Promise<void> {
+  const deadline = Date.now() + FILE_READY_TIMEOUT_MS;
+  for (;;) {
+    const file = await ai.files.get({ name });
+    if (file.state === 'ACTIVE') return;
+    if (file.state === 'FAILED') throw new Error(`Gemini file processing failed for "${name}".`);
+    if (Date.now() > deadline) throw new Error(`Gemini file "${name}" did not become ready within ${FILE_READY_TIMEOUT_MS / 1000}s.`);
+    await new Promise((resolve) => setTimeout(resolve, FILE_READY_POLL_INTERVAL_MS));
+  }
+}
+
+/**
+ * The read runs on the EXACT pipe transcription already proves on
+ * this key: upload through the Gemini Files API, wait for ACTIVE,
+ * generate from the file URI with a structured schema, model
+ * fallthrough on 404, one retry on a 503 demand spike. (The first
+ * version sent the image inline — the one unproven variable in the
+ * chain — and the owner's tests showed it not landing.)
+ */
 export async function analyzePromoImage(input: {
   imageBase64: string;
   mimeType: string;
@@ -94,35 +116,62 @@ export async function analyzePromoImage(input: {
     );
   }
   const ai = new GoogleGenAI({ apiKey });
-  const failures: string[] = [];
-  let sawBusy = false;
-  for (const model of MODELS) {
+  const bytes = Buffer.from(input.imageBase64, 'base64');
+  const blob = new Blob([bytes], { type: input.mimeType });
+  const uploaded = await ai.files.upload({ file: blob, config: { mimeType: input.mimeType } });
+  if (!uploaded.uri || !uploaded.name) {
+    throw new Error('Gemini file upload did not return a usable file reference.');
+  }
+  try {
+    await waitUntilActive(ai, uploaded.name);
+    const failures: string[] = [];
+    let sawBusy = false;
+    for (const model of MODELS) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: createUserContent([
+              createPartFromUri(uploaded.uri, uploaded.mimeType || input.mimeType),
+              createPartFromText(PROMPT),
+            ]),
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: RESPONSE_SCHEMA,
+            },
+          });
+          const text = response.text;
+          if (!text) throw new Error('The model returned an empty response.');
+          return sanitizePromoSuggestion(JSON.parse(text));
+        } catch (err: any) {
+          const msg = String(err?.message || err);
+          if (/404|NOT_FOUND|no longer available|not found/i.test(msg)) {
+            failures.push(`${model}: ${msg}`);
+            break; // next model
+          }
+          if (BUSY_PATTERN.test(msg) && attempt === 0) {
+            sawBusy = true;
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            continue; // one retry on this model
+          }
+          if (BUSY_PATTERN.test(msg)) {
+            sawBusy = true;
+            failures.push(`${model}: ${msg}`);
+            break; // next model after the retry
+          }
+          throw err;
+        }
+      }
+    }
+    if (sawBusy) {
+      throw new PromoVisionBusyError(`The artwork reader is busy right now (${failures.join(' | ')})`);
+    }
+    throw new Error(`Artwork analysis failed (${failures.join(' | ')})`);
+  } finally {
     try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: createUserContent([
-          createPartFromBase64(input.imageBase64, input.mimeType),
-          createPartFromText(PROMPT),
-        ]),
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
-      const text = response.text;
-      if (!text) throw new Error('The model returned an empty response.');
-      return sanitizePromoSuggestion(JSON.parse(text));
-    } catch (err: any) {
-      const msg = String(err?.message || err);
-      failures.push(`${model}: ${msg}`);
-      if (BUSY_PATTERN.test(msg)) sawBusy = true;
-      // A model this key cannot use → try the next candidate. Anything
-      // else (quota, bad image) is real — surface it after the loop.
-      if (!/404|NOT_FOUND|no longer available|not found/i.test(msg)) break;
+      await ai.files.delete({ name: uploaded.name });
+    } catch {
+      /* best-effort cleanup, mirrors the transcription provider */
     }
   }
-  if (sawBusy) {
-    throw new PromoVisionBusyError(`The artwork reader is busy right now (${failures.join(' | ')})`);
-  }
-  throw new Error(`Artwork analysis failed (${failures.join(' | ')})`);
 }

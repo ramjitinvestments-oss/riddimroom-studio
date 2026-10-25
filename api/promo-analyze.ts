@@ -72,6 +72,10 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
       return;
     }
     console.error('[promo-analyze] failed:', err?.message || err);
-    res.status(502).json({ success: false, code: 'failed', error: 'Artwork analysis failed — built-in suggestions were used instead.' });
+    // A short provider reason rides along so the in-app note can name
+    // the actual cause (the owner's retest becomes the diagnostic —
+    // server logs are not readable through the Vercel connector).
+    const reason = String(err?.message || 'unknown error').replace(/\s+/g, ' ').slice(0, 140);
+    res.status(502).json({ success: false, code: 'failed', reason, error: 'Artwork analysis failed — built-in suggestions were used instead.' });
   }
 }

@@ -17,6 +17,7 @@ import {
 import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { buildProducerReport, type LoudnessReading } from '../../lib/export/producerReport';
+import { ensureFontsLoaded, fontsUsedInProject } from '../../lib/fonts';
 import { buildSocialPosts, type SocialPlatform } from '../../lib/export/socialPosts';
 import { AlertTriangle, Check, Info, X } from 'lucide-react';
 
@@ -109,6 +110,9 @@ export function ExportPanel() {
   const [qualityTier, setQualityTier] = useState<ExportQualityTier>('high');
 
   const handleExport = useCallback(async () => {
+    // Premium faces must be resident before the first frame draws,
+    // or text silently falls back to Arial in the exported file.
+    if (project) await ensureFontsLoaded(fontsUsedInProject(project));
     if (!project || busy) return; // guards against duplicate/overlapping exports
     if (user && !canExportToday(user.uid, tier)) {
       setError(`Daily export limit reached (${tier === 'lifetime' ? 'lifetime' : 'free'} plan). Upgrade to Lifetime for more exports.`);

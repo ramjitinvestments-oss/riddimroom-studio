@@ -249,6 +249,8 @@ export interface AddTextOptions {
   fontSize?: number;
   color?: string;
   position?: { x: number; y: number };
+  /** Font family name (a premium face from lib/fonts, or a system stack). */
+  font?: string;
 }
 
 /** Adds a new `text` timeline item on the project's text track (Step 9). */
@@ -265,7 +267,7 @@ export function addTextItem(project: Project, options: AddTextOptions): Project 
     visible: true,
     text: options.text,
     role: options.role ?? 'overlay',
-    font: 'Arial',
+    font: options.font ?? 'Arial',
     fontSize: options.fontSize ?? 48,
     color: options.color ?? '#ffffff',
     position: options.position ?? { x: 50, y: 20 },
