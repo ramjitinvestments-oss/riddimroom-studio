@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { classifyReadout, mergeReadoutFields, type OcrLine } from './readout';
+import { classifyReadout, mergeLineSets, mergeReadoutFields, stripJunkEdges, type OcrLine } from './readout';
+import { chooseTourStops } from './camera';
 
 // Fixtures are the REAL lines the engine produced in the 2026-10-25
 // proof run on the owner's own uploads — not invented samples.
@@ -106,6 +107,50 @@ describe('readout classification on the owner proof fixtures', () => {
     expect(all).not.toContain('TWO SOUNDS');
     expect(all).not.toContain('TICKETS');
     expect(all).not.toContain('§');
+  });
+
+
+  it('the owner G.S.Y.M. fixture (real auto + sparse lines, R13): gospel, art-true, no business bleed', () => {
+    const auto: OcrLine[] = [
+    { text: "4 r ez\u201d? 7 4 1/ /", confidence: 38, y: 0.148, box: { x: 0.179, y: 0.148, w: 0.734, h: 0.188 } },
+    { text: "; #2", confidence: 0, y: 0.373, box: { x: 0.379, y: 0.373, w: 0.368, h: 0.020 } },
+    { text: "cet Ee Tal Ralls Bie", confidence: 18, y: 0.448, box: { x: 0.135, y: 0.448, w: 0.792, h: 0.102 } },
+    { text: "5 SAVED MIND", confidence: 89, y: 0.545, box: { x: 0.027, y: 0.545, w: 0.880, h: 0.071 } },
+    { text: "re 4 =", confidence: 42, y: 0.701, box: { x: 0.083, y: 0.701, w: 0.876, h: 0.043 } },
+    { text: "Fo , YA, 5", confidence: 11, y: 0.669, box: { x: 0.052, y: 0.669, w: 0.835, h: 0.118 } },
+    { text: "=== -/J RIDDIMROOM\" ===", confidence: 55, y: 0.848, box: { x: 0.251, y: 0.848, w: 0.499, h: 0.064 } }
+    ];
+    const sparse: OcrLine[] = [
+    { text: "i", confidence: 0, y: 0.183, box: { x: 0.589, y: 0.183, w: 0.130, h: 0.108 } },
+    { text: "J", confidence: 87, y: 0.182, box: { x: 0.775, y: 0.182, w: 0.023, h: 0.117 } },
+    { text: "\u00ae", confidence: 34, y: 0.400, box: { x: 0.876, y: 0.400, w: 0.029, h: 0.046 } },
+    { text: "=", confidence: 25, y: 0.468, box: { x: 0.272, y: 0.468, w: 0.062, h: 0.045 } },
+    { text: "os ~", confidence: 0, y: 0.420, box: { x: 0.535, y: 0.420, w: 0.169, h: 0.092 } },
+    { text: "SAVED", confidence: 96, y: 0.545, box: { x: 0.291, y: 0.545, w: 0.205, h: 0.059 } },
+    { text: "MIND", confidence: 96, y: 0.546, box: { x: 0.753, y: 0.546, w: 0.154, h: 0.058 } },
+    { text: "ae SN", confidence: 37, y: 0.722, box: { x: 0.930, y: 0.722, w: 0.029, h: 0.015 } },
+    { text: "re", confidence: 6, y: 0.797, box: { x: 0.360, y: 0.797, w: 0.034, h: 0.010 } },
+    { text: "Nor", confidence: 21, y: 0.645, box: { x: 0.599, y: 0.645, w: 0.214, h: 0.139 } },
+    { text: "=", confidence: 39, y: 0.809, box: { x: 0.397, y: 0.809, w: 0.023, h: 0.004 } },
+    { text: "ee", confidence: 0, y: 0.809, box: { x: 0.398, y: 0.809, w: 0.049, h: 0.007 } },
+    { text: "= =", confidence: 52, y: 0.811, box: { x: 0.251, y: 0.811, w: 0.109, h: 0.085 } },
+    { text: "IDDIMROOM =", confidence: 51, y: 0.797, box: { x: 0.449, y: 0.797, w: 0.301, h: 0.111 } }
+    ];
+    const r = classifyReadout(mergeLineSets(auto, sparse), { kind: 'logo', fileName: '1000090027_0_v8eg.png' });
+    expect(r.genre).toBe('gospel');
+    expect(r.fields.hook1).toBe('SAVED');
+    expect(r.fields.hook2).toBe('MIND');
+    expect(r.fields.sub).toBe('RIDDIMROOM');
+    expect(r.fields.cta).toBe('ALL ARE WELCOME');
+    const stops = chooseTourStops(r);
+    expect(stops.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('stripJunkEdges removes OCR edge residue but keeps sentence punctuation', () => {
+    expect(stripJunkEdges('5 SAVED MIND')).toBe('SAVED MIND');
+    expect(stripJunkEdges('=== -/J RIDDIMROOM" ===')).toBe('RIDDIMROOM');
+    expect(stripJunkEdges('ONE NIGHT. TWO SOUNDS.')).toBe('ONE NIGHT. TWO SOUNDS.');
+    expect(stripJunkEdges('TICKETS OUT NOW')).toBe('TICKETS OUT NOW');
   });
 
   it('no readable lines: fields stay empty except a safe CTA, genre from kind', () => {

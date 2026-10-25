@@ -145,6 +145,14 @@ export function bankSuggestion(ctx: SuggestionContext): Pick<Required<PromoTexts
   return { hook1, hook2, sub: bank.subs[0], cta: bank.ctas[0] };
 }
 
+/** The bank pick for an EXPLICIT genre — used by the readout
+    classifier, whose genre comes from the artwork's own words and
+    must never fall back to a filename-derived bank (R13: a gospel
+    design was one step from a business-bank CTA). */
+export function bankCtaForGenre(genre: PostGenre): string {
+  return BANKS[genre].ctas[0];
+}
+
 /** Alternates for one field (the ↻ cycle), bank order. */
 export function fieldAlternates(field: SuggestionField, ctx: SuggestionContext): string[] {
   const genre = genreForContext(ctx);
