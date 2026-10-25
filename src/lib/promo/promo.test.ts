@@ -172,3 +172,23 @@ describe('promo recipe round 2', () => {
     expect(first && first.type === 'image' && first.animation?.entrance).toBe('spin');
   });
 });
+
+describe('brand kit (device-local promo defaults)', () => {
+  it('round-trips a valid kit and rejects junk', async () => {
+    const { parseBrandKit } = await import('./brandKit');
+    const kit = { ctaText: 'BOOK NOW', subText: 'Powerline Sounds HD', skinId: 'corporate-clean' as const };
+    expect(parseBrandKit(JSON.stringify(kit))).toEqual(kit);
+    expect(parseBrandKit(null)).toBeNull();
+    expect(parseBrandKit('not json')).toBeNull();
+    expect(parseBrandKit(JSON.stringify({ ctaText: 5, subText: 'x', skinId: 'soca-shine' }))).toBeNull();
+    expect(parseBrandKit(JSON.stringify({ ctaText: 'x', subText: 'y', skinId: 'reggae' }))).toBeNull();
+  });
+
+  it('every promo skin maps to a built-in loop for the music pack', async () => {
+    const { PROMO_SKIN_LOOP } = await import('./recipes');
+    const { getLoopDef } = await import('../media/loops');
+    for (const [skin, loopId] of Object.entries(PROMO_SKIN_LOOP)) {
+      expect(getLoopDef(loopId), `${skin} -> ${loopId}`).toBeDefined();
+    }
+  });
+});

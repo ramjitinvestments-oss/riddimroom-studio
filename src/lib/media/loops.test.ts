@@ -9,8 +9,8 @@ import { LOOP_DEFS, LOOP_STEPS, encodeWav, type WavSourceBuffer } from './loops'
  */
 describe('built-in loop defs', () => {
   it('has three loops with unique ids', () => {
-    expect(LOOP_DEFS).toHaveLength(3);
-    expect(new Set(LOOP_DEFS.map((d) => d.id)).size).toBe(3);
+    expect(LOOP_DEFS).toHaveLength(5);
+    expect(new Set(LOOP_DEFS.map((d) => d.id)).size).toBe(5);
   });
 
   it('every event sits inside the 64-step grid with sane midi notes', () => {

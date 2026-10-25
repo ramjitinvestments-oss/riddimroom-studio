@@ -103,6 +103,36 @@ export const LOOP_DEFS: LoopDef[] = [
     ],
     bassDecaySeconds: 1.4,
   },
+  {
+    id: 'gospel-light',
+    label: 'Gospel Light',
+    description: 'Warm major-key lift, soft four pulse, long round bass and a gentle praise melody — C major.',
+    kick: every(4),
+    snare: perBarSteps([4, 12]),
+    hat: every(4, 2),
+    bass: perBar([
+      [0, 36], [8, 43], [12, 41],
+    ]),
+    lead: perBar([
+      [0, 72], [4, 76], [8, 79], [12, 76], [14, 74],
+    ]),
+    bassDecaySeconds: 0.9,
+  },
+  {
+    id: 'corporate-pulse',
+    label: 'Corporate Pulse',
+    description: 'Clean minimal pulse, soft backbeat, plucky lead — confident and unobtrusive, F major.',
+    kick: every(8),
+    snare: perBarSteps([4, 12]),
+    hat: every(4),
+    bass: perBar([
+      [0, 41], [8, 41], [12, 48],
+    ]),
+    lead: perBar([
+      [0, 77], [6, 81], [10, 79], [14, 77],
+    ]),
+    bassDecaySeconds: 0.5,
+  },
 ];
 
 export function getLoopDef(id: string): LoopDef | undefined {
