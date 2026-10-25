@@ -57,7 +57,7 @@ describe('promo analysis', () => {
   });
 
   it('falls back to tiles when content bands are unusable', () => {
-    const bands = recipeBands({ width: 10, height: 10, darkFraction: 0, meanLuminance: 0, bands: [], suggestedKind: 'flyer' });
+    const bands = recipeBands({ width: 10, height: 10, darkFraction: 0, meanLuminance: 0, bands: [], suggestedKind: 'flyer', palette: { colors: [], warmth: 0, saturation: 0 } });
     expect(bands.length).toBe(7);
     expect(tilingBands(4)[3].y1).toBe(1);
   });
@@ -187,13 +187,6 @@ describe('brand kit (device-local promo defaults)', () => {
     expect(parseBrandKit(JSON.stringify({ ctaText: 'x', subText: 'y', skinId: 'reggae' }))).toBeNull();
   });
 
-  it('every promo skin maps to a built-in loop for the music pack', async () => {
-    const { PROMO_SKIN_LOOP } = await import('./recipes');
-    const { getLoopDef } = await import('../media/loops');
-    for (const [skin, loopId] of Object.entries(PROMO_SKIN_LOOP)) {
-      expect(getLoopDef(loopId), `${skin} -> ${loopId}`).toBeDefined();
-    }
-  });
 });
 
 describe('format fit (R15)', () => {

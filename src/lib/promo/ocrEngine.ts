@@ -1,4 +1,5 @@
 import { mergeLineSets, type OcrLine } from './readout';
+import { isThinRead, rescueRead } from './paddleEngine';
 
 /**
  * The dedicated artwork engine — Tesseract OCR running ENTIRELY on
@@ -126,7 +127,7 @@ function toLines(
 /** Crop one horizontal band of the prepared canvas into its own
     data URL for a region read (R18). Returns null when the band is
     degenerate. */
-function cropBand(canvas: HTMLCanvasElement, y0: number, y1: number): { url: string; y0: number } | null {
+function cropBand(canvas: HTMLCanvasElement, y0: number, y1: number): { url: string; y0: number; height: number } | null {
   const top = Math.max(0, Math.floor(y0));
   const height = Math.min(canvas.height, Math.ceil(y1)) - top;
   if (height < 24) return null;
@@ -136,7 +137,41 @@ function cropBand(canvas: HTMLCanvasElement, y0: number, y1: number): { url: str
   const bctx = band.getContext('2d');
   if (!bctx) return null;
   bctx.drawImage(canvas, 0, top, canvas.width, height, 0, 0, canvas.width, height);
-  return { url: band.toDataURL('image/png'), y0: top };
+  return { url: band.toDataURL('image/png'), y0: top, height };
+}
+
+/**
+ * R20 contrast variant of a band: a per-pixel stretch around the
+ * midpoint ((v−128)×1.4+128, clamped). Faded print on busy grounds
+ * is where the plain region read starves; the stretch is applied to
+ * the CROP ONLY (a global stretch measurably hurt these arts in R13
+ * testing and stays banned), and the merge keeps whichever read of
+ * each line is cleaner — the variant can only add candidates.
+ */
+function contrastBandUrl(canvas: HTMLCanvasElement, y0: number, y1: number): string | null {
+  const top = Math.max(0, Math.floor(y0));
+  const height = Math.min(canvas.height, Math.ceil(y1)) - top;
+  if (height < 24) return null;
+  const band = document.createElement('canvas');
+  band.width = canvas.width;
+  band.height = height;
+  const bctx = band.getContext('2d');
+  if (!bctx) return null;
+  bctx.drawImage(canvas, 0, top, canvas.width, height, 0, 0, canvas.width, height);
+  try {
+    const img = bctx.getImageData(0, 0, band.width, band.height);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const v = (d[i + c] - 128) * 1.4 + 128;
+        d[i + c] = v < 0 ? 0 : v > 255 ? 255 : v;
+      }
+    }
+    bctx.putImageData(img, 0, 0);
+  } catch {
+    return null;
+  }
+  return band.toDataURL('image/png');
 }
 
 /**
@@ -194,7 +229,7 @@ export async function analyzeArtwork(
     // arts in R13 testing and stay banned — regions only.
     phase = 2;
     try {
-      const bands: Array<{ url: string; y0: number }> = [];
+      const bands: Array<{ url: string; y0: number; height: number }> = [];
       const top = cropBand(canvas, 0, canvas.height * 0.38);
       if (top) bands.push(top);
       let biggest: OcrLine | undefined;
@@ -217,6 +252,16 @@ export async function analyzeArtwork(
           } catch {
             /* a failed band never sinks the read */
           }
+          // R20: the contrast-stretched twin of the same band.
+          try {
+            const twin = contrastBandUrl(canvas, band.y0, band.y0 + band.height);
+            if (twin) {
+              const stretched = await worker.recognize(twin);
+              merged = mergeLineSets(merged, toLines(stretched.data, canvas.width, canvas.height, band.y0, canvas.height));
+            }
+          } catch {
+            /* the twin is a bonus read, never a blocker */
+          }
         }
       }
     } catch {
@@ -226,6 +271,22 @@ export async function analyzeArtwork(
         await worker.setParameters({ tessedit_pageseg_mode: '3' });
       } catch {
         /* restore is best-effort */
+      }
+    }
+
+    // R20 rescue pass: when the Tesseract stack came back thin —
+    // the signature of heavy display/brush art — a second on-device
+    // engine (PP-OCRv6) takes one look and its lines merge in as
+    // candidates. Fully failure-tolerant: the Tesseract read stands
+    // whenever the rescue can't run. See paddleEngine.ts for the
+    // benchmark that justifies the trigger and the model choice.
+    if (isThinRead(merged)) {
+      try {
+        if (onProgress) onProgress(0.92, 'deep-reading display type');
+        const rescue = await rescueRead(canvas);
+        if (rescue.length > 0) merged = mergeLineSets(merged, rescue);
+      } catch {
+        /* rescue is a bonus, never a blocker */
       }
     }
     return merged;

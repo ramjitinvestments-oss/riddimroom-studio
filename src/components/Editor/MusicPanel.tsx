@@ -4,7 +4,6 @@ import { useProject } from '../../context/ProjectContext';
 import type { AudioTimelineItem, MediaAsset, TimelineItem } from '../../types/timeline';
 import { appendMediaToTimeline } from '../../lib/timeline/insert';
 import { getContentEndTime, loopAudioToProjectEnd, trimAudioToProjectEnd, updateItem } from '../../lib/timeline/utils';
-import { LOOP_DEFS, renderLoopFile, type LoopDef } from '../../lib/media/loops';
 import { uploadMediaFile } from '../../lib/media/upload';
 import { MAX_FADE_SECONDS } from '../../lib/media/constants';
 
@@ -22,13 +21,11 @@ import { MAX_FADE_SECONDS } from '../../lib/media/constants';
  * `computeFadeOpacity` per frame and the export renderer applies the
  * same pair to its Web Audio gains, so every control here is audible in
  * both.
- * (c) Built-in loops synthesized client-side (`lib/media/loops.ts`),
- * rendered to WAV and uploaded through `uploadMediaFile` — the identical
- * path a user audio upload takes — then placed as music items.
+ * (c) R20: built-in loops are GONE (owner directive — the app adds
+ * no audio of its own). The only audio here is the user's own,
  */
 export function MusicPanel({ uid, item }: { uid: string; item: TimelineItem | null }) {
   const { project, mutate } = useProject();
-  const [busyLoopId, setBusyLoopId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   if (!project) return null;
 
@@ -37,21 +34,6 @@ export function MusicPanel({ uid, item }: { uid: string; item: TimelineItem | nu
 
   const addAssetToTimeline = (asset: MediaAsset) => {
     mutate((p) => appendMediaToTimeline(p, asset, { role: 'music' }));
-  };
-
-  const addLoop = async (def: LoopDef) => {
-    if (busyLoopId) return;
-    setBusyLoopId(def.id);
-    setError(null);
-    try {
-      const file = await renderLoopFile(def);
-      const { asset } = await uploadMediaFile({ uid, file });
-      mutate((p) => appendMediaToTimeline(p, asset, { role: 'music' }));
-    } catch {
-      setError(`Could not create "${def.label}" — check your connection and try again.`);
-    } finally {
-      setBusyLoopId(null);
-    }
   };
 
   const header = (
@@ -65,30 +47,9 @@ export function MusicPanel({ uid, item }: { uid: string; item: TimelineItem | nu
       {header}
 
       <div className="flex flex-col gap-1.5">
-        <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Built-in loops</span>
-        {LOOP_DEFS.map((def) => (
-          <div key={def.id} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-2">
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold text-white/90">{def.label}</p>
-              <p className="text-[11px] text-white/40 leading-snug">{def.description}</p>
-            </div>
-            <button
-              onClick={() => addLoop(def)}
-              disabled={busyLoopId !== null}
-              className="min-h-11 px-3 shrink-0 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-bold flex items-center gap-1 transition disabled:opacity-50"
-            >
-              {busyLoopId === def.id ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} strokeWidth={3} />}
-              {busyLoopId === def.id ? 'Creating…' : 'Add'}
-            </button>
-          </div>
-        ))}
-        {error && <p className="text-[11px] text-red-400">{error}</p>}
-      </div>
-
-      <div className="flex flex-col gap-1.5">
         <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Your audio</span>
         {audioAssets.length === 0 ? (
-          <p className="text-[11px] text-white/40">No audio in this project yet — use Add Audio under “Add media”, or add a built-in loop above.</p>
+          <p className="text-[11px] text-white/40">No audio in this project yet — add your own with Add Audio under “Add media”.</p>
         ) : (
           audioAssets.map((asset) => (
             <div key={asset.id} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-2">

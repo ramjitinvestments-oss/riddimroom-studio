@@ -1,4 +1,5 @@
 import { addItem, generateTimelineId, getTracksByType } from '../timeline/utils';
+import { serializeCaptionWindows } from '../captions/timing';
 import type { CaptionTimelineItem, CaptionWordTiming, Project, TextTimelineItem } from '../../types/timeline';
 
 /**
@@ -85,17 +86,27 @@ export function convertPromoTextToCaptions(
 
   const matchedIds = new Set(matched.map((i) => i.id));
   let next: Project = { ...project, items: project.items.filter((i) => !matchedIds.has(i.id)) };
-  for (const item of matched) {
-    const duration = Math.max(0.1, item.endTime - item.startTime);
+  // R20: the recipes STAGE lines on top of each other (hook 2 lands
+  // while hook 1 still holds; sub and CTA share the finale). As
+  // captions that would stack on screen — serialize the windows
+  // first so no two converted cues are ever visible at once.
+  const totalDuration = project.items.reduce((m, i) => Math.max(m, i.endTime), 0);
+  const windows = serializeCaptionWindows(
+    matched.map((i) => ({ startTime: i.startTime, endTime: i.endTime })),
+    { totalDuration },
+  );
+  matched.forEach((item, idx) => {
+    const win = windows[idx];
+    const duration = Math.max(0.1, win.endTime - win.startTime);
     const beatsInWindow = beats
-      .filter((b) => b >= item.startTime && b < item.endTime)
-      .map((b) => b - item.startTime);
+      .filter((b) => b >= win.startTime && b < win.endTime)
+      .map((b) => b - win.startTime);
     const caption: CaptionTimelineItem = {
       id: generateTimelineId('item'),
       type: 'caption',
       trackId: captionTrack.id,
-      startTime: item.startTime,
-      endTime: item.endTime,
+      startTime: win.startTime,
+      endTime: win.endTime,
       zIndex: item.zIndex,
       visible: true,
       words: wordTimingsForLine(item.text, duration, beatsInWindow),
@@ -105,6 +116,6 @@ export function convertPromoTextToCaptions(
       editable: true,
     };
     if (caption.words.length > 0) next = addItem(next, caption);
-  }
+  });
   return next;
 }

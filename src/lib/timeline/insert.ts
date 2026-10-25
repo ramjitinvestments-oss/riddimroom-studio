@@ -25,6 +25,7 @@ import type {
   VideoTimelineItem,
 } from '../../types/timeline';
 import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracksByType, updateItem } from './utils';
+import { resolveProjectCaptionOverlaps } from '../captions/timing';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
 
 const DEFAULT_IMAGE_DURATION_SECONDS = 5;
@@ -366,7 +367,8 @@ export function addCaptionItems(project: Project, options: AddCaptionsOptions): 
     };
     next = addItem(next, item);
   }
-  return next;
+  // R20: captions never overlay — clamp the merged cue set.
+  return resolveProjectCaptionOverlaps(next).project;
 }
 
 export interface AddManualCaptionCueOptions {

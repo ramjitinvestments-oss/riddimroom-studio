@@ -6,16 +6,16 @@ import { analyzeImageFile, recipeBands, sliceBandFiles, type ArtworkAnalysis } f
 import {
   buildCountdownProject, buildKineticProject, buildLineupProject, buildLogoProject,
   buildNewsflashProject, buildSlamProject, buildStackProject, buildVersusProject,
-  PROMO_SKINS, PROMO_SKIN_LOOP, type PromoRecipeId, type PromoSkinId, type PromoTexts, type SliceInput,
+  PROMO_SKINS, type PromoRecipeId, type PromoSkinId, type PromoTexts, type SliceInput,
 } from '../lib/promo/recipes';
 import { ASPECT_RATIO_OPTIONS } from '../lib/aspectRatios';
 import { createProject, saveProject } from '../lib/projects/persistence';
 import { uploadMediaFile } from '../lib/media/upload';
-import { getLoopDef, renderLoopFile, LOOP_DURATION_SECONDS } from '../lib/media/loops';
-import { fetchPackTrackFile, packTrackForSkin, probeAudioDurationSeconds, PROMO_PACK_SHELVES } from '../lib/media/tracks';
+import { probeAudioDurationSeconds } from '../lib/media/tracks';
 import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
 import {
   bankSuggestion,
+  type NoTextPurpose,
   cycleAlternate,
   fieldAlternates,
   mergeIntoUntouched,
@@ -46,21 +46,21 @@ import { addItem, addMediaAsset, generateTimelineId, getTracksByType, updateItem
 import type { AudioTimelineItem, MediaAsset, Project } from '../types/timeline';
 
 /**
- * R17 hook trim: shift the music item's window to the track's most
- * energetic stretch (its hook), so a promo built on a full song
- * starts at the chorus, not the intro. Returns the project and how
- * far the music actually shifted (the beat grid shifts with it).
- * No-ops for looped items and tracks too short to hold the window.
+ * R17/R20 music start: shift the music item's window to a chosen
+ * start in the track — the detected hook by default, or the exact
+ * part the user picked. Returns the project and how far the music
+ * actually shifted (the beat grid shifts with it). No-ops for
+ * looped items and tracks too short to hold the window.
  */
-function applyHookTrim(project: Project, hookStart: number, totalSeconds: number): { project: Project; applied: number } {
-  if (hookStart <= 0.25) return { project, applied: 0 };
+function applyMusicStart(project: Project, startAt: number, totalSeconds: number): { project: Project; applied: number } {
+  if (startAt <= 0.25) return { project, applied: 0 };
   const item = project.items.find((i) => i.type === 'audio' && i.role === 'music');
   if (!item || item.type !== 'audio' || item.loop) return { project, applied: 0 };
   const asset = project.mediaAssets[item.mediaAssetId];
-  if (!asset?.durationSeconds || asset.durationSeconds < hookStart + totalSeconds) return { project, applied: 0 };
+  if (!asset?.durationSeconds || asset.durationSeconds < startAt + totalSeconds) return { project, applied: 0 };
   return {
-    project: updateItem(project, item.id, { trimStart: hookStart, trimEnd: hookStart + totalSeconds }),
-    applied: hookStart,
+    project: updateItem(project, item.id, { trimStart: startAt, trimEnd: startAt + totalSeconds }),
+    applied: startAt,
   };
 }
 
@@ -74,7 +74,7 @@ function addPromoMusic(project: Project, asset: MediaAsset, totalSeconds: number
   const track = getTracksByType(project, 'audio')[0];
   if (!track) return project;
   const sourceDuration =
-    typeof asset.durationSeconds === 'number' && asset.durationSeconds > 0 ? asset.durationSeconds : LOOP_DURATION_SECONDS;
+    typeof asset.durationSeconds === 'number' && asset.durationSeconds > 0 ? asset.durationSeconds : totalSeconds;
   const loops = totalSeconds > sourceDuration;
   const item: AudioTimelineItem = {
     id: generateTimelineId('item'),
@@ -208,7 +208,30 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const lastReadoutRef = useRef<ReadoutResult | null>(null);
   const suggestKeyRef = useRef<string>('');
   const [ownTrack, setOwnTrack] = useState<File | null>(null);
-  const [packTrackId, setPackTrackId] = useState<string | null>(null);
+  /** R20: the user's chosen music start (seconds into their track);
+      null = automatic (the detected hook). */
+  const [musicStart, setMusicStart] = useState<number | null>(null);
+  const [ownTrackSeconds, setOwnTrackSeconds] = useState<number | null>(null);
+  /** R20: the picked art carries no readable words — captions are
+      composed from its look + the user's one-tap purpose answer. */
+  const [artNoWords, setArtNoWords] = useState(false);
+  const [artPurpose, setArtPurpose] = useState<NoTextPurpose | null>(null);
+  const paletteRef = useRef<{ warmth: number; saturation: number; meanLuminance: number } | null>(null);
+  const purposeRef = useRef<NoTextPurpose | null>(null);
+  useEffect(() => {
+    setMusicStart(null);
+    if (!ownTrack) {
+      setOwnTrackSeconds(null);
+      return;
+    }
+    let live = true;
+    void probeAudioDurationSeconds(ownTrack).then((seconds) => {
+      if (live) setOwnTrackSeconds(seconds);
+    });
+    return () => {
+      live = false;
+    };
+  }, [ownTrack]);
   const [fontFamily, setFontFamily] = useState<string>(DEFAULT_PROMO_FONT);
   const ownTrackInputRef = useRef<HTMLInputElement | null>(null);
   const [duration, setDuration] = useState(12);
@@ -335,7 +358,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       }
       return next;
     });
-    if (!skinTouchedRef.current) setSkin(suggestedSkinFor(result.genre, suggestCtxRef.current?.kind));
+    setArtNoWords(false);
+    if (!skinTouchedRef.current) setSkin(suggestedSkinFor(result.genre, suggestCtxRef.current?.kind, paletteRef.current));
     setNeedsHeadlineAsk(!result.headline && result.lines.length < 3);
     setAutoNote(
       result.headline
@@ -344,9 +368,40 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     );
   }, []);
 
+  /** R20: the no-text purpose answer re-runs the bank for untouched
+      fields with the purpose steering it. 'Just the look' also
+      CLEARS the generic sub/CTA on untouched fields — minimal means
+      minimal. Everything stays labelled 'suggested'. */
+  const applyPurpose = useCallback((purpose: NoTextPurpose) => {
+    purposeRef.current = purpose;
+    setArtPurpose(purpose);
+    const base = suggestCtxRef.current;
+    if (!base) return;
+    const bank = bankSuggestion({ ...base, purpose, brandName: brandNameRef.current || undefined });
+    setTexts((t) => {
+      const next = { ...t };
+      for (const f of ['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]) {
+        if (touchedRef.current.has(f)) continue;
+        if (bank[f]) next[f] = bank[f];
+        else if (purpose === 'look') next[f] = '';
+      }
+      return next;
+    });
+    setFieldSources((prev) => {
+      const next = { ...prev };
+      for (const f of ['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]) {
+        if (touchedRef.current.has(f)) continue;
+        if (bank[f]) next[f] = 'suggested';
+        else delete next[f];
+      }
+      return next;
+    });
+    setAutoNote('This image has no words — these captions are suggestions built from its look, not a read. Edit anything.');
+  }, []);
+
   const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string, cacheKey = '', force = false) => {
     const runId = ++suggestRunRef.current;
-    const ctx: SuggestionContext = { kind, fileName };
+    const ctx: SuggestionContext = { kind, fileName, brandName: brandNameRef.current || undefined, purpose: purposeRef.current };
     suggestCtxRef.current = ctx;
     suggestKeyRef.current = cacheKey;
     setCorrections([]);
@@ -391,7 +446,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       if (suggestRunRef.current !== runId) return;
       if (lines.length === 0) {
         setReadLines([]);
-        setAutoNote('No readable words found in this image — suggested words are in. Type your own, or analyze again after a clearer upload.');
+        setArtNoWords(true);
+        // No words, no genre — the palette picks the stage dressing.
+        if (!skinTouchedRef.current) setSkin(suggestedSkinFor('', suggestCtxRef.current?.kind, paletteRef.current));
+        setAutoNote(
+          purposeRef.current
+            ? 'This image has no words — these captions are suggestions built from its look, not a read. Edit anything.'
+            : 'This image has no words — suggestions from its look are in. Tell me what it’s for (below) and they’ll fit better.',
+        );
         return;
       }
       const result = classifyReadout(lines, ctx, { brandName: brandNameRef.current });
@@ -467,7 +529,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         return results;
       });
       setAnalysis(firstAnalysis);
-      if (firstAnalysis) setRecipe(RECIPE_FOR_KIND[firstAnalysis.suggestedKind]);
+      if (firstAnalysis) {
+        paletteRef.current = {
+          warmth: firstAnalysis.palette.warmth,
+          saturation: firstAnalysis.palette.saturation,
+          meanLuminance: firstAnalysis.meanLuminance,
+        };
+        setRecipe(RECIPE_FOR_KIND[firstAnalysis.suggestedKind]);
+      }
       setPhase('ready');
       if (firstAnalysis && results[0]) {
         void runSuggestion(results[0].bitmap, firstAnalysis.suggestedKind, list[0].name, `${list[0].name}:${list[0].size}`);
@@ -583,29 +652,16 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         }
       }
 
-      // Music, fitted to the promo's length, in the owner's order:
-      // their own track first, then the skin's REAL pack track (a
-      // license-verified recording), then the built-in synth loop as
-      // the last-resort fallback. A failure here never blocks the
-      // promo — it just opens without music (the editor's Music
-      // panel can add it later).
+      // Music (R20): the user's OWN track only — the app adds no
+      // audio of its own anymore (the built-in pack and loops were
+      // removed on the owner's directive). No track = a silent
+      // promo. A failure here never blocks the build.
       let trackFile: File | null = null;
-      if (musicOn) {
+      if (musicOn && ownTrack) {
         try {
-          setStatus('Adding the beat…');
-          let musicFile: File | null = ownTrack;
-          if (!musicFile) {
-            try {
-              musicFile = await fetchPackTrackFile(packTrackForSkin(skin, packTrackId));
-            } catch {
-              musicFile = null;
-            }
-          }
-          if (!musicFile) {
-            const def = getLoopDef(PROMO_SKIN_LOOP[skin]);
-            if (def) musicFile = await renderLoopFile(def);
-          }
-          if (musicFile) {
+          setStatus('Adding your track…');
+          const musicFile: File = ownTrack;
+          {
             const probed = await probeAudioDurationSeconds(musicFile);
             const up = await uploadMediaFile({ uid, file: musicFile });
             const asset =
@@ -633,8 +689,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       // its beat lands.
       const trackAnalysis = trackFile ? await analyzeTrackFile(trackFile, duration) : null;
       let appliedHook = 0;
-      if (trackAnalysis && hookTrim) {
-        const trimmed = applyHookTrim(project, trackAnalysis.hook, duration);
+      // The user's chosen part wins; otherwise the hook, when on.
+      const startAt = musicStart ?? (hookTrim && trackAnalysis ? trackAnalysis.hook : 0);
+      if (startAt > 0) {
+        const trimmed = applyMusicStart(project, startAt, duration);
         project = trimmed.project;
         appliedHook = trimmed.applied;
       }
@@ -656,7 +714,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setError(err?.message || 'The promo could not be built. Try again.');
       setPhase('ready');
     }
-  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily, captionMode, hookTrim, analyzeTrackFile, captionSize]);
+  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, musicStart, fontFamily, captionMode, hookTrim, analyzeTrackFile, captionSize]);
 
 
   /**
@@ -781,22 +839,11 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
       let musicAsset: MediaAsset | null = null;
       let campaignTrackFile: File | null = null;
-      if (musicOn) {
+      if (musicOn && ownTrack) {
         try {
-          setCampaignStatus('Fitting the beat for the set…');
-          let musicFile: File | null = ownTrack;
-          if (!musicFile) {
-            try {
-              musicFile = await fetchPackTrackFile(packTrackForSkin(skin, packTrackId));
-            } catch {
-              musicFile = null;
-            }
-          }
-          if (!musicFile) {
-            const def = getLoopDef(PROMO_SKIN_LOOP[skin]);
-            if (def) musicFile = await renderLoopFile(def);
-          }
-          if (musicFile) {
+          setCampaignStatus('Fitting your track for the set…');
+          const musicFile: File = ownTrack;
+          {
             const probed = await probeAudioDurationSeconds(musicFile);
             const up = await uploadMediaFile({ uid, file: musicFile });
             musicAsset =
@@ -855,10 +902,11 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         if (musicAsset) project = addPromoMusic(project, musicAsset, duration);
         if (readout) project = applyCameraTour(project, readout);
         project = applyStageBackdrop(project);
-        // R17 Viral Finish, per piece (see the single build).
+        // R17/R20 Viral Finish, per piece (see the single build).
         let appliedHook = 0;
-        if (trackAnalysis && hookTrim) {
-          const trimmed = applyHookTrim(project, trackAnalysis.hook, duration);
+        const startAt = musicStart ?? (hookTrim && trackAnalysis ? trackAnalysis.hook : 0);
+        if (startAt > 0) {
+          const trimmed = applyMusicStart(project, startAt, duration);
           project = trimmed.project;
           appliedHook = trimmed.applied;
         }
@@ -945,7 +993,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile, captionSize]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, musicStart, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile, captionSize]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -1119,26 +1167,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 ))}
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
-                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Beat</span>
+                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Music</span>
                 <button onClick={() => ownTrackInputRef.current?.click()} className={chipCls(musicOn && !!ownTrack)}>
-                  {ownTrack ? `Your track: ${ownTrack.name}` : 'Your own track — best'}
+                  {ownTrack ? `Your track: ${ownTrack.name}` : 'Add your own track'}
                 </button>
-                <select
-                  aria-label="Pack track"
-                  value={packTrackForSkin(skin, packTrackId).id}
-                  onChange={(e) => {
-                    setPackTrackId(e.target.value);
-                    setOwnTrack(null);
-                    setMusicOn(true);
-                  }}
-                  className={`min-h-[36px] rounded-lg border px-2 text-xs font-bold focus:outline-none focus:border-gold/60 ${musicOn && !ownTrack ? 'bg-gold text-black border-gold' : 'bg-white/5 border-white/10 text-white/80'}`}
-                >
-                  {PROMO_PACK_SHELVES[skin].map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.title} — {t.artist}
-                    </option>
-                  ))}
-                </select>
                 <input
                   ref={ownTrackInputRef}
                   type="file"
@@ -1163,23 +1195,38 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   No music
                 </button>
                 {musicOn && !ownTrack && (
-                  <span className="text-[11px] text-white/40">
-                    A real recording ({packTrackForSkin(skin, packTrackId).license}), fitted to your promo's length.
-                  </span>
+                  <span className="text-[11px] text-white/40">Your promo is silent until you add a track — the app adds no audio of its own.</span>
                 )}
                 {musicOn && ownTrack && (
-                  <span className="text-[11px] text-white/40">Your track, fitted to your promo's length.</span>
-                )}
-                {musicOn && (
-                  <button onClick={() => setHookTrim((v) => !v)} className={chipCls(hookTrim)}>
+                  <button onClick={() => setHookTrim((v) => !v)} className={chipCls(hookTrim && musicStart === null)}>
                     {hookTrim ? 'Starts at the hook ✓' : 'Start at the hook'}
                   </button>
                 )}
               </div>
-              {musicOn && hookTrim && (
+              {musicOn && ownTrack && (
                 <p className="text-[11px] text-white/40 mt-1.5">
-                  The promo starts at your track's loudest stretch — the chorus, not the intro — and the words land on its beats.
+                  Your track is cropped to the promo's length automatically
+                  {ownTrackSeconds ? ` (${ownTrackSeconds.toFixed(0)}s track → ${duration}s promo)` : ''} — pick the part you like below.
                 </p>
+              )}
+              {musicOn && ownTrack && ownTrackSeconds !== null && ownTrackSeconds > duration && (
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Start at</span>
+                  <button type="button" onClick={() => setMusicStart(null)} className={chipCls(musicStart === null)}>
+                    {hookTrim ? 'The hook (auto)' : 'The beginning'}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, Math.floor(ownTrackSeconds - duration))}
+                    step={0.5}
+                    value={musicStart ?? 0}
+                    onChange={(e) => setMusicStart(Number(e.target.value))}
+                    className="flex-1 min-w-[120px] accent-[#FFD100]"
+                    aria-label="Music start point, seconds into your track"
+                  />
+                  <span className="text-[11px] text-white/50">{musicStart === null ? 'auto' : `${musicStart.toFixed(1)}s in`}</span>
+                </div>
               )}
             </div>
 
@@ -1187,6 +1234,23 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
                 3 · Your words — auto-filled from your artwork, edit anything
               </label>
+              {artNoWords && (
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-2.5 py-2">
+                  <span className="text-[11px] font-bold text-white/70">No words in this image — what's it for?</span>
+                  {(
+                    [
+                      ['event', 'Party / Event'],
+                      ['product', 'Product'],
+                      ['business', 'Business'],
+                      ['look', 'Just the look'],
+                    ] as Array<[NoTextPurpose, string]>
+                  ).map(([id, label]) => (
+                    <button key={id} type="button" onClick={() => applyPurpose(id)} className={chipCls(artPurpose === id)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <label className="flex flex-col gap-1">
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Type style — premium fonts</span>
                 <select

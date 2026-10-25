@@ -62,7 +62,6 @@ import { resolveSourceDuration } from '../timeline/trimWindow';
 import { isPipItem } from '../pip';
 import { getGradePreset } from '../grades';
 import { MAX_FADE_SECONDS } from '../media/constants';
-import { LOOP_DURATION_SECONDS } from '../media/loops';
 import type { StudioTemplate } from '../templates';
 
 function applyCaptionStyle(project: Project, captionStyleId: string): Project {
@@ -363,7 +362,7 @@ export function applyFullTemplate(
       const sourceDuration =
         typeof asset.durationSeconds === 'number' && Number.isFinite(asset.durationSeconds) && asset.durationSeconds > 0
           ? asset.durationSeconds
-          : LOOP_DURATION_SECONDS;
+          : reelEnd - reelStart;
       const reelDuration = reelEnd - reelStart;
       const loops = reelDuration > sourceDuration;
       const item: AudioTimelineItem = {

@@ -17,6 +17,15 @@ export interface Band {
   y1: number;
 }
 
+export interface PaletteSummary {
+  /** Dominant colours (hex), largest first, with their pixel share. */
+  colors: Array<{ hex: string; share: number }>;
+  /** Mean red-minus-blue, -1..1 — positive reads warm/golden. */
+  warmth: number;
+  /** Mean saturation 0..1 — high reads vivid/party, low reads muted/corporate. */
+  saturation: number;
+}
+
 export interface ArtworkAnalysis {
   width: number;
   height: number;
@@ -27,6 +36,55 @@ export interface ArtworkAnalysis {
   /** Content row bands, top to bottom. */
   bands: Band[];
   suggestedKind: 'logo' | 'flyer' | 'portrait';
+  /** R20: the image's colour story — drives skin suggestion and the
+      no-text caption fit when an image carries no words at all. */
+  palette: PaletteSummary;
+}
+
+/**
+ * Dominant-colour summary over a pixel buffer (sampled, quantized to
+ * 4 bits per channel). Pure — unit-testable without a DOM.
+ */
+export function summarizePalette(data: Uint8ClampedArray, width: number, height: number): PaletteSummary {
+  const total = width * height;
+  if (total <= 0) return { colors: [], warmth: 0, saturation: 0 };
+  const step = Math.max(1, Math.floor(total / 20000));
+  const buckets = new Map<number, { count: number; r: number; g: number; b: number }>();
+  let sampled = 0;
+  let warmthSum = 0;
+  let satSum = 0;
+  for (let px = 0; px < total; px += step) {
+    const i = px * 4;
+    if (data[i + 3] < 200) continue; // skip (near-)transparent
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    sampled++;
+    warmthSum += (r - b) / 255;
+    const mx = Math.max(r, g, b);
+    const mn = Math.min(r, g, b);
+    satSum += mx > 0 ? (mx - mn) / mx : 0;
+    const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.count++;
+      bucket.r += r;
+      bucket.g += g;
+      bucket.b += b;
+    } else {
+      buckets.set(key, { count: 1, r, g, b });
+    }
+  }
+  if (sampled === 0) return { colors: [], warmth: 0, saturation: 0 };
+  const hex = (v: number) => Math.round(v).toString(16).padStart(2, '0');
+  const colors = [...buckets.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3)
+    .map((bucket) => ({
+      hex: `#${hex(bucket.r / bucket.count)}${hex(bucket.g / bucket.count)}${hex(bucket.b / bucket.count)}`,
+      share: +(bucket.count / sampled).toFixed(3),
+    }));
+  return { colors, warmth: +(warmthSum / sampled).toFixed(3), saturation: +(satSum / sampled).toFixed(3) };
 }
 
 /** Per-row content score: sum of per-pixel max-channel values in the row. */
@@ -115,6 +173,7 @@ export function analyzePixels(data: Uint8ClampedArray, width: number, height: nu
     meanLuminance: total > 0 ? lumSum / total : 0,
     bands,
     suggestedKind,
+    palette: summarizePalette(data, width, height),
   };
 }
 

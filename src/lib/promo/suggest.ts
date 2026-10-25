@@ -21,9 +21,17 @@ import { detectPostGenre, type PostGenre } from '../export/socialPosts';
 export type SuggestionField = 'hook1' | 'hook2' | 'sub' | 'cta';
 export const SUGGESTION_FIELDS: SuggestionField[] = ['hook1', 'hook2', 'sub', 'cta'];
 
+export type NoTextPurpose = 'event' | 'product' | 'business' | 'look';
+
 export interface SuggestionContext {
   kind: 'logo' | 'flyer' | 'portrait';
   fileName: string;
+  /** R20: set when the image has NO readable words — the user's
+      answer to "what's this promo for?" steers the bank. */
+  purpose?: NoTextPurpose | null;
+  /** The brand kit's name, exactly as printed — a no-text logo's
+      headline is its brand's name. */
+  brandName?: string;
 }
 
 export interface VisionSuggestion {
@@ -123,11 +131,36 @@ export function splitHeadline(headline: string): [string, string] {
   return [words.slice(0, mid).join(' '), words.slice(mid).join(' ')];
 }
 
-/** The instant, offline suggestion — hook + CTA are never empty. */
+/** The instant, offline suggestion — hook + CTA are never empty
+    (except the explicit 'just the look' purpose, which fills the
+    headline only and leaves the rest to the user). */
 export function bankSuggestion(ctx: SuggestionContext): Pick<Required<PromoTexts>, 'hook1' | 'hook2' | 'sub' | 'cta'> {
   const genre = genreForContext(ctx);
-  const bank = BANKS[genre];
+  // R20 no-text purposes: product/business art gets the business
+  // bank outright (a filename genre guess must not dress a product
+  // photo in party copy); 'event' keeps the genre bank.
+  const bank =
+    ctx.purpose === 'business' || ctx.purpose === 'product' ? BANKS.business : BANKS[genre];
   const nameWords = cleanNameWords(ctx.fileName);
+  const brandWords = (ctx.brandName ?? '').trim().split(/\s+/).filter(Boolean);
+  if (ctx.purpose === 'look') {
+    const [a, b] = splitHeadline((brandWords.length > 0 ? brandWords : nameWords).slice(0, 4).join(' ').toUpperCase());
+    return { hook1: a, hook2: b, sub: '', cta: '' };
+  }
+  if (ctx.purpose && brandWords.length > 0 && ctx.kind === 'logo') {
+    const [a, b] = splitHeadline(brandWords.slice(0, 4).join(' ').toUpperCase());
+    if (a) {
+      return {
+        hook1: a,
+        hook2: b || bank.hooks[0][1],
+        sub: ctx.purpose === 'product' ? 'QUALITY YOU CAN FEEL' : bank.subs[0],
+        cta: bank.ctas[0],
+      };
+    }
+  }
+  if (ctx.purpose === 'product') {
+    return { hook1: bank.hooks[0][0], hook2: bank.hooks[0][1], sub: 'QUALITY YOU CAN FEEL', cta: bank.ctas[0] };
+  }
   let hook1 = bank.hooks[0][0];
   let hook2 = bank.hooks[0][1];
   if (ctx.kind === 'logo' && nameWords.length > 0) {
@@ -328,7 +361,13 @@ export async function fetchVisionRead(bitmap: ImageBitmap, idToken: string): Pro
  * genres keep their heat. Always a SUGGESTION: applied only until
  * the user picks a skin themselves.
  */
-export function suggestedSkinFor(genre: string, kind?: string): PromoSkinId {
+export interface PaletteHint {
+  warmth: number;
+  saturation: number;
+  meanLuminance: number;
+}
+
+export function suggestedSkinFor(genre: string, kind?: string, palette?: PaletteHint | null): PromoSkinId {
   switch (genre) {
     case 'gospel':
       return 'gospel-light';
@@ -341,7 +380,17 @@ export function suggestedSkinFor(genre: string, kind?: string): PromoSkinId {
       return 'corporate-clean';
     case 'dancehall':
       return 'dancehall-raw';
-    default:
+    default: {
+      // R20: no genre read (a textless image, most often) — the
+      // palette decides: vivid + warm reads party, dark reads raw,
+      // washed-out reads corporate, bright + soft reads light.
+      if (palette) {
+        if (palette.saturation > 0.35 && palette.warmth > 0.02) return 'soca-shine';
+        if (palette.meanLuminance < 80) return 'dancehall-raw';
+        if (palette.saturation < 0.18) return 'corporate-clean';
+        if (palette.meanLuminance > 170) return 'gospel-light';
+      }
       return kind === 'portrait' ? 'soca-shine' : 'dancehall-raw';
+    }
   }
 }

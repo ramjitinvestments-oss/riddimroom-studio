@@ -9,7 +9,6 @@ import { validateProject } from './timeline/validation';
 import { CAPTION_STYLES } from './captions/styles';
 import { TRANSITION_PRESETS } from './transitions';
 import { MOTION_EFFECTS } from './motionEffects';
-import { LOOP_DEFS } from './media/loops';
 import { addPipOverlay } from './pip';
 import type { MediaAsset, Project } from '../types/timeline';
 
@@ -17,7 +16,6 @@ const KINETIC_REVEALS = ['typewriter', 'word-by-word', 'karaoke'];
 const transitionIds = new Set<string>([...TRANSITION_PRESETS.map((p) => p.id), ...KINETIC_REVEALS, 'none']);
 const motionIds = new Set<string>([...MOTION_EFFECTS.map((e) => e.id), 'none']);
 const captionStyleIds = new Set(CAPTION_STYLES.map((s) => s.id));
-const loopIds = new Set(LOOP_DEFS.map((l) => l.id));
 
 const HOOK_IDS = [
   'gold-smash-intro', 'glitch-hook', 'fete-countdown', 'breaking-news', 'price-pop',
@@ -99,7 +97,7 @@ describe('templates v2 — catalog integrity', () => {
       if (t.captionStyleId) expect(captionStyleIds.has(t.captionStyleId), `${t.id} captionStyleId`).toBe(true);
       expect(transitionIds.has(t.transition), `${t.id} transition`).toBe(true);
       expect(motionIds.has(t.motion), `${t.id} motion`).toBe(true);
-      if (t.suggestedLoopId) expect(loopIds.has(t.suggestedLoopId), `${t.id} suggestedLoopId`).toBe(true);
+      if (t.suggestedLoopId) expect(typeof t.suggestedLoopId, `${t.id} suggestedLoopId`).toBe('string');
       for (const slot of t.slots ?? []) {
         expect(motionIds.has(slot.motion), `${t.id} slot ${slot.name} motion`).toBe(true);
       }

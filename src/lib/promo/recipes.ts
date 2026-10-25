@@ -652,9 +652,3 @@ export function buildStackProject(
 }
 
 /** Music pack: the built-in loop each skin's promo ships with (fitted to length). */
-export const PROMO_SKIN_LOOP: Record<PromoSkinId, string> = {
-  'dancehall-raw': 'dancehall-riddim',
-  'soca-shine': 'soca-groove',
-  'gospel-light': 'gospel-light',
-  'corporate-clean': 'corporate-pulse',
-};

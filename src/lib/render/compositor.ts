@@ -1388,6 +1388,28 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
 
   const activeItems = getItemsAtTime(project, timeSeconds); // already sorted back-to-front by zIndex
 
+  // R20 guarantee: at most ONE caption per anchor zone is drawn at
+  // any instant — the newest cue in the zone wins (latest start,
+  // then highest zIndex). Even a hand-edited project with stacked
+  // caption windows can never render two cues on top of each other.
+  const captionWinners = new Set<string>();
+  {
+    const byZone = new Map<string, (typeof activeItems)[number]>();
+    for (const item of activeItems) {
+      if (item.type !== 'caption') continue;
+      const zone = (item as { anchorY?: string }).anchorY ?? 'bottom';
+      const current = byZone.get(zone);
+      if (
+        !current ||
+        item.startTime > current.startTime ||
+        (item.startTime === current.startTime && item.zIndex >= current.zIndex)
+      ) {
+        byZone.set(zone, item);
+      }
+    }
+    for (const winner of byZone.values()) captionWinners.add(winner.id);
+  }
+
   for (const item of activeItems) {
     if (!item.visible) continue;
     switch (item.type) {
@@ -1414,7 +1436,9 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
         break;
       }
       case 'caption': {
-        drawCaptionItem(ctx, item, timeSeconds - item.startTime, canvasWidth, canvasHeight);
+        if (captionWinners.has(item.id)) {
+          drawCaptionItem(ctx, item, timeSeconds - item.startTime, canvasWidth, canvasHeight);
+        }
         break;
       }
       case 'audio':

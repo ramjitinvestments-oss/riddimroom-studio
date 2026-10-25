@@ -5,6 +5,7 @@ import { applyImportedCaptions, parseSubtitleFile, SubtitleImportError } from '.
 import { getItemsByTrackType } from '../../lib/timeline/utils';
 import type { CaptionTimelineItem } from '../../types/timeline';
 import { CAPTION_SIZE_TIERS, type CaptionSizeTier } from '../../lib/captions/styles';
+import { countCaptionOverlaps, resolveProjectCaptionOverlaps } from '../../lib/captions/timing';
 
 /** v1 captions export — SRT / VTT for YouTube, TikTok, Instagram, etc. Burn-in happens at export; these files are the sidecar option. Import (SRT/ASS) brings an existing caption file into the same caption model transcription writes to. */
 export function CaptionsExportPanel() {
@@ -17,6 +18,22 @@ export function CaptionsExportPanel() {
   const captionItems = getItemsByTrackType(project, 'caption').filter((i) => i.type === 'caption') as CaptionTimelineItem[];
   const cues = collectCues(captionItems);
   const hasCues = cues.length > 0;
+  /** R20: overlapping cues can never render stacked (the renderer
+      shows one per zone), but the timing itself should be clean. */
+  const overlapCount = countCaptionOverlaps(project);
+  const handleFixOverlaps = () => {
+    let removed = 0;
+    let clamped = 0;
+    mutate((p) => {
+      const r = resolveProjectCaptionOverlaps(p);
+      removed = r.removedIds.length;
+      clamped = r.clampedIds.length;
+      return r.project;
+    });
+    setMessage(
+      `Overlaps fixed — ${clamped} caption${clamped === 1 ? '' : 's'} trimmed, ${removed} micro-caption${removed === 1 ? '' : 's'} removed. No two captions share the screen now.`,
+    );
+  };
 
   /** R17 Viral Finish: one tap restyles every cue to the signature
       word-by-word Viral Gold Pop — the compositor already pops the
@@ -100,6 +117,20 @@ export function CaptionsExportPanel() {
               </button>
             ))}
           </div>
+        </div>
+      )}
+      {overlapCount > 0 && (
+        <div className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-2.5 py-2 flex flex-wrap items-center gap-2">
+          <p className="text-[11px] text-amber-200 flex-1 min-w-[140px]">
+            {overlapCount} caption overlap{overlapCount === 1 ? '' : 's'} — two captions would share the screen.
+          </p>
+          <button
+            type="button"
+            onClick={handleFixOverlaps}
+            className="min-h-9 px-3 rounded-lg bg-amber-300 text-black text-[11px] font-bold hover:bg-amber-200 transition"
+          >
+            Fix overlaps
+          </button>
         </div>
       )}
       <div className="flex gap-2">

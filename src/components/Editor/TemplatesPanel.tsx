@@ -10,7 +10,6 @@ import {
 } from '../../lib/templates';
 import type { MediaAsset, VideoTimelineItem } from '../../types/timeline';
 import { applyFullTemplate, applyHookToProject, type ShortenedClipInfo } from '../../lib/templates/apply';
-import { getLoopDef, renderLoopFile } from '../../lib/media/loops';
 import { findAspectRatioOption } from '../../lib/aspectRatios';
 import { uploadMediaFile } from '../../lib/media/upload';
 import { updateItem } from '../../lib/timeline/utils';
@@ -27,11 +26,9 @@ import { ReframePicker } from './ReframePicker';
  * playhead. Full Edits (15–45s) now make their slot plan REAL: each
  * main-track clip/image is reduced to its slot's size and re-packed
  * into the reel, with the template's transition, per-slot motion, and
- * cinematic grade (see `lib/templates/apply.ts`). When a full template
- * suggests a built-in loop and the project has no music yet, the panel
- * renders + uploads that loop FIRST (the exact MusicPanel path) and
- * hands the asset to the apply, so the whole thing — trims, styling,
- * fitted music — still lands as ONE `mutate`, i.e. one undo step.
+ * cinematic grade (see `lib/templates/apply.ts`). R20: templates add
+ * no music — the app adds no audio of its own; the user adds their
+ * own track from the Music panel when they want one.
  * After an apply that shortened any video, an "Adjust clips" step
  * offers the crop picker for each shortened clip.
  */
@@ -87,34 +84,16 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         setPendingAdjust(null);
         return;
       }
-      // Full edit: pre-render the suggested loop (only when the project
-      // has no music yet) so it can ride along in the same mutate.
-      let loopAsset: MediaAsset | undefined;
-      const needsMusic = !!t.suggestedLoopId && !project.items.some((i) => i.type === 'audio' && i.role === 'music');
-      if (needsMusic) {
-        const def = getLoopDef(t.suggestedLoopId!);
-        if (def) {
-          setBusyId(t.id);
-          try {
-            const file = await renderLoopFile(def);
-            const uploaded = await uploadMediaFile({ uid, file });
-            loopAsset = uploaded.asset;
-          } catch {
-            // Music is a bonus layer — the template still applies
-            // without it (the note below says so honestly).
-            loopAsset = undefined;
-          } finally {
-            setBusyId(null);
-          }
-        }
-      }
+      // R20: templates no longer auto-add music — the app adds no
+      // audio of its own; the user adds their own track when they want one.
+
       // Apply against the LIVE project state inside the updater (the
       // single mutate = the single undo step); the pure result is
       // captured alongside for the adjust-clips step and the notice —
       // the same record-a-value pattern ProjectContext itself uses.
-      let result = applyFullTemplate(project, t, { loopAsset, switchToFrame });
+      let result = applyFullTemplate(project, t, { switchToFrame });
       mutate((current) => {
-        result = applyFullTemplate(current, t, { loopAsset, switchToFrame });
+        result = applyFullTemplate(current, t, { switchToFrame });
         return result.project;
       });
       setAppliedId(t.id);
@@ -122,12 +101,6 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       setPendingFramed(result.framedItems.length > 0 ? result.framedItems : null);
       if (result.canvasSwitched) {
         setNotice(`Project switched to ${t.frame?.aspect} — the frame this preset is designed for. Every clip was cropped to it.`);
-      } else if (needsMusic) {
-        setNotice(
-          result.musicAdded
-            ? `Music added: ${getLoopDef(t.suggestedLoopId!)?.label ?? 'built-in loop'}, fitted to your ${Math.max(0, result.reelEndSeconds - result.reelStartSeconds).toFixed(1)}s reel.`
-            : 'The suggested loop could not be created (connection?) — template applied without music. You can add it from the Music panel.',
-        );
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Could not apply template.');
@@ -375,7 +348,6 @@ function TemplateSection({
 }
 
 function TemplateRow({ template: t, applied, busy, onApply }: { template: StudioTemplate; applied: boolean; busy: boolean; onApply: (t: StudioTemplate) => void }) {
-  const loop = t.suggestedLoopId ? getLoopDef(t.suggestedLoopId) : undefined;
   const meta = t.frame
     ? `${t.durationSeconds}s · Frame ${t.frame.aspect} ${t.frame.stage === 'card' ? '· Card stage' : '· Full-bleed'} · ${t.category}`
     : `${t.durationSeconds}s · ${t.aspectRatios.join(' ')} · ${t.category}`;
@@ -394,11 +366,7 @@ function TemplateRow({ template: t, applied, busy, onApply }: { template: Studio
         ) : (
           <span className="text-[9px] text-white/30 leading-tight truncate">{t.description}</span>
         )}
-        {loop && (
-          <span className="inline-flex items-center gap-1 text-[9px] text-gold/80 leading-tight">
-            <Music size={9} /> {t.kind === 'full' ? 'Adds' : 'Pairs with'}: {loop.label}
-          </span>
-        )}
+
       </div>
       <button
         onClick={() => onApply(t)}
