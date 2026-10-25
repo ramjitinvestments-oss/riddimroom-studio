@@ -321,6 +321,14 @@ export interface ImageTimelineItem extends TimelineItemBase, Transform {
    * preview and export. Absent = ungraded, exactly the pre-v3 behavior.
    */
   colorGrade?: ColorGradeSettings;
+  /**
+   * Source crop window (percentages of the source's own dimensions —
+   * same `CropSettings` shape video items carry). Consumed by the shared
+   * compositor in preview + export: only the window is drawn, and the
+   * item's box follows the window's aspect. Written by preset applies
+   * (frame crops) and the reframe picker. Absent = the whole image.
+   */
+  crop?: CropSettings;
   motion?: MotionSettings;
   fade?: FadeSettings;
   animation?: AnimationSettings;

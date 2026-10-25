@@ -121,3 +121,20 @@ describe('computeLoopedSourceTime — looping audio wraps inside its trim window
     expect(computeLoopedSourceTime(2, 10, -5)).toBe(2); // before the item starts: its head
   });
 });
+
+describe('croppedCoverSourceRect (item.crop is honored by the renderer)', () => {
+  it('no crop = the plain cover-fit', async () => {
+    const { croppedCoverSourceRect, coverSourceRect } = await import('./compositor');
+    expect(croppedCoverSourceRect(1920, 1080, 1080, 1920)).toEqual(coverSourceRect(1920, 1080, 1080, 1920));
+  });
+  it('cover-fits INSIDE the crop window', async () => {
+    const { croppedCoverSourceRect } = await import('./compositor');
+    // right half of a square source (a 1:2 window) into a square box:
+    // cover-fit crops the window top/bottom, centred — never stretches
+    expect(croppedCoverSourceRect(1000, 1000, 500, 500, { x: 50, y: 0, width: 50, height: 100 }))
+      .toEqual({ sx: 500, sy: 250, sw: 500, sh: 500 });
+    // full-width top band of a tall source into a wide box
+    expect(croppedCoverSourceRect(1080, 1920, 1920, 1080, { x: 0, y: 10, width: 100, height: 30 }))
+      .toEqual({ sx: 28, sy: 192, sw: 1024, sh: 576 });
+  });
+});

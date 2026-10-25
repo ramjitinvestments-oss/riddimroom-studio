@@ -422,7 +422,7 @@ describe('templates v3 — real slot trims', () => {
     expect(validateProject(result.project).valid).toBe(true);
   });
 
-  it('applies the template grade to slotted items only', () => {
+  it('applies the template grade project-wide — slotted AND PiP (v9 uniform look)', () => {
     let project = createDefaultProject('uid-1');
     project = appendMediaToTimeline(project, videoAsset(20));
     project = addPipOverlay(project, videoAsset(10), { atTime: 1 });
@@ -430,7 +430,7 @@ describe('templates v3 — real slot trims', () => {
     const main = result.project.items.find((i) => i.type === 'video' && !i.pip)!;
     const pip = result.project.items.find((i) => i.type === 'video' && i.pip)!;
     expect(main.type === 'video' ? main.colorGrade : undefined).toEqual(getGradePreset('moody-noir')!.grade);
-    expect(pip.type === 'video' ? pip.colorGrade : undefined).toBeUndefined();
+    expect(pip.type === 'video' ? pip.colorGrade : undefined).toEqual(getGradePreset('moody-noir')!.grade);
   });
 });
 
@@ -486,5 +486,78 @@ describe('templates v3 — music auto-fit', () => {
     const result = applyFullTemplate(project, getTemplate('viral-hook-story')!);
     expect(result.musicAdded).toBe(false);
     expect(result.project.items.some((i) => i.type === 'audio')).toBe(false);
+  });
+});
+
+describe('v9 preset FRAME — crop-to-preset, project-wide grade, canvas switch', () => {
+  const videoAsset = (id: string, w: number, h: number): MediaAsset => ({
+    id, kind: 'video', storageUrl: `https://x.test/${id}.mp4`, fileName: `${id}.mp4`,
+    sizeBytes: 1, mimeType: 'video/mp4', durationSeconds: 30, width: w, height: h, createdAt: 0,
+  });
+
+  it('computeFrameCrop: wide source into a vertical frame crops the sides, centred', async () => {
+    const { computeFrameCrop } = await import('./templates/apply');
+    const crop = computeFrameCrop(1920, 1080, 9 / 16, 0.38)!;
+    expect(crop.width).toBeCloseTo(31.64, 1);
+    expect(crop.x).toBeCloseTo(34.18, 1);
+    expect(crop.height).toBe(100);
+    expect(crop.y).toBe(0);
+  });
+
+  it('computeFrameCrop: tall source into a wide frame biases the window upward for video', async () => {
+    const { computeFrameCrop } = await import('./templates/apply');
+    const crop = computeFrameCrop(1080, 1920, 16 / 9, 0.38)!;
+    expect(crop.width).toBe(100);
+    expect(crop.height).toBeCloseTo(31.64, 1);
+    // window centre at 38% of height: y = 38 - 15.82 = 22.18
+    expect(crop.y).toBeCloseTo(22.18, 1);
+    expect(computeFrameCrop(1920, 1080, 16 / 9)).toBeUndefined();
+  });
+
+  it('every full template carries a frame matching its first-listed aspect', () => {
+    for (const t of templatesByKind('full')) {
+      expect(t.frame, t.id).toBeDefined();
+      expect(t.frame!.aspect).toBe(t.aspectRatios[0]);
+    }
+  });
+
+  it('apply crops the slotted video to the frame AND grades non-slotted media too', () => {
+    let p = createDefaultProject('u1');
+    p = appendMediaToTimeline(p, videoAsset('hero', 1920, 1080));
+    // a PiP overlay video: not slotted, no frame crop — but graded
+    p = addPipOverlay(p, videoAsset('pipvid', 1280, 720), { atTime: 0 });
+    const result = applyFullTemplate(p, getTemplate('viral-hook-story')!);
+    const hero = result.project.items.find((i) => i.type === 'video' && i.mediaAssetId === 'hero')!;
+    const heroV = hero.type === 'video' ? hero : undefined;
+    expect(heroV?.crop).toBeDefined();
+    expect(heroV?.crop?.width).toBeCloseTo(31.64, 1);
+    expect(heroV?.colorGrade).toEqual(getGradePreset('vivid-party')!.grade);
+    const pip = result.project.items.find((i) => i.type === 'video' && i.mediaAssetId === 'pipvid')!;
+    const pipV = pip.type === 'video' ? pip : undefined;
+    expect(pipV?.crop).toBeUndefined();
+    expect(pipV?.colorGrade).toEqual(getGradePreset('vivid-party')!.grade);
+    expect(validateProject(result.project).valid).toBe(true);
+  });
+
+  it('switchToFrame moves the canvas to the frame aspect in the same apply', () => {
+    let p = createDefaultProject('u1'); // 1080x1920 default
+    p = { ...p, canvasWidth: 1920, canvasHeight: 1080 };
+    p = appendMediaToTimeline(p, videoAsset('hero', 1920, 1080));
+    const plain = applyFullTemplate(p, getTemplate('viral-hook-story')!);
+    expect(plain.canvasSwitched).toBe(false);
+    expect(plain.project.canvasWidth).toBe(1920);
+    const switched = applyFullTemplate(p, getTemplate('viral-hook-story')!, { switchToFrame: true });
+    expect(switched.canvasSwitched).toBe(true);
+    expect(switched.project.canvasWidth).toBe(1080);
+    expect(switched.project.canvasHeight).toBe(1920);
+  });
+
+  it('card-stage templates place slotted heroes as inset cards', () => {
+    let p = createDefaultProject('u1');
+    p = appendMediaToTimeline(p, videoAsset('prod', 1080, 1080));
+    const result = applyFullTemplate(p, getTemplate('product-ad-15')!);
+    const hero = result.project.items.find((i) => i.type === 'video')!;
+    expect(hero.type === 'video' ? hero.position : undefined).toEqual({ x: 50, y: 44 });
+    expect(hero.type === 'video' ? hero.scale : undefined).toBe(0.84);
   });
 });

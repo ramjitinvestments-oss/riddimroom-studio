@@ -11,6 +11,7 @@ import {
 import type { MediaAsset, VideoTimelineItem } from '../../types/timeline';
 import { applyFullTemplate, applyHookToProject, type ShortenedClipInfo } from '../../lib/templates/apply';
 import { getLoopDef, renderLoopFile } from '../../lib/media/loops';
+import { findAspectRatioOption } from '../../lib/aspectRatios';
 import { uploadMediaFile } from '../../lib/media/upload';
 import { updateItem } from '../../lib/timeline/utils';
 import { SlotTrimPicker } from './SlotTrimPicker';
@@ -56,8 +57,26 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     );
   }
 
+  const [framePrompt, setFramePrompt] = useState<StudioTemplate | null>(null);
+
   const handleApply = async (t: StudioTemplate) => {
     if (busyId) return;
+    // v9: a full-edit preset whose FRAME differs from the project canvas
+    // asks first — switch the project to the preset's frame, or apply
+    // inside the current size (crops still land, computed for the frame).
+    if (t.kind === 'full' && t.frame) {
+      const currentAspect = findAspectRatioOption(project.canvasWidth, project.canvasHeight)?.id;
+      if (currentAspect && currentAspect !== t.frame.aspect) {
+        setFramePrompt(t);
+        return;
+      }
+    }
+    await doApply(t, false);
+  };
+
+  const doApply = async (t: StudioTemplate, switchToFrame: boolean) => {
+    if (busyId) return;
+    setFramePrompt(null);
     setError(null);
     setNotice(null);
     try {
@@ -92,14 +111,16 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       // single mutate = the single undo step); the pure result is
       // captured alongside for the adjust-clips step and the notice —
       // the same record-a-value pattern ProjectContext itself uses.
-      let result = applyFullTemplate(project, t, { loopAsset });
+      let result = applyFullTemplate(project, t, { loopAsset, switchToFrame });
       mutate((current) => {
-        result = applyFullTemplate(current, t, { loopAsset });
+        result = applyFullTemplate(current, t, { loopAsset, switchToFrame });
         return result.project;
       });
       setAppliedId(t.id);
       setPendingAdjust(result.shortenedClips.length > 0 ? result.shortenedClips : null);
-      if (needsMusic) {
+      if (result.canvasSwitched) {
+        setNotice(`Project switched to ${t.frame?.aspect} — the frame this preset is designed for. Every clip was cropped to it.`);
+      } else if (needsMusic) {
         setNotice(
           result.musicAdded
             ? `Music added: ${getLoopDef(t.suggestedLoopId!)?.label ?? 'built-in loop'}, fitted to your ${Math.max(0, result.reelEndSeconds - result.reelStartSeconds).toFixed(1)}s reel.`
@@ -168,6 +189,40 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         open={openSections.full}
         onToggle={() => setOpenSections((s) => ({ ...s, full: !s.full }))}
       />
+
+      {/* v9 frame prompt: the preset's frame ≠ the project's size —
+          one clear choice, in place, before anything is applied. */}
+      {framePrompt && framePrompt.frame && (
+        <div className="flex flex-col gap-1.5 rounded-xl border border-gold/30 bg-gold/5 p-2.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-gold">
+            {framePrompt.name} is a {framePrompt.frame.aspect} preset
+          </span>
+          <p className="text-[11px] text-white/50 leading-snug">
+            Your project is {findAspectRatioOption(project.canvasWidth, project.canvasHeight)?.id ?? `${project.canvasWidth}×${project.canvasHeight}`}.
+            Switch the project to {framePrompt.frame.aspect} for the exact preset frame, or apply inside your current size — either way every clip gets cropped to the preset and graded.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              onClick={() => void doApply(framePrompt, true)}
+              className="min-h-10 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-[11px] font-bold"
+            >
+              Switch to {framePrompt.frame.aspect} + apply
+            </button>
+            <button
+              onClick={() => void doApply(framePrompt, false)}
+              className="min-h-10 px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-white text-[11px] font-bold"
+            >
+              Apply in current size
+            </button>
+            <button
+              onClick={() => setFramePrompt(null)}
+              className="min-h-10 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Post-apply crop step: every video the template shortened can
           have its surviving segment re-chosen in the crop picker. */}
@@ -267,7 +322,9 @@ function TemplateSection({
 
 function TemplateRow({ template: t, applied, busy, onApply }: { template: StudioTemplate; applied: boolean; busy: boolean; onApply: (t: StudioTemplate) => void }) {
   const loop = t.suggestedLoopId ? getLoopDef(t.suggestedLoopId) : undefined;
-  const meta = `${t.durationSeconds}s · ${t.aspectRatios.join(' ')} · ${t.category}`;
+  const meta = t.frame
+    ? `${t.durationSeconds}s · Frame ${t.frame.aspect} ${t.frame.stage === 'card' ? '· Card stage' : '· Full-bleed'} · ${t.category}`
+    : `${t.durationSeconds}s · ${t.aspectRatios.join(' ')} · ${t.category}`;
   return (
     <div
       className={`flex items-center gap-2 rounded-xl border bg-white/5 p-1.5 transition ${

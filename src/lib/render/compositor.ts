@@ -35,7 +35,7 @@
  * opposing opacity ramps.
  */
 
-import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSettings, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { getItemsAtTime } from '../timeline/utils';
 import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle } from '../captions/styles';
@@ -853,7 +853,7 @@ function animationFor(
  * clip whose aspect differs from its target rect (e.g. a 16:9 clip on a
  * 9:16 canvas) is cropped, never stretched/squashed.
  */
-function coverSourceRect(
+export function coverSourceRect(
   srcW: number,
   srcH: number,
   destW: number,
@@ -871,9 +871,34 @@ function coverSourceRect(
   return { sx: 0, sy: (srcH - sh) / 2, sw: srcW, sh };
 }
 
+/**
+ * Cover-fit INSIDE an item's crop window: the window (percentages of the
+ * source's own dimensions, `CropSettings`) is the visible region; the
+ * destination aspect is cover-fit within it. No crop (or a degenerate
+ * one) = the plain cover-fit of the whole source. This is what makes
+ * `item.crop` real — before this helper existed the field was written
+ * by nothing and read by nothing.
+ */
+export function croppedCoverSourceRect(
+  srcW: number,
+  srcH: number,
+  destW: number,
+  destH: number,
+  crop?: { x: number; y: number; width: number; height: number },
+): { sx: number; sy: number; sw: number; sh: number } {
+  if (!crop) return coverSourceRect(srcW, srcH, destW, destH);
+  const wx = (crop.x / 100) * srcW;
+  const wy = (crop.y / 100) * srcH;
+  const ww = (crop.width / 100) * srcW;
+  const wh = (crop.height / 100) * srcH;
+  if (!(ww > 0 && wh > 0)) return coverSourceRect(srcW, srcH, destW, destH);
+  const inner = coverSourceRect(ww, wh, destW, destH);
+  return { sx: wx + inner.sx, sy: wy + inner.sy, sw: inner.sw, sh: inner.sh };
+}
+
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -925,13 +950,13 @@ function drawVideoItem(
           const r = Math.min(w, h) / 2;
           const size = r * 2;
           if (srcW > 0 && srcH > 0) {
-            const s = coverSourceRect(srcW, srcH, size, size);
+            const s = croppedCoverSourceRect(srcW, srcH, size, size, item.crop);
             c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -size / 2, -size / 2, size, size);
           } else {
             c.drawImage(videoEl, -size / 2, -size / 2, size, size);
           }
         } else if (srcW > 0 && srcH > 0) {
-          const s = coverSourceRect(srcW, srcH, w, h);
+          const s = croppedCoverSourceRect(srcW, srcH, w, h, item.crop);
           c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -w / 2, -h / 2, w, h);
         } else {
           c.drawImage(videoEl, -w / 2, -h / 2, w, h);
@@ -997,7 +1022,15 @@ function drawImageItem(
   const centerX = (effective.position.x / 100) * canvasWidth;
   const centerY = (effective.position.y / 100) * canvasHeight;
   const baseWidth = canvasWidth * 0.25 * effective.scale;
-  const aspect = img.naturalHeight > 0 && img.naturalWidth > 0 ? img.naturalHeight / img.naturalWidth : 1;
+  // Crop window (preset frame crops / reframe picker): when present,
+  // only the window is drawn and the box follows the WINDOW's aspect.
+  const crop = item.crop;
+  const hasCrop = !!crop && crop.width > 0 && crop.height > 0 && img.naturalWidth > 0 && img.naturalHeight > 0;
+  const aspect = hasCrop
+    ? ((crop.height / 100) * img.naturalHeight) / ((crop.width / 100) * img.naturalWidth)
+    : img.naturalHeight > 0 && img.naturalWidth > 0
+      ? img.naturalHeight / img.naturalWidth
+      : 1;
   const w = baseWidth;
   const h = baseWidth * aspect;
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
@@ -1007,7 +1040,21 @@ function drawImageItem(
     ctx,
     (c) => {
       try {
-        c.drawImage(img, -w / 2, -h / 2, w, h);
+        if (hasCrop) {
+          c.drawImage(
+            img,
+            (crop.x / 100) * img.naturalWidth,
+            (crop.y / 100) * img.naturalHeight,
+            (crop.width / 100) * img.naturalWidth,
+            (crop.height / 100) * img.naturalHeight,
+            -w / 2,
+            -h / 2,
+            w,
+            h,
+          );
+        } else {
+          c.drawImage(img, -w / 2, -h / 2, w, h);
+        }
       } catch {
         // Defense in depth only — the isImageReady() gate in drawFrame is
         // the real guard against a broken image. Mirrors drawVideoItem's

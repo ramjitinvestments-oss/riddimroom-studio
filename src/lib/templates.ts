@@ -92,6 +92,14 @@ export interface StudioTemplate {
   /** Optional card artwork (Artistly CDN still); templates without one get a designed monogram fallback header in the panel. */
   thumbnail?: string;
   // — Full edits only —
+  /**
+   * v9 — the preset's FRAME: the aspect it is designed for + its stage
+   * treatment. On apply, every video/photo is cropped to this aspect
+   * (see `computeFrameCrop`) and slotted heroes take the stage
+   * placement. 'full-bleed' = hero fills the frame; 'card' = hero sits
+   * as an inset card on the stage.
+   */
+  frame?: { aspect: TemplateAspectRatio; stage: 'full-bleed' | 'card' };
   slots?: TemplateSlot[];
   /** Cinematic grade preset id from `lib/grades.ts` (Templates v3) — applied as `colorGrade` values to the slotted items on apply. Absent = leave colors ungraded. */
   grade?: string;
@@ -224,6 +232,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'viral-hook-story', name: 'Viral Hook Story', kind: 'full', category: 'Viral Social',
     description: 'The 30-second retention arc: hook, setup, build, payoff, CTA. For Reels, TikTok, Shorts.',
     durationSeconds: 30, aspectRatios: ['9:16'],
+    frame: { aspect: '9:16', stage: 'full-bleed' },
     captionStyleId: 'viral', transition: 'cross-zoom', motion: 'dynamic-zoom', accentColor: '#FFD100',
     thumbnail: `${CDN}/7ffcc59451e5629f27adad968af3b7291895fa4f.jpg`,
     suggestedLoopId: 'dancehall-riddim',
@@ -241,6 +250,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'music-video', name: 'Music Video', kind: 'full', category: 'Music Video',
     description: 'A full 45-second music-video cut: wide intro, verse, chorus, bridge, vignette outro.',
     durationSeconds: 45, aspectRatios: ['16:9', '9:16'],
+    frame: { aspect: '16:9', stage: 'full-bleed' },
     captionStyleId: 'karaoke-gold', transition: 'film-burn', motion: 'parallax', accentColor: '#FFD100',
     suggestedLoopId: 'soca-groove',
     grade: 'moody-noir',
@@ -257,6 +267,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'product-ad-15', name: 'Product Ad 15', kind: 'full', category: 'Ad',
     description: 'A tight 15-second product ad: problem, hero shot, offer, CTA. Feed-ready.',
     durationSeconds: 15, aspectRatios: ['1:1', '9:16'],
+    frame: { aspect: '1:1', stage: 'card' },
     captionStyleId: 'tiktok-premium', transition: 'dip-to-gold', motion: 'product-focus', accentColor: '#FFD100',
     suggestedLoopId: 'chill-island',
     grade: 'clean-commercial',
@@ -272,6 +283,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'commercial-30', name: 'Commercial 30', kind: 'full', category: 'Commercial',
     description: 'A polished 30-second brand commercial with a film dissolve and a clean end card.',
     durationSeconds: 30, aspectRatios: ['16:9'],
+    frame: { aspect: '16:9', stage: 'full-bleed' },
     captionStyleId: 'gold-premium', transition: 'luma-fade', motion: 'ken-burns', accentColor: '#FFE9A8',
     thumbnail: `${CDN}/109aa936a39686d3c5dbfea0296847264c470e5a.jpg`,
     suggestedLoopId: 'chill-island',
@@ -288,6 +300,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'event-promo', name: 'Event Promo', kind: 'full', category: 'Event Promo',
     description: 'A 20-second party promo: hype open, lineup, details, ticket CTA. Heartbeat energy.',
     durationSeconds: 20, aspectRatios: ['9:16'],
+    frame: { aspect: '9:16', stage: 'full-bleed' },
     captionStyleId: 'fire', transition: 'mask-reveal', motion: 'dynamic-zoom', accentColor: '#FF8A00',
     thumbnail: `${CDN}/6e8bb861ef276d4c38e2d2344726150144709e22.jpg`,
     suggestedLoopId: 'soca-groove',
@@ -304,6 +317,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'podcast-clip', name: 'Podcast Clip', kind: 'full', category: 'Podcast',
     description: 'A 30-second podcast clip: quotable cold open, readable captions, lower-third feel.',
     durationSeconds: 30, aspectRatios: ['9:16', '16:9'],
+    frame: { aspect: '9:16', stage: 'full-bleed' },
     captionStyleId: 'podcast', transition: 'fadeup', motion: 'slow-zoom-in', accentColor: '#FFFFFF',
     thumbnail: `${CDN}/52c6ef0b8c1181fce0ab781e8f95f731a21cf46b.jpg`,
     grade: 'soft-podcast',
@@ -319,6 +333,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'youtube-intro', name: 'YouTube Intro', kind: 'full', category: 'YouTube',
     description: 'A 20-second channel opener: light-leak ident, title card, montage, welcome.',
     durationSeconds: 20, aspectRatios: ['16:9'],
+    frame: { aspect: '16:9', stage: 'full-bleed' },
     captionStyleId: 'minimal-clean', transition: 'light-leak', motion: 'slow-zoom-in', accentColor: '#FFD100',
     suggestedLoopId: 'chill-island',
     grade: 'clean-commercial',
@@ -334,6 +349,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'before-after', name: 'Before / After', kind: 'full', category: 'Ad',
     description: 'A 15-second transformation ad with a slide-split reveal and a product-focus finish.',
     durationSeconds: 15, aspectRatios: ['9:16'],
+    frame: { aspect: '9:16', stage: 'full-bleed' },
     captionStyleId: 'bold-outline', transition: 'slideSplit', motion: 'product-focus', accentColor: '#FFFFFF',
     grade: 'clean-commercial',
     slots: [
@@ -348,6 +364,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'testimonial', name: 'Testimonial', kind: 'full', category: 'Store Service',
     description: 'A warm 25-second testimonial: quote open, story, result, store end card.',
     durationSeconds: 25, aspectRatios: ['4:5', '9:16'],
+    frame: { aspect: '4:5', stage: 'card' },
     captionStyleId: 'heartbeat', transition: 'fade', motion: 'slow-zoom-in', accentColor: '#FF8A5C',
     suggestedLoopId: 'chill-island',
     grade: 'cinematic-warm',
@@ -363,6 +380,7 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     id: 'lyric-visualizer', name: 'Lyric Visualizer', kind: 'full', category: 'Music Video',
     description: 'A 30-second lyric visualizer: smoky dissolves, drifting visuals, rainbow lyric captions.',
     durationSeconds: 30, aspectRatios: ['9:16', '16:9'],
+    frame: { aspect: '9:16', stage: 'full-bleed' },
     captionStyleId: 'rainbow', transition: 'smoke', motion: 'parallax', accentColor: '#FFD100',
     suggestedLoopId: 'dancehall-riddim',
     grade: 'moody-noir',

@@ -40,7 +40,14 @@
  * motion on media underneath, and the optional PiP end-transform glide.
  * Returns a new Project; the input is never mutated.
  */
-import type { AudioTimelineItem, MediaAsset, Project, TimelineItem } from '../../types/timeline';
+import type { AudioTimelineItem, CropSettings, MediaAsset, Project, TimelineItem } from '../../types/timeline';
+import { ASPECT_RATIO_OPTIONS } from '../aspectRatios';
+
+/** Canvas dims for a frame aspect id, from the app's canonical ratio table. */
+function frameCanvasDims(aspect: string): { width: number; height: number } | null {
+  const opt = ASPECT_RATIO_OPTIONS.find((o) => o.id === aspect);
+  return opt ? { width: opt.canvasWidth, height: opt.canvasHeight } : null;
+}
 import {
   addItem,
   addMediaAsset,
@@ -108,6 +115,42 @@ export interface ApplyFullTemplateOptions {
    * option (or when the project already has music) no audio is added.
    */
   loopAsset?: MediaAsset;
+  /**
+   * v9 — when the template has a FRAME whose aspect differs from the
+   * project's canvas, switch the project's canvas to the frame's aspect
+   * as part of the apply (positions are percentage-based, so items keep
+   * their places; still one undo). The panel offers this explicitly
+   * before applying; without it the frame crops still apply, computed
+   * against the frame aspect inside the current canvas.
+   */
+  switchToFrame?: boolean;
+}
+
+/**
+ * v9 — the source crop window that frames a (srcW × srcH) source at
+ * `targetAspect` (width ÷ height): the largest window of that aspect
+ * inside the source, centred horizontally; vertically, the window's
+ * centre sits at `biasY` of the source height (0.5 = centred; videos
+ * use 0.38 — faces live in the upper frame). Returns undefined when the
+ * source already matches the target (nothing to crop). Percentages, 2dp.
+ */
+export function computeFrameCrop(
+  srcW: number,
+  srcH: number,
+  targetAspect: number,
+  biasY = 0.5,
+): CropSettings | undefined {
+  if (!(srcW > 0 && srcH > 0 && targetAspect > 0)) return undefined;
+  const srcAspect = srcW / srcH;
+  if (Math.abs(srcAspect - targetAspect) / targetAspect < 0.01) return undefined;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  if (srcAspect > targetAspect) {
+    const width = (targetAspect / srcAspect) * 100;
+    return { x: round2((100 - width) / 2), y: 0, width: round2(width), height: 100 };
+  }
+  const height = (srcAspect / targetAspect) * 100;
+  const y = Math.min(100 - height, Math.max(0, biasY * 100 - height / 2));
+  return { x: 0, y: round2(y), width: 100, height: round2(height) };
 }
 
 export interface ShortenedClipInfo {
@@ -124,6 +167,8 @@ export interface ApplyFullTemplateResult {
   reelEndSeconds: number;
   /** True when the template's suggested loop was auto-added + fitted. */
   musicAdded: boolean;
+  /** v9 — true when the project's canvas was switched to the template's frame aspect. */
+  canvasSwitched: boolean;
 }
 
 /** Main-track media for slotting: full-frame videos (not PiP overlays) and `photo` images (not overlay/watermark/logo images). */
@@ -151,6 +196,19 @@ export function applyFullTemplate(
 ): ApplyFullTemplateResult {
   const slots = template.slots ?? [];
   let next = applyCaptionStyle(project, template.captionStyleId);
+
+  // ── v9 FRAME: optionally switch the canvas to the template's frame
+  // aspect first (positions/scales are percentage-based, so the project
+  // survives the switch intact). ──
+  let canvasSwitched = false;
+  const frame = template.frame;
+  if (frame && options.switchToFrame) {
+    const target = frameCanvasDims(frame.aspect);
+    if (target && (next.canvasWidth !== target.width || next.canvasHeight !== target.height)) {
+      next = { ...next, canvasWidth: target.width, canvasHeight: target.height };
+      canvasSwitched = true;
+    }
+  }
 
   // ── Slot mapping: durations first (they decide the packed timing). ──
   // Timeline order = startTime; ties (a clip and a photo both starting
@@ -239,9 +297,14 @@ export function applyFullTemplate(
     });
 
   // ── Transitions on every visual/text item; motion per slot for the
-  // slotted media (template default for other media), grades on the
-  // slotted media — the v2 assignment pass, extended. ──
+  // slotted media (template default for other media). v9: the GRADE now
+  // goes on EVERY video/photo (not just slotted items — the preset look
+  // must be uniform across the whole video), every non-PiP video and
+  // photo is CROPPED TO THE TEMPLATE'S FRAME, and 'card'-stage heroes
+  // take their inset stage placement. ──
   const grade = getGradePreset(template.grade);
+  const frameDims = frame ? frameCanvasDims(frame.aspect) : null;
+  const frameAspectNumber = frameDims ? frameDims.width / frameDims.height : 0;
   for (const item of next.items) {
     if (item.type === 'video' || item.type === 'image' || item.type === 'text') {
       const patch: Record<string, unknown> = {
@@ -251,7 +314,28 @@ export function applyFullTemplate(
         const plan = planById.get(item.id);
         const motion = plan ? plan.motion : template.motion;
         patch.motion = motion === 'none' ? { type: 'none' } : { type: motion as never, intensity: 1 };
-        if (plan && grade) patch.colorGrade = { ...grade.grade };
+        if (grade) patch.colorGrade = { ...grade.grade };
+        // Frame crop: main-stage media only — PiP overlays keep their
+        // own framing by design. Needs the source's real dimensions;
+        // without them the renderer's cover-fit still applies.
+        const isMainStage = item.type === 'video' ? !isPipItem(item) : item.role === 'photo';
+        if (frame && isMainStage) {
+          const asset = next.mediaAssets[item.mediaAssetId];
+          const crop = computeFrameCrop(
+            asset?.width ?? 0,
+            asset?.height ?? 0,
+            frameAspectNumber,
+            item.type === 'video' ? 0.38 : 0.5,
+          );
+          if (crop) patch.crop = crop;
+          // Card stage: slotted heroes sit as an inset card (84% wide,
+          // centred slightly high). Videos scale against the canvas;
+          // images scale against their 0.25-canvas base width.
+          if (plan && frame.stage === 'card') {
+            patch.position = { x: 50, y: 44 };
+            patch.scale = item.type === 'video' ? 0.84 : 3.36;
+          }
+        }
       }
       next = updateItem(next, item.id, patch);
     }
@@ -353,7 +437,7 @@ export function applyFullTemplate(
     });
   }
 
-  return { project: next, shortenedClips, reelStartSeconds: reelStart, reelEndSeconds: reelEnd, musicAdded };
+  return { project: next, shortenedClips, reelStartSeconds: reelStart, reelEndSeconds: reelEnd, musicAdded, canvasSwitched };
 }
 
 export function applyTemplateToProject(
