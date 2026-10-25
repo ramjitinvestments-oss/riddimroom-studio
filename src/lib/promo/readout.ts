@@ -1,4 +1,5 @@
 import { bankCtaForGenre, bankSuggestion, genreForContext, splitHeadline, type SuggestionContext } from './suggest';
+import { buildSnapVocabulary, snapLines, type SnapCorrection } from './snap';
 import type { PostGenre } from '../export/socialPosts';
 import type { PromoTexts } from './recipes';
 
@@ -43,6 +44,12 @@ export interface ReadoutResult {
   lines: OcrLine[];
   headline: string;
   headlineLine?: OcrLine;
+  /** R18: the printed second line of a stacked headline, when the
+      design set the headline on two stacked lines. */
+  stackedLine?: OcrLine;
+  /** R18: every snap-to-truth repair applied to the working lines
+      (shown to the user; the raw panel lines are never altered). */
+  corrections: SnapCorrection[];
   ctaLine?: OcrLine;
   phoneLine?: OcrLine;
   /** The artwork's own phone number, when printed. */
@@ -131,7 +138,10 @@ function normalizePhone(raw: string): string {
 export function stripJunkEdges(text: string): string {
   const tokens = text.split(/\s+/).filter(Boolean);
   const letters = (t: string) => t.replace(/[^A-Za-z]/g, '').length;
-  const isJunk = (t: string) => letters(t) <= 1 && t.length <= 3;
+  // A bare number of 2+ digits is CONTENT (a day, a year, a price) —
+  // a date line must never lose its day to the edge strip. A lone
+  // digit ("5 SAVED MIND" from a misread glyph) is still junk.
+  const isJunk = (t: string) => letters(t) <= 1 && t.length <= 3 && !/^\d{2,}$/.test(t);
   // Strip a RUN of junk tokens from either edge, as long as a real
   // word (3+ letters) survives somewhere in the line.
   while (tokens.length > 1 && isJunk(tokens[0]) && tokens.slice(1).some((t) => letters(t) >= 3)) tokens.shift();
@@ -259,7 +269,7 @@ function isDesignedPhrase(l: OcrLine): boolean {
   });
 }
 
-export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): ReadoutResult {
+export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext, opts?: { brandName?: string }): ReadoutResult {
   // The phone hunt runs on ALL lines — digits read at lower
   // confidence than display type, and the number is the CTA gold.
   let phone: string | undefined;
@@ -283,7 +293,14 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
     .filter((l) => l.confidence >= MIN_LINE_CONFIDENCE && l.text.length >= 2 && letterCount(l.text) >= 2)
     .sort((a, b) => a.y - b.y)
     .filter((l, i, arr) => arr.findIndex((o) => o.text === l.text) === i);
-  const work = lines.map((l) => ({ ...l, text: stripJunkEdges(l.text) }));
+  // R18 snap-to-truth: repair plausible one-letter misreads against
+  // the flyer vocabulary + the user's brand name BEFORE anything is
+  // classified. The panel keeps the raw read; the fields get the
+  // corrected words, and every repair is reported.
+  const stripped = lines.map((l) => ({ ...l, text: stripJunkEdges(l.text) }));
+  const snapped = snapLines(stripped, buildSnapVocabulary(opts?.brandName));
+  const work = snapped.lines;
+  const corrections = snapped.corrections;
   const panelOf = (w: OcrLine) => lines[work.indexOf(w)];
 
   const fullText = work.map((l) => l.text).join(' ');
@@ -337,6 +354,54 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
     }
   }
 
+  // R18 stacked-headline assembly: flyers set headlines on TWO
+  // stacked printed lines ("MIDNIGHT" over "MADNESS"). When the
+  // winning headline line doesn't split into two phrases itself,
+  // the line printed directly beneath it — same visual weight,
+  // adjacent band, no date/venue/CTA content, no separator joins —
+  // is the headline's second line, not a sub.
+  const [splitHook1, splitHook2] = headline ? splitHeadline(headline) : ['', ''];
+  let stackedLine: OcrLine | undefined;
+  if (headlineLine && !splitHook2) {
+    const H = headlineLine;
+    let bestScore = -Infinity;
+    for (const l of work) {
+      if (l === H || l === ctaLine || l === subLine || l === phoneLine) continue;
+      if (l.confidence < 55 || !isCleanLine(l.text) || !isWordLine(l)) continue;
+      if (l.text.length < 3 || l.text.length > 42) continue;
+      if (SUB_HINT.test(l.text) || CTA_HINT.test(l.text)) continue;
+      if (l.text.includes('•') || l.text.includes('·')) continue; // a services row, never a headline
+      if (realWordCount(l) < 1) continue;
+      let stacked = false;
+      if (H.box && l.box) {
+        const gap = l.box.y - (H.box.y + H.box.h);
+        const heightRatio = Math.max(H.box.h, l.box.h) / Math.max(0.004, Math.min(H.box.h, l.box.h));
+        const overlap = Math.min(H.box.x + H.box.w, l.box.x + l.box.w) - Math.max(H.box.x, l.box.x);
+        stacked = gap >= -0.01 && gap <= H.box.h * 1.1 && heightRatio <= 1.5 && overlap >= Math.min(H.box.w, l.box.w) * 0.4;
+      } else {
+        const dy = l.y - H.y;
+        stacked = dy >= 0.03 && dy <= 0.16;
+      }
+      // A lone word under a lone word is a headline pair ONLY when
+      // the pair stands alone at that size — a word cloud stacks a
+      // dozen same-size words (ELECTRICAL over FLOORING over TILE)
+      // and none of them is the other's second line.
+      if (stacked && H.box && l.box && realWordCount(H) < 2 && realWordCount(l) < 2) {
+        const neighbors = work.filter(
+          (o) =>
+            o !== H && o !== l && o.box && o.confidence >= 55 && isCleanLine(o.text) &&
+            Math.max(o.box.h, H.box!.h) / Math.max(0.004, Math.min(o.box.h, H.box!.h)) <= 1.5 &&
+            o.box.y >= H.box!.y - 0.05 && o.box.y <= l.box!.y + l.box!.h + H.box!.h * 3,
+        );
+        if (neighbors.length > 0) stacked = false;
+      }
+      if (stacked && headlineScore(l) > bestScore) {
+        bestScore = headlineScore(l);
+        stackedLine = l;
+      }
+    }
+  }
+
   // Trades art: the services themselves are the details line.
   let servicesSub: string | undefined;
   if (genre === 'trades' && !subLine) {
@@ -360,7 +425,7 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
   if (!subLine && !servicesSub && headline) {
     const eligible = work.filter(
       (l) =>
-        l !== headlineLine && l !== ctaLine && l !== phoneLine &&
+        l !== headlineLine && l !== stackedLine && l !== ctaLine && l !== phoneLine &&
         l.confidence >= 55 && isCleanLine(l.text) && isWordLine(l) &&
         l.text.length >= 3 && l.text.length <= 42 &&
         l.text.toUpperCase() !== headline.toUpperCase(),
@@ -389,11 +454,13 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
   const fields: Partial<PromoTexts> = {};
   const sources: ReadoutResult['sources'] = {};
   if (headline) {
-    const [hook1, hook2] = splitHeadline(headline);
-    fields.hook1 = hook1;
+    fields.hook1 = splitHook1;
     sources.hook1 = 'art';
-    if (hook2) {
-      fields.hook2 = hook2;
+    if (splitHook2) {
+      fields.hook2 = splitHook2;
+      sources.hook2 = 'art';
+    } else if (stackedLine) {
+      fields.hook2 = stackedLine.text;
       sources.hook2 = 'art';
     }
   }
@@ -428,6 +495,8 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
     lines,
     headline,
     headlineLine: headlineLine ? panelOf(headlineLine) : undefined,
+    stackedLine: stackedLine ? panelOf(stackedLine) : undefined,
+    corrections,
     ctaLine: ctaLine ? panelOf(ctaLine) : undefined,
     phoneLine,
     phone,

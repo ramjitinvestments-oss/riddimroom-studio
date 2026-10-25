@@ -36,6 +36,8 @@ import { resolveExportSettings } from '../lib/export/quality';
 import { buildSocialPosts, buildSoundGuide, type PostGenre, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
 import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
+import { loadArtworkFixes, saveArtworkFixes } from '../lib/promo/fixes';
+import type { SnapCorrection } from '../lib/promo/snap';
 import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
@@ -168,6 +170,21 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [fit, setFit] = useState<'fit' | 'fill'>('fit');
   const [skin, setSkin] = useState<PromoSkinId>('dancehall-raw');
   const [texts, setTexts] = useState<PromoTexts>({ hook1: '', hook2: '', cta: '', sub: '' });
+  const textsRef = useRef(texts);
+  textsRef.current = texts;
+  /** R18: persist the user's corrected wording for this artwork
+      (after the edit lands) so it is never handed back wrong. */
+  const persistFixesSoon = useCallback(() => {
+    setTimeout(() => {
+      const key = suggestKeyRef.current;
+      if (!key) return;
+      const t = textsRef.current;
+      const anyTouched = (['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]).some(
+        (f) => touchedRef.current.has(f) && (t[f] ?? '').trim().length > 0,
+      );
+      if (anyTouched) saveArtworkFixes(key, t);
+    }, 0);
+  }, []);
   const [autoNote, setAutoNote] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
   const [analyzePct, setAnalyzePct] = useState<number | null>(null);
@@ -196,6 +213,12 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [duration, setDuration] = useState(12);
   const [musicOn, setMusicOn] = useState(true);
   const [kitNote, setKitNote] = useState<string | null>(null);
+  /** R18 correctness: the name/brand as printed (snap-to-truth
+      target), the snap repairs to show, and the saved-fix note. */
+  const [brandName, setBrandName] = useState('');
+  const brandNameRef = useRef('');
+  const [corrections, setCorrections] = useState<SnapCorrection[]>([]);
+  const [fixNote, setFixNote] = useState<string | null>(null);
   const [phase, setPhase] = useState<'pick' | 'ready' | 'building'>('pick');
   const [status, setStatus] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -245,14 +268,18 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       skinTouchedRef.current = true; // a saved kit is the user's own choice
       setSkin(kit.skinId);
       setTexts((t) => ({ ...t, cta: kit.ctaText, sub: kit.subText }));
+      if (kit.brandName) {
+        setBrandName(kit.brandName);
+        brandNameRef.current = kit.brandName;
+      }
       setKitNote('Brand defaults loaded from this device.');
     }
   }, []);
 
   const handleSaveKit = useCallback(() => {
-    const ok = saveBrandKit({ ctaText: texts.cta?.trim() ?? '', subText: texts.sub?.trim() ?? '', skinId: skin });
+    const ok = saveBrandKit({ ctaText: texts.cta?.trim() ?? '', subText: texts.sub?.trim() ?? '', skinId: skin, brandName: brandName.trim() });
     setKitNote(ok ? 'Saved — these will prefill next time, on this device.' : 'Could not save on this device.');
-  }, [texts.cta, texts.sub, skin]);
+  }, [texts.cta, texts.sub, skin, brandName]);
 
 
   // Auto-fit words: the bank fills untouched fields instantly; the
@@ -272,7 +299,29 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     };
     lastReadoutRef.current = result;
     setReadLines(result.lines);
+    setCorrections(result.corrections);
     setTexts((t) => mergeReadoutFields(t, touchedRef.current, result));
+    // R18 correction memory: words the user already fixed FOR THIS
+    // ARTWORK come back exactly as corrected — a re-read never hands
+    // him the same wrong word twice.
+    const fixes = loadArtworkFixes(suggestKeyRef.current);
+    if (fixes) {
+      const appliedFields = (['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]).filter((f) => fixes[f]?.trim());
+      if (appliedFields.length > 0) {
+        for (const f of appliedFields) touchedRef.current.add(f);
+        setTexts((t) => {
+          const next = { ...t };
+          for (const f of appliedFields) next[f] = fixes[f] as string;
+          return next;
+        });
+        setFieldSources((prev) => {
+          const next = { ...prev };
+          for (const f of appliedFields) next[f] = 'yours' as const;
+          return next;
+        });
+        setFixNote('Your saved fixes for this artwork are on — the words you corrected stay corrected.');
+      }
+    }
     setFieldSources((prev) => {
       const next = { ...prev };
       for (const f of ['hook1', 'hook2', 'sub', 'cta'] as SuggestionField[]) {
@@ -296,6 +345,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     const ctx: SuggestionContext = { kind, fileName };
     suggestCtxRef.current = ctx;
     suggestKeyRef.current = cacheKey;
+    setCorrections([]);
+    setFixNote(null);
     lastBitmapRef.current = bitmap;
     visionRef.current = null;
     lastReadoutRef.current = null;
@@ -339,7 +390,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         setAutoNote('No readable words found in this image — suggested words are in. Type your own, or analyze again after a clearer upload.');
         return;
       }
-      const result = classifyReadout(lines, ctx);
+      const result = classifyReadout(lines, ctx, { brandName: brandNameRef.current });
       if (cacheKey) readCacheRef.current.set(cacheKey, result);
       applyReadout(result);
     } finally {
@@ -376,7 +427,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       touchedRef.current.add('cta');
       setTexts((t) => ({ ...t, cta: text }));
     }
-  }, []);
+    persistFixesSoon();
+  }, [persistFixesSoon]);
 
   const cycleField = useCallback((field: SuggestionField) => {
     const ctx = suggestCtxRef.current;
@@ -391,7 +443,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setFieldSources((prev) => ({ ...prev, [field]: visionValue && value === visionValue ? ('art' as const) : ('suggested' as const) }));
       return { ...t, [field]: value };
     });
-  }, []);
+    persistFixesSoon();
+  }, [persistFixesSoon]);
 
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setError(null);
@@ -1160,6 +1213,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                         assignReadLine('hook', askValue.trim().toUpperCase());
                         setFieldSources((prev) => ({ ...prev, hook1: 'yours', hook2: 'yours' }));
                         setNeedsHeadlineAsk(false);
+                        persistFixesSoon();
                       }}
                       className="shrink-0 px-3 rounded-lg bg-gold text-black text-xs font-bold disabled:opacity-50"
                     >
@@ -1179,11 +1233,12 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 ).map(([field, placeholder]) => (
                   <div key={field}>
                     <div className="relative">
-                    <input className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
+                    <input id={`promo-field-${field}`} className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
                       onChange={(e) => {
                         touchedRef.current.add(field);
                         setFieldSources((prev) => ({ ...prev, [field]: 'yours' as const }));
                         setTexts((t) => ({ ...t, [field]: e.target.value }));
+                        persistFixesSoon();
                       }} />
                     <button
                       type="button"
@@ -1221,12 +1276,24 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   Kinetic lines
                 </button>
               </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Your name / brand, exactly as printed on your art</span>
+                <input
+                  className={inputCls}
+                  placeholder="e.g. Rutenberg Realty — the engine repairs near-miss reads to this spelling"
+                  value={brandName}
+                  onChange={(e) => {
+                    setBrandName(e.target.value);
+                    brandNameRef.current = e.target.value;
+                  }}
+                />
+              </label>
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
                   onClick={handleSaveKit}
                   className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
                 >
-                  Save CTA + sub + skin as my brand defaults
+                  Save CTA + sub + skin + brand name as my defaults
                 </button>
                 <button
                   onClick={handleAnalyze}
@@ -1256,6 +1323,56 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                     </div>
                   ))}
                   <p className="text-[10px] text-white/35 pt-0.5">Tap Hook, Sub or CTA to place a line exactly where it belongs.</p>
+                </div>
+              )}
+              {corrections.length > 0 && (
+                <div className="rounded-lg border border-gold/30 bg-gold/5 p-3 space-y-1">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-gold/90">Corrected to the true spelling</p>
+                  {corrections.map((c, i) => (
+                    <p key={i} className="text-[11px] text-white/60">
+                      <span className="line-through decoration-white/30">{c.from}</span> → <span className="text-white font-bold">{c.to}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              {fixNote && <p className="text-[11px] text-gold/80">{fixNote}</p>}
+              {picked[0] && ((texts.hook1 ?? '').trim() || (texts.sub ?? '').trim() || (texts.cta ?? '').trim()) && (
+                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/50">Proof — your words over your art</p>
+                  <div className="relative mx-auto max-w-[240px]">
+                    <img src={picked[0].previewUrl} alt="Artwork proof" className="w-full rounded-md border border-white/10" />
+                    {(texts.hook1 ?? '').trim() && (
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById('promo-field-hook1')?.focus()}
+                        className="absolute inset-x-1 top-[5%] text-center font-black uppercase leading-tight text-white text-sm px-1"
+                        style={{ textShadow: '0 2px 10px rgba(0,0,0,.9), 0 0 3px rgba(0,0,0,.9)' }}
+                      >
+                        {texts.hook1}
+                        {(texts.hook2 ?? '').trim() && <span className="block">{texts.hook2}</span>}
+                      </button>
+                    )}
+                    {(texts.sub ?? '').trim() && (
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById('promo-field-sub')?.focus()}
+                        className="absolute inset-x-1 top-[60%] text-center font-bold uppercase text-white/90 text-[10px] px-1"
+                        style={{ textShadow: '0 1px 8px rgba(0,0,0,.95), 0 0 3px rgba(0,0,0,.9)' }}
+                      >
+                        {texts.sub}
+                      </button>
+                    )}
+                    {(texts.cta ?? '').trim() && (
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById('promo-field-cta')?.focus()}
+                        className="absolute inset-x-0 bottom-[4%] mx-auto w-fit max-w-[92%] rounded-full border border-gold/70 bg-black/60 px-2.5 py-1 text-center font-bold uppercase text-gold text-[10px]"
+                      >
+                        {texts.cta}
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-white/35">One glance before you build — tap any line to edit it.</p>
                 </div>
               )}
             </div>

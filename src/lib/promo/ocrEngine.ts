@@ -95,7 +95,13 @@ async function getWorker() {
   return workerPromise;
 }
 
-function toLines(data: { lines?: TessLine[] }, width: number, height: number): OcrLine[] {
+function toLines(
+  data: { lines?: TessLine[] },
+  width: number,
+  height: number,
+  yOffsetPx = 0,
+  fullHeight = height,
+): OcrLine[] {
   const lines: OcrLine[] = [];
   for (const line of data.lines || []) {
     const text = (line.text || '').trim();
@@ -103,18 +109,34 @@ function toLines(data: { lines?: TessLine[] }, width: number, height: number): O
     lines.push({
       text,
       confidence: Math.round(line.confidence || 0),
-      y: line.bbox ? line.bbox.y0 / height : 0,
+      y: line.bbox ? (line.bbox.y0 + yOffsetPx) / fullHeight : 0,
       box: line.bbox
         ? {
             x: line.bbox.x0 / width,
-            y: line.bbox.y0 / height,
+            y: (line.bbox.y0 + yOffsetPx) / fullHeight,
             w: (line.bbox.x1 - line.bbox.x0) / width,
-            h: (line.bbox.y1 - line.bbox.y0) / height,
+            h: (line.bbox.y1 - line.bbox.y0) / fullHeight,
           }
         : undefined,
     });
   }
   return lines;
+}
+
+/** Crop one horizontal band of the prepared canvas into its own
+    data URL for a region read (R18). Returns null when the band is
+    degenerate. */
+function cropBand(canvas: HTMLCanvasElement, y0: number, y1: number): { url: string; y0: number } | null {
+  const top = Math.max(0, Math.floor(y0));
+  const height = Math.min(canvas.height, Math.ceil(y1)) - top;
+  if (height < 24) return null;
+  const band = document.createElement('canvas');
+  band.width = canvas.width;
+  band.height = height;
+  const bctx = band.getContext('2d');
+  if (!bctx) return null;
+  bctx.drawImage(canvas, 0, top, canvas.width, height, 0, 0, canvas.width, height);
+  return { url: band.toDataURL('image/png'), y0: top };
 }
 
 /**
@@ -139,7 +161,9 @@ export async function analyzeArtwork(
   const worker = await getWorker();
   let phase = 0;
   progressSink = (fraction, stage) => {
-    if (onProgress) onProgress(phase === 0 ? fraction * 0.5 : 0.5 + fraction * 0.5, stage);
+    if (!onProgress) return;
+    const span = phase === 0 ? [0, 0.4] : phase === 1 ? [0.4, 0.7] : [0.7, 1];
+    onProgress(span[0] + fraction * (span[1] - span[0]), stage);
   };
   try {
     const first = await worker.recognize(dataUrl);
@@ -159,7 +183,52 @@ export async function analyzeArtwork(
         /* restore is best-effort */
       }
     }
-    return mergeLineSets(autoLines, sparseLines);
+    let merged = mergeLineSets(autoLines, sparseLines);
+
+    // R18 region reads: two targeted re-reads as BLOCKS (PSM 6) —
+    // the top band where brands live, and the band around the
+    // largest line (the headline zone). A band read sees its text
+    // bigger and less distracted than the full-page passes; the
+    // merge keeps whichever read of a line is cleaner. Global
+    // tricks (inversion, blanket upscale) measurably HURT these
+    // arts in R13 testing and stay banned — regions only.
+    phase = 2;
+    try {
+      const bands: Array<{ url: string; y0: number }> = [];
+      const top = cropBand(canvas, 0, canvas.height * 0.38);
+      if (top) bands.push(top);
+      let biggest: OcrLine | undefined;
+      for (const l of merged) {
+        if (l.box && (!biggest?.box || l.box.h > biggest.box.h)) biggest = l;
+      }
+      if (biggest?.box) {
+        const y0 = (biggest.box.y - biggest.box.h * 0.6) * canvas.height;
+        const y1 = (biggest.box.y + biggest.box.h * 1.6) * canvas.height;
+        const headlineBand = cropBand(canvas, y0, y1);
+        // Skip when the headline band is basically the top band again.
+        if (headlineBand && Math.abs(headlineBand.y0 - (top?.y0 ?? -1)) > canvas.height * 0.08) bands.push(headlineBand);
+      }
+      if (bands.length > 0) {
+        await worker.setParameters({ tessedit_pageseg_mode: '6' });
+        for (const band of bands) {
+          try {
+            const region = await worker.recognize(band.url);
+            merged = mergeLineSets(merged, toLines(region.data, canvas.width, canvas.height, band.y0, canvas.height));
+          } catch {
+            /* a failed band never sinks the read */
+          }
+        }
+      }
+    } catch {
+      /* region reads are an enhancement, never a blocker */
+    } finally {
+      try {
+        await worker.setParameters({ tessedit_pageseg_mode: '3' });
+      } catch {
+        /* restore is best-effort */
+      }
+    }
+    return merged;
   } finally {
     progressSink = null;
   }

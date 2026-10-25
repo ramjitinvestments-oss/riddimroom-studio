@@ -232,3 +232,40 @@ describe('readout classification on the owner proof fixtures', () => {
     expect(r.lines).toHaveLength(0);
   });
 });
+
+describe('R18 — correctness: stacked headlines + snap integration', () => {
+  it('a headline printed on two stacked lines becomes hook 1 + hook 2', () => {
+    const stacked: OcrLine[] = [
+      { text: 'MIDNIGHT', confidence: 95, y: 0.12, box: { x: 0.15, y: 0.12, w: 0.7, h: 0.09 } },
+      { text: 'MADNESS', confidence: 94, y: 0.225, box: { x: 0.18, y: 0.225, w: 0.64, h: 0.085 } },
+      { text: 'with DJ Example all night long', confidence: 80, y: 0.6, box: { x: 0.2, y: 0.6, w: 0.6, h: 0.02 } },
+    ];
+    const r = classifyReadout(stacked, { kind: 'flyer', fileName: 'party.png' });
+    expect(r.fields.hook1).toBe('MIDNIGHT');
+    expect(r.fields.hook2).toBe('MADNESS');
+    expect(r.stackedLine?.text).toBe('MADNESS');
+  });
+
+  it('a date line under a headline is the sub, never a stacked hook 2', () => {
+    const lines: OcrLine[] = [
+      { text: 'SUMMER JAM', confidence: 95, y: 0.12, box: { x: 0.15, y: 0.12, w: 0.7, h: 0.09 } },
+      { text: 'SAT DEC 20', confidence: 90, y: 0.225, box: { x: 0.2, y: 0.225, w: 0.6, h: 0.08 } },
+    ];
+    const r = classifyReadout(lines, { kind: 'flyer', fileName: 'jam.png' });
+    expect(r.stackedLine).toBeUndefined();
+    expect(r.fields.sub).toBe('SAT DEC 20');
+  });
+
+  it('the brand kit spelling repairs the read before classification', () => {
+    const lines: OcrLine[] = [
+      { text: 'RUTENBERGE REALTY', confidence: 93, y: 0.1, box: { x: 0.1, y: 0.1, w: 0.8, h: 0.07 } },
+      { text: 'CALL 727-623-8398', confidence: 88, y: 0.8 },
+    ];
+    const r = classifyReadout(lines, { kind: 'logo', fileName: 'realtor.png' }, { brandName: 'Rutenberg Realty' });
+    expect(r.fields.hook1).toContain('RUTENBERG');
+    expect(JSON.stringify(r.fields)).not.toContain('RUTENBERGE');
+    expect(r.corrections.length).toBeGreaterThan(0);
+    // The panel still shows the RAW read — corrections are never silent.
+    expect(r.lines.some((l) => l.text.includes('RUTENBERGE'))).toBe(true);
+  });
+});

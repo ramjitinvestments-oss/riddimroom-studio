@@ -14,6 +14,10 @@ export interface BrandKit {
   ctaText: string;
   subText: string;
   skinId: PromoSkinId;
+  /** R18: the user's name / brand EXACTLY as printed on their art.
+      The snap-to-truth layer repairs OCR near-misses to this
+      spelling. Empty when never set (older kits parse fine). */
+  brandName: string;
 }
 
 export const BRAND_KIT_STORAGE_KEY = 'riddimroom.brandKit.v1';
@@ -26,7 +30,12 @@ export function parseBrandKit(raw: string | null): BrandKit | null {
     const data = JSON.parse(raw) as Partial<BrandKit>;
     if (typeof data.ctaText !== 'string' || typeof data.subText !== 'string') return null;
     if (!SKIN_IDS.includes(data.skinId as PromoSkinId)) return null;
-    return { ctaText: data.ctaText, subText: data.subText, skinId: data.skinId as PromoSkinId };
+    return {
+      ctaText: data.ctaText,
+      subText: data.subText,
+      skinId: data.skinId as PromoSkinId,
+      brandName: typeof data.brandName === 'string' ? data.brandName : '',
+    };
   } catch {
     return null;
   }

@@ -177,7 +177,10 @@ describe('brand kit (device-local promo defaults)', () => {
   it('round-trips a valid kit and rejects junk', async () => {
     const { parseBrandKit } = await import('./brandKit');
     const kit = { ctaText: 'BOOK NOW', subText: 'Powerline Sounds HD', skinId: 'corporate-clean' as const };
-    expect(parseBrandKit(JSON.stringify(kit))).toEqual(kit);
+    // Kits saved before R18 have no brandName — they parse with ''.
+    expect(parseBrandKit(JSON.stringify(kit))).toEqual({ ...kit, brandName: '' });
+    const named = { ...kit, brandName: 'Powerline Sounds HD' };
+    expect(parseBrandKit(JSON.stringify(named))).toEqual(named);
     expect(parseBrandKit(null)).toBeNull();
     expect(parseBrandKit('not json')).toBeNull();
     expect(parseBrandKit(JSON.stringify({ ctaText: 5, subText: 'x', skinId: 'soca-shine' }))).toBeNull();
