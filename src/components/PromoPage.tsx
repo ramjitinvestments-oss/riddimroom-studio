@@ -13,6 +13,17 @@ import { createProject, saveProject } from '../lib/projects/persistence';
 import { uploadMediaFile } from '../lib/media/upload';
 import { getLoopDef, renderLoopFile, LOOP_DURATION_SECONDS } from '../lib/media/loops';
 import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
+import {
+  bankSuggestion,
+  cycleAlternate,
+  fetchVisionSuggestion,
+  fieldAlternates,
+  mergeIntoUntouched,
+  type SuggestionContext,
+  type SuggestionField,
+  type VisionSuggestion,
+} from '../lib/promo/suggest';
+import { RefreshCw } from 'lucide-react';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset, Project } from '../types/timeline';
 
@@ -102,7 +113,7 @@ function cleanName(fileName: string): string {
 }
 
 export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
-  const { currentUser } = useAuth();
+  const { currentUser, idToken } = useAuth();
   const { tier } = useLicenseTier();
   const [picked, setPicked] = useState<PickedFile[]>([]);
   const [analysis, setAnalysis] = useState<ArtworkAnalysis | null>(null);
@@ -111,6 +122,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [fit, setFit] = useState<'fit' | 'fill'>('fit');
   const [skin, setSkin] = useState<PromoSkinId>('dancehall-raw');
   const [texts, setTexts] = useState<PromoTexts>({ hook1: '', hook2: '', cta: '', sub: '' });
+  const [autoNote, setAutoNote] = useState<string | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const touchedRef = useRef<Set<string>>(new Set());
+  const idTokenRef = useRef<string | null>(null);
+  idTokenRef.current = idToken;
+  const visionRef = useRef<VisionSuggestion | null>(null);
+  const suggestCtxRef = useRef<SuggestionContext | null>(null);
+  const suggestRunRef = useRef(0);
   const [duration, setDuration] = useState(12);
   const [musicOn, setMusicOn] = useState(true);
   const [kitNote, setKitNote] = useState<string | null>(null);
@@ -136,6 +155,40 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   }, [texts.cta, texts.sub, skin]);
 
 
+  // Auto-fit words: the bank fills untouched fields instantly; the
+  // vision read then refines them with the artwork's own printed
+  // words. Fields the user has typed in are never overwritten.
+  const runSuggestion = useCallback(async (bitmap: ImageBitmap, kind: SuggestionContext['kind'], fileName: string) => {
+    const runId = ++suggestRunRef.current;
+    const ctx: SuggestionContext = { kind, fileName };
+    suggestCtxRef.current = ctx;
+    visionRef.current = null;
+    setTexts((t) => mergeIntoUntouched(t, touchedRef.current, bankSuggestion(ctx)));
+    setAutoNote('Words suggested from your artwork — tap any line to make it yours.');
+    const token = idTokenRef.current;
+    if (!token) return;
+    setSuggesting(true);
+    const vision = await fetchVisionSuggestion(bitmap, token);
+    if (suggestRunRef.current !== runId) return;
+    setSuggesting(false);
+    if (vision) {
+      visionRef.current = vision;
+      setTexts((t) => mergeIntoUntouched(t, touchedRef.current, vision));
+      setAutoNote('Words read from your artwork itself — tap any line to make it yours.');
+    }
+  }, []);
+
+  const cycleField = useCallback((field: SuggestionField) => {
+    const ctx = suggestCtxRef.current;
+    if (!ctx) return;
+    touchedRef.current.add(field);
+    const visionValue = visionRef.current?.[field]?.trim();
+    const alternates = Array.from(
+      new Set([visionValue, ...fieldAlternates(field, ctx)].filter((v): v is string => !!v && v.length > 0)),
+    );
+    setTexts((t) => ({ ...t, [field]: cycleAlternate(alternates, t[field] ?? '') }));
+  }, []);
+
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setError(null);
     try {
@@ -155,10 +208,13 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setAnalysis(firstAnalysis);
       if (firstAnalysis) setRecipe(RECIPE_FOR_KIND[firstAnalysis.suggestedKind]);
       setPhase('ready');
+      if (firstAnalysis && results[0]) {
+        void runSuggestion(results[0].bitmap, firstAnalysis.suggestedKind, list[0].name);
+      }
     } catch (err: any) {
       setError(err?.message || 'That file could not be read as an image.');
     }
-  }, []);
+  }, [runSuggestion]);
 
   const handleSample = useCallback(async () => {
     try {
@@ -422,18 +478,40 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
             <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
               <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
-                3 · Your words (optional — added type, your art stays untouched)
+                3 · Your words — auto-filled from your artwork, edit anything
               </label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <input className={inputCls} placeholder="Hook line 1 — e.g. ONE NIGHT." value={texts.hook1}
-                  onChange={(e) => setTexts((t) => ({ ...t, hook1: e.target.value }))} />
-                <input className={inputCls} placeholder="Hook line 2 — e.g. TWO SOUNDS." value={texts.hook2}
-                  onChange={(e) => setTexts((t) => ({ ...t, hook2: e.target.value }))} />
-                <input className={inputCls} placeholder="Call to action — e.g. TICKETS: LINK IN BIO" value={texts.cta}
-                  onChange={(e) => setTexts((t) => ({ ...t, cta: e.target.value }))} />
-                <input className={inputCls} placeholder="Sub line — e.g. SAT • DEC 20 • THE GRAND HALL" value={texts.sub}
-                  onChange={(e) => setTexts((t) => ({ ...t, sub: e.target.value }))} />
+                {(
+                  [
+                    ['hook1', 'Hook line 1 — e.g. ONE NIGHT.'],
+                    ['hook2', 'Hook line 2 — e.g. TWO SOUNDS.'],
+                    ['cta', 'Call to action — e.g. TICKETS: LINK IN BIO'],
+                    ['sub', 'Sub line — date • venue • city'],
+                  ] as Array<[SuggestionField, string]>
+                ).map(([field, placeholder]) => (
+                  <div key={field} className="relative">
+                    <input className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
+                      onChange={(e) => {
+                        touchedRef.current.add(field);
+                        setTexts((t) => ({ ...t, [field]: e.target.value }));
+                      }} />
+                    <button
+                      type="button"
+                      aria-label={`Another suggestion for ${field}`}
+                      title="Another suggestion"
+                      onClick={() => cycleField(field)}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
+                    >
+                      <RefreshCw size={14} />
+                    </button>
+                  </div>
+                ))}
               </div>
+              {(suggesting || autoNote) && (
+                <p className="text-[11px] text-white/40">
+                  {suggesting ? 'Reading your artwork…' : autoNote}
+                </p>
+              )}
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
                   onClick={handleSaveKit}
