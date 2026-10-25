@@ -105,3 +105,20 @@ export function buildSocialPosts(project: Project): SocialPost[] {
   };
   return [tiktok, shorts, whatsapp, facebook];
 }
+
+/**
+ * The trending-sound play (R17) — how a finished promo actually
+ * rides a trend. No app can legally bake a trending commercial
+ * song into an exported file (platform music licences cover in-app
+ * personal use; business accounts get a commercial library), so
+ * the professional workflow is: export from Studio, then attach
+ * the sound natively where the discovery happens.
+ */
+export function buildSoundGuide(): string[] {
+  return [
+    'In TikTok or Instagram, start the post with your Studio video, then tap "Add sound" and pick the trending track — your video joins that sound\'s page, where the discovery happens.',
+    'If your promo already carries your own track, that is your sound — post it as-is. Never bake a trending song you have no rights to into the file itself.',
+    'Post early in the trend: sounds usually peak within days, and the first wave of videos on a rising sound gets the push.',
+    'Keep the baked-in words: your captions are already animated word by word, so the video still sells itself to everyone watching on mute.',
+  ];
+}

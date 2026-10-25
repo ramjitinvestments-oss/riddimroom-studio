@@ -51,6 +51,11 @@ export const CAPTION_STYLES: CaptionStyle[] = [
   { id: 'bold-outline', label: 'Bold Outline', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 54, color: '#ffffff', strokeColor: '#000000', strokeWidth: 11, uppercase: true, animation: 'fade' },
   { id: 'minimal-clean', label: 'Minimal Clean', fontFamily: '"Helvetica Neue", Arial, sans-serif', fontSize: 40, color: '#ffffff', strokeColor: 'transparent', strokeWidth: 0, animation: 'fade' },
   { id: 'karaoke-gold', label: 'Karaoke Gold', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 52, color: '#ffffff', strokeColor: '#000000', strokeWidth: 6, highlightColor: '#FFD100', animation: 'word-by-word' },
+  // R17 Viral Finish — the signature word-by-word style: bigger
+  // than the editor's speech styles (promo words are headlines,
+  // not subtitles), gold active word, heavy outline for art with
+  // busy detail behind the lower third.
+  { id: 'viral-gold-pop', label: 'Viral Gold Pop', fontFamily: '"Arial Black", Arial, sans-serif', fontSize: 72, color: '#ffffff', strokeColor: '#000000', strokeWidth: 10, highlightColor: '#FFD100', uppercase: true, animation: 'word-by-word' },
 ];
 
 export function getCaptionStyle(id: string): CaptionStyle {

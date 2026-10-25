@@ -17,6 +17,17 @@ export function CaptionsExportPanel() {
   const cues = collectCues(captionItems);
   const hasCues = cues.length > 0;
 
+  /** R17 Viral Finish: one tap restyles every cue to the signature
+      word-by-word Viral Gold Pop — the compositor already pops the
+      active word and fills it gold from the words[] timings. */
+  const handleMakeViral = () => {
+    mutate((p) => ({
+      ...p,
+      items: p.items.map((i) => (i.type === 'caption' ? { ...i, captionStyleId: 'viral-gold-pop' } : i)),
+    }));
+    setMessage(`All ${cues.length} captions now use Viral Gold Pop — word by word, gold on the beat of the voice.`);
+  };
+
   const handleExport = (format: 'srt' | 'vtt') => {
     if (!hasCues) { setMessage('No captions yet — transcribe first, then export.'); return; }
     const base = (project.name || 'riddimroom-captions').replace(/[^\w-]+/g, '-').toLowerCase();
@@ -45,6 +56,11 @@ export function CaptionsExportPanel() {
     <div className="flex flex-col gap-2 bg-white/5 border border-white/10 rounded-xl p-3">
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Caption files</h3>
       <p className="text-[11px] text-white/40">{hasCues ? `${cues.length} caption cues ready.` : 'No captions yet — transcribe a clip, add one by hand above, or import a caption file.'}</p>
+      {hasCues && (
+        <button onClick={handleMakeViral} className="px-3 py-2 rounded bg-gold text-black hover:bg-gold/90 text-xs font-bold min-h-10">
+          Make captions viral — word by word
+        </button>
+      )}
       <div className="flex gap-2">
         <button onClick={() => handleExport('srt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-10">Export SRT</button>
         <button onClick={() => handleExport('vtt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-10">Export VTT</button>

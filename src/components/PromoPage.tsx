@@ -27,18 +27,39 @@ import {
 } from '../lib/promo/suggest';
 import { analyzeArtwork } from '../lib/promo/ocrEngine';
 import { parseEventDate, planCampaign, campaignFileName, type CampaignPiece, type CampaignPlan } from '../lib/promo/campaign';
+import { detectBeats, findHookWindow } from '../lib/media/beats';
+import { convertPromoTextToCaptions } from '../lib/promo/viralCaptions';
 import { createExportRenderer, getConfiguredExportEngine } from '../lib/export/mediabunnyExporter';
 import { validateRenderResult } from '../lib/export/validate';
 import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
 import { resolveExportSettings } from '../lib/export/quality';
-import { buildSocialPosts, type PostGenre, type SocialPost } from '../lib/export/socialPosts';
+import { buildSocialPosts, buildSoundGuide, type PostGenre, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
 import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
-import { addItem, addMediaAsset, generateTimelineId, getTracksByType } from '../lib/timeline/utils';
+import { addItem, addMediaAsset, generateTimelineId, getTracksByType, updateItem } from '../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset, Project } from '../types/timeline';
+
+/**
+ * R17 hook trim: shift the music item's window to the track's most
+ * energetic stretch (its hook), so a promo built on a full song
+ * starts at the chorus, not the intro. Returns the project and how
+ * far the music actually shifted (the beat grid shifts with it).
+ * No-ops for looped items and tracks too short to hold the window.
+ */
+function applyHookTrim(project: Project, hookStart: number, totalSeconds: number): { project: Project; applied: number } {
+  if (hookStart <= 0.25) return { project, applied: 0 };
+  const item = project.items.find((i) => i.type === 'audio' && i.role === 'music');
+  if (!item || item.type !== 'audio' || item.loop) return { project, applied: 0 };
+  const asset = project.mediaAssets[item.mediaAssetId];
+  if (!asset?.durationSeconds || asset.durationSeconds < hookStart + totalSeconds) return { project, applied: 0 };
+  return {
+    project: updateItem(project, item.id, { trimStart: hookStart, trimEnd: hookStart + totalSeconds }),
+    applied: hookStart,
+  };
+}
 
 /**
  * Adds the skin's built-in beat to a built promo, fitted to its length:
@@ -185,6 +206,34 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [campaignNote, setCampaignNote] = useState<string | null>(null);
   const [copiedPieceId, setCopiedPieceId] = useState<string | null>(null);
   const campaignAbortRef = useRef<AbortController | null>(null);
+  /** R17 Viral Finish: words as beat-timed animated captions, and
+      music that starts at its hook. */
+  const [captionMode, setCaptionMode] = useState<'words' | 'lines'>('words');
+  const [hookTrim, setHookTrim] = useState(true);
+  const trackAnalysisCacheRef = useRef(new Map<string, Promise<{ beats: number[]; bpm: number; hook: number } | null>>());
+
+  /** Decode a track once (cached per file) and read its beat grid
+      + hook position — the Viral Finish runs on these. */
+  const analyzeTrackFile = useCallback(async (file: File, totalSeconds: number) => {
+    const key = `${file.name}:${file.size}`;
+    let pending = trackAnalysisCacheRef.current.get(key);
+    if (!pending) {
+      pending = (async () => {
+        try {
+          const buffer = await file.arrayBuffer();
+          const ctx = new OfflineAudioContext(1, 1, 44100);
+          const audio = await ctx.decodeAudioData(buffer);
+          const samples = audio.getChannelData(0);
+          const grid = detectBeats(samples, audio.sampleRate);
+          return { beats: grid.beats, bpm: grid.bpm, hook: findHookWindow(samples, audio.sampleRate, totalSeconds) };
+        } catch {
+          return null;
+        }
+      })();
+      trackAnalysisCacheRef.current.set(key, pending);
+    }
+    return pending;
+  }, []);
   const pickedRef = useRef<PickedFile[]>([]);
   pickedRef.current = picked;
 
@@ -483,6 +532,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       // the last-resort fallback. A failure here never blocks the
       // promo — it just opens without music (the editor's Music
       // panel can add it later).
+      let trackFile: File | null = null;
       if (musicOn) {
         try {
           setStatus('Adding the beat…');
@@ -506,6 +556,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 ? { ...up.asset, durationSeconds: probed }
                 : up.asset;
             project = addPromoMusic(project, asset, duration);
+            trackFile = musicFile;
           }
         } catch {
           // Music is a layer, not a blocker — the promo still opens.
@@ -519,6 +570,26 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       if (readout) project = applyCameraTour(project, readout);
       project = applyStageBackdrop(project);
 
+      // R17 Viral Finish: start the music at its hook, then (in
+      // Viral Words mode) turn the field lines into beat-timed
+      // animated captions — the compositor pops each word gold as
+      // its beat lands.
+      const trackAnalysis = trackFile ? await analyzeTrackFile(trackFile, duration) : null;
+      let appliedHook = 0;
+      if (trackAnalysis && hookTrim) {
+        const trimmed = applyHookTrim(project, trackAnalysis.hook, duration);
+        project = trimmed.project;
+        appliedHook = trimmed.applied;
+      }
+      if (captionMode === 'words') {
+        const beats = (trackAnalysis?.beats ?? []).map((b) => b - appliedHook).filter((b) => b >= 0);
+        project = convertPromoTextToCaptions(
+          project,
+          [cleanTexts.hook1 ?? '', cleanTexts.hook2 ?? '', cleanTexts.sub ?? '', cleanTexts.cta ?? ''],
+          beats,
+        );
+      }
+
       setStatus('Saving…');
       await saveProject(project);
       onOpenProject(project.id);
@@ -526,7 +597,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setError(err?.message || 'The promo could not be built. Try again.');
       setPhase('ready');
     }
-  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily]);
+  }, [currentUser, picked, analysis, fileProblem, ratioId, fit, skin, texts, duration, recipe, tier, onOpenProject, musicOn, ownTrack, packTrackId, fontFamily, captionMode, hookTrim, analyzeTrackFile]);
 
 
   /**
@@ -650,6 +721,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       }
 
       let musicAsset: MediaAsset | null = null;
+      let campaignTrackFile: File | null = null;
       if (musicOn) {
         try {
           setCampaignStatus('Fitting the beat for the set…');
@@ -672,6 +744,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               probed && (!up.asset.durationSeconds || Math.abs(up.asset.durationSeconds - probed) > 0.75)
                 ? { ...up.asset, durationSeconds: probed }
                 : up.asset;
+            campaignTrackFile = musicFile;
           }
         } catch {
           musicAsset = null;
@@ -679,6 +752,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       }
 
       const readout = lastReadoutRef.current;
+      const trackAnalysis = campaignTrackFile ? await analyzeTrackFile(campaignTrackFile, duration) : null;
       const built: Array<{ entry: CampaignResult; project: Project }> = [];
       for (const piece of plan.pieces) {
         if (controller.signal.aborted) break;
@@ -722,6 +796,21 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         if (musicAsset) project = addPromoMusic(project, musicAsset, duration);
         if (readout) project = applyCameraTour(project, readout);
         project = applyStageBackdrop(project);
+        // R17 Viral Finish, per piece (see the single build).
+        let appliedHook = 0;
+        if (trackAnalysis && hookTrim) {
+          const trimmed = applyHookTrim(project, trackAnalysis.hook, duration);
+          project = trimmed.project;
+          appliedHook = trimmed.applied;
+        }
+        if (captionMode === 'words') {
+          const beats = (trackAnalysis?.beats ?? []).map((b) => b - appliedHook).filter((b) => b >= 0);
+          project = convertPromoTextToCaptions(
+            project,
+            [piece.texts.hook1 ?? '', piece.texts.hook2 ?? '', piece.texts.sub ?? '', piece.texts.cta ?? ''],
+            beats,
+          );
+        }
         await saveProject(project);
         const entry: CampaignResult = {
           piece,
@@ -795,7 +884,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, packTrackId, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -970,6 +1059,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               </div>
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Beat</span>
+                <button onClick={() => ownTrackInputRef.current?.click()} className={chipCls(musicOn && !!ownTrack)}>
+                  {ownTrack ? `Your track: ${ownTrack.name}` : 'Your own track — best'}
+                </button>
                 <select
                   aria-label="Pack track"
                   value={packTrackForSkin(skin, packTrackId).id}
@@ -986,9 +1078,6 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                     </option>
                   ))}
                 </select>
-                <button onClick={() => ownTrackInputRef.current?.click()} className={chipCls(musicOn && !!ownTrack)}>
-                  {ownTrack ? `Your track: ${ownTrack.name}` : 'Your own track'}
-                </button>
                 <input
                   ref={ownTrackInputRef}
                   type="file"
@@ -1020,7 +1109,17 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 {musicOn && ownTrack && (
                   <span className="text-[11px] text-white/40">Your track, fitted to your promo's length.</span>
                 )}
+                {musicOn && (
+                  <button onClick={() => setHookTrim((v) => !v)} className={chipCls(hookTrim)}>
+                    {hookTrim ? 'Starts at the hook ✓' : 'Start at the hook'}
+                  </button>
+                )}
               </div>
+              {musicOn && hookTrim && (
+                <p className="text-[11px] text-white/40 mt-1.5">
+                  The promo starts at your track's loudest stretch — the chorus, not the intro — and the words land on its beats.
+                </p>
+              )}
             </div>
 
             <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
@@ -1113,6 +1212,15 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   {suggesting ? `Analyzing your artwork on this device${analyzePct !== null ? ` — ${analyzePct}%` : '…'}` : autoNote}
                 </p>
               )}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Caption animation</span>
+                <button type="button" onClick={() => setCaptionMode('words')} className={chipCls(captionMode === 'words')}>
+                  Viral words — pop on the beat
+                </button>
+                <button type="button" onClick={() => setCaptionMode('lines')} className={chipCls(captionMode === 'lines')}>
+                  Kinetic lines
+                </button>
+              </div>
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <button
                   onClick={handleSaveKit}
@@ -1210,6 +1318,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   </button>
                 )}
                 {campaignNote && <p className="text-[11px] text-white/50">{campaignNote}</p>}
+                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-gold">Posting tip — ride the trending sound</p>
+                  {buildSoundGuide().map((step, i) => (
+                    <p key={i} className="text-[11px] text-white/55">
+                      <span className="text-white/85 font-bold">{i + 1}.</span> {step}
+                    </p>
+                  ))}
+                </div>
                 {campaignResults.length > 0 && (
                   <div className="space-y-2 pt-1">
                     {campaignResults.map((r) => (
