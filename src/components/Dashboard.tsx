@@ -17,9 +17,11 @@ interface DashboardProps {
   onOpenProject: (projectId: string) => void;
   /** Phase 2 (Plan v5): opens the Admin screen; the button renders only for admins. */
   onOpenAdmin?: () => void;
+  /** Viral Promo mode entry point. */
+  onOpenPromo?: () => void;
 }
 
-export function Dashboard({ onOpenProject, onOpenAdmin }: DashboardProps) {
+export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: DashboardProps) {
   const { currentUser, userProfile, signOut } = useAuth();
   const { tier } = useLicenseTier();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -154,6 +156,14 @@ export function Dashboard({ onOpenProject, onOpenAdmin }: DashboardProps) {
                 }`}
               >
                 {selectMode ? 'Done' : 'Select'}
+              </button>
+            )}
+            {onOpenPromo && (
+              <button
+                onClick={onOpenPromo}
+                className="px-4 py-2 min-h-[36px] text-xs font-bold uppercase tracking-wide bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg"
+              >
+                Viral Promo
               </button>
             )}
             <button

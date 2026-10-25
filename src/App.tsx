@@ -5,6 +5,7 @@ import { LoginPage } from './components/LoginPage';
 import { Dashboard } from './components/Dashboard';
 import { PendingScreen } from './components/PendingScreen';
 import { AdminPanel } from './components/AdminPanel';
+import { PromoPage } from './components/PromoPage';
 import { EditorShell } from './components/Editor/EditorShell';
 import { useRouter } from './lib/router';
 
@@ -68,8 +69,22 @@ function AppShell() {
           <Dashboard
             onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
             onOpenAdmin={() => navigateTo('/admin')}
+            onOpenPromo={() => navigateTo('/promo')}
           />
         )}
+      </ProtectedRoute>
+    );
+  }
+
+  // Viral Promo mode. The pending-account gate above already applies to
+  // every route, so only owner-approved (toggled-on) users reach this.
+  if (currentPath === '/promo') {
+    return (
+      <ProtectedRoute redirectTo={navigateTo}>
+        <PromoPage
+          onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
+          onBack={() => navigateTo('/')}
+        />
       </ProtectedRoute>
     );
   }
@@ -84,6 +99,7 @@ function AppShell() {
         <Dashboard
           onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
           onOpenAdmin={() => navigateTo('/admin')}
+          onOpenPromo={() => navigateTo('/promo')}
         />
       )}
     </ProtectedRoute>
