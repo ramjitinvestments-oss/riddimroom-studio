@@ -26,7 +26,7 @@
     "lucide-react": "^0.546.0",
     "mediabunny": "1.62.1",
     "motion": "^12.23.24",
-    "onnxruntime-web": "^1.30.0",
+    "onnxruntime-web": "^1.21.0",
     "ppu-paddle-ocr": "^6.6.1",
     "react": "^19.0.1",
     "react-dom": "^19.0.1"
@@ -48,6 +48,6 @@
     "vitest": "^4.1.11"
   },
   "overrides": {
-    "jose": "^4.15.9"
+    "onnxruntime-web": "$onnxruntime-web"
   }
 }
