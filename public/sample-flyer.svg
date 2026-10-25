@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b0533"/>
+      <stop offset="0.55" stop-color="#0a0a12"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFE970"/>
+      <stop offset="1" stop-color="#FFB03A"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="url(#bg)"/>
+  <polygon points="540,0 240,1920 470,1920" fill="#FFD100" opacity="0.10"/>
+  <polygon points="540,0 610,1920 840,1920" fill="#FF3D68" opacity="0.10"/>
+  <polygon points="540,0 60,1920 200,1920" fill="#7FD4FF" opacity="0.07"/>
+  <circle cx="540" cy="700" r="330" fill="#FFD100" opacity="0.06"/>
+  <text x="540" y="330" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="118" fill="#FFFFFF">ONE NIGHT.</text>
+  <text x="540" y="460" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="118" fill="url(#gold)">TWO SOUNDS.</text>
+  <rect x="340" y="540" width="400" height="6" fill="#FFD100"/>
+  <text x="540" y="700" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="96" fill="#FFFFFF">DANCEHALL</text>
+  <text x="540" y="800" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="60" fill="#FF3D68">×</text>
+  <text x="540" y="920" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="96" fill="#FFFFFF">SOCA</text>
+  <text x="540" y="1060" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="52" letter-spacing="14" fill="#FFFFFF" opacity="0.85">LIVE ON STAGE</text>
+  <rect x="240" y="1180" width="600" height="3" fill="#FFFFFF" opacity="0.35"/>
+  <text x="540" y="1330" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="58" fill="#FFFFFF">SAT • DEC 20</text>
+  <text x="540" y="1420" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="58" fill="#FFFFFF">THE GRAND HALL</text>
+  <rect x="290" y="1560" width="500" height="110" rx="55" fill="#FFD100"/>
+  <text x="540" y="1632" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="46" fill="#000000">TICKETS OUT NOW</text>
+  <text x="540" y="1810" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="34" letter-spacing="6" fill="#FFFFFF" opacity="0.55">SAMPLE FLYER — RIDDIMROOM</text>
+</svg>

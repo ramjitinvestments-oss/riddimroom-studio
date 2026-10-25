@@ -162,10 +162,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
   const handleSample = useCallback(async () => {
     try {
-      const res = await fetch('/sample-flyer.jpg');
+      const res = await fetch('/sample-flyer.svg');
       if (!res.ok) throw new Error('sample missing');
       const blob = await res.blob();
-      const file = new File([blob], 'sample-concert-flyer.jpg', { type: 'image/jpeg' });
+      const file = new File([blob], 'sample-concert-flyer.svg', { type: 'image/svg+xml' });
       await handleFiles([file]);
     } catch {
       setError('The sample flyer could not be loaded. Upload your own artwork instead.');
