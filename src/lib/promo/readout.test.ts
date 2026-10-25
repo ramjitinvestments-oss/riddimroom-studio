@@ -54,7 +54,7 @@ describe('readout classification on the owner proof fixtures', () => {
     const r = classifyReadout(cloud, { kind: 'logo', fileName: 'ramjitinvestment.png' });
     expect(r.genre).toBe('trades');
     expect(r.fields.cta).toBe('CALL 407-616-2569');
-    expect(r.fields.sub).toContain('ELECTRICAL');
+    expect(r.fields.sub).toBe('FLOORING • PLUMBING'); // services, headline word excluded
     const bankFilled = { hook1: 'ONE NIGHT.', hook2: 'TWO SOUNDS.', sub: 'ONE NIGHT ONLY', cta: 'TICKETS: LINK IN BIO', font: undefined } as never;
     const merged = mergeReadoutFields(bankFilled, new Set<string>(), r);
     expect(merged.hook1).toBe('ELECTRICAL');
@@ -79,6 +79,33 @@ describe('readout classification on the owner proof fixtures', () => {
     expect(r.headline).toBe('LIVE EVENT PRODUCTION');
     expect(r.genre).toBe('business');
     expect(r.fields.cta).toBeTruthy();
+  });
+
+
+  it('the owner word-cloud fixture (real lines from his test art): no garble CTA, no party bleed', () => {
+    const cloud: OcrLine[] = [
+    { text: "ELECTRICAL", confidence: 95, y: 0.003, box: { x: 0.627, y: 0.003, w: 0.110, h: 0.016 } },
+    { text: ". \u00a50?-616-2569COUCRETE RAMTITINVESTMEN CONCRETE", confidence: 24, y: 0.152, box: { x: 0.072, y: 0.152, w: 0.851, h: 0.028 } },
+    { text: "i vr RAMTITINVESTMEN ELECTRICAL FLOORING pac RAMTITINVESTMEN RENOVATIONS", confidence: 45, y: 0.294, box: { x: 0.024, y: 0.294, w: 0.950, h: 0.025 } },
+    { text: "I) RENOVATIONS CALL VS RAMTITINVESTMEN REMODELING COMCRETE RAMTITINVESTMEN", confidence: 53, y: 0.403, box: { x: 0.070, y: 0.403, w: 0.834, h: 0.032 } },
+    { text: "ELecTrICAL \u00a7 g MN caLL vs", confidence: 49, y: 0.551, box: { x: 0.074, y: 0.551, w: 0.872, h: 0.066 } },
+    { text: "J 3 ELECTRICAL", confidence: 80, y: 0.587, box: { x: 0.469, y: 0.587, w: 0.476, h: 0.027 } },
+    { text: "TILE F333 PAINTING", confidence: 71, y: 0.584, box: { x: 0.072, y: 0.584, w: 0.873, h: 0.068 } },
+    { text: "REMODELING CSV, fH CALL Us", confidence: 58, y: 0.638, box: { x: 0.077, y: 0.638, w: 0.868, h: 0.038 } }
+    ];
+    const r = classifyReadout(cloud, { kind: 'logo', fileName: 'ramjitinvestment.png' });
+    expect(r.genre).toBe('trades');
+    expect(r.fields.hook1).toBe('ELECTRICAL');
+    expect(r.fields.cta).toBe('CALL US TODAY');
+    const merged = mergeReadoutFields(
+      { hook1: 'ONE NIGHT.', hook2: 'TWO SOUNDS.', sub: 'ONE NIGHT ONLY', cta: 'TICKETS: LINK IN BIO', font: undefined } as never,
+      new Set<string>(),
+      r,
+    );
+    const all = JSON.stringify(merged);
+    expect(all).not.toContain('TWO SOUNDS');
+    expect(all).not.toContain('TICKETS');
+    expect(all).not.toContain('§');
   });
 
   it('no readable lines: fields stay empty except a safe CTA, genre from kind', () => {

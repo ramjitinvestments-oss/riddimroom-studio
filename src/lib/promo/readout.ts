@@ -44,13 +44,43 @@ export interface ReadoutResult {
 
 const MIN_LINE_CONFIDENCE = 40;
 const HEADLINE_MIN_CONFIDENCE = 55;
-const PHONE_MIN_CONFIDENCE = 25;
+const PHONE_MIN_CONFIDENCE = 20;
 
 const MONTHS = 'JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC';
 const DAYS = 'MON|TUE|WED|THU|FRI|SAT|SUN';
 const SUB_HINT = new RegExp(`\\b(${MONTHS}|${DAYS})\\b|\\d{1,2}[:.]\\d{2}|\\b[AP]M\\b|\\b(?:HALL|CENTRE|CENTER|ARENA|CLUB|STREET|AVENUE|ROAD|PARK)\\b|@[\\w.]+|\\.COM|\\.NET`, 'i');
 const CTA_HINT = /TICKETS|OUT NOW|BOOK NOW|BOOK TODAY|CALL|DM (US|TO|FOR)|RSVP|ORDER NOW|BUY NOW|FREE ENTRY|TALK ABOUT|GET YOURS|SIGN UP|REGISTER/i;
-const PHONE_RE = /(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}/;
+const PHONE_RE = /\+?[\d][\d\s.()-]{7,}\d/;
+const VERBATIM_CTA_MAX_CHARS = 32;
+
+/**
+ * A line clean enough to use VERBATIM as a field: word-cloud OCR
+ * (proven on the owner's Ramjit art) interleaves real words with
+ * symbol garble ("ELecTrICAL § g MN caLL vs") — such lines stay in
+ * the readout panel for tap-to-assign but must never become a
+ * headline or CTA on their own.
+ */
+export function isCleanLine(text: string): boolean {
+  if (text.length === 0) return false;
+  const symbols = (text.match(/[^A-Za-z0-9\s.,&'!%#@*+•·:\/-]/g) || []).length;
+  if (symbols / text.length > 0.15) return false;
+  // Case chaos is the word-cloud garble signature: real design type
+  // is ALL-CAPS, Title Case, or lowercase — never "ELecTrICAL".
+  const tokens = text.split(/\s+/).map((t) => t.replace(/[^A-Za-z]/g, '')).filter((t) => t.length >= 3);
+  if (tokens.length === 0) return true;
+  const chaotic = tokens.filter((t) => {
+    const upper = t === t.toUpperCase();
+    const lower = t === t.toLowerCase();
+    const titled = t[0] === t[0].toUpperCase() && t.slice(1) === t.slice(1).toLowerCase();
+    return !upper && !lower && !titled;
+  }).length;
+  return chaotic / tokens.length <= 0.25;
+}
+
+/** A verbatim CTA must also be CTA-SHAPED: it starts with the call
+    itself ("TICKETS OUT NOW", "CALL US", "BOOK NOW"…) — a long line
+    that merely CONTAINS the word "call" is prose or noise. */
+const CTA_START = /^(CALL|DM|BOOK|ORDER|GET|SIGN UP|RSVP|BUY|FREE|TICKETS|LET'S|LETS)\b/i;
 
 const TRADE_WORDS = ['ELECTRICAL', 'PLUMBING', 'FLOORING', 'TILE', 'CONCRETE', 'PAINTING', 'REMODELING', 'ROOFING', 'HVAC', 'HANDYMAN', 'CARPENTRY', 'DRYWALL'];
 
@@ -90,11 +120,12 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
   for (const l of rawLines) {
     if (l.confidence < PHONE_MIN_CONFIDENCE) continue;
     const m = clean(l.text).match(PHONE_RE);
-    if (m) {
-      phone = normalizePhone(m[0]);
-      phoneLine = { ...l, text: clean(l.text) };
-      break;
-    }
+    if (!m) continue;
+    const digits = m[0].replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+    if (digits.length !== 10) continue; // a partial read is not a phone number
+    phone = normalizePhone(digits);
+    phoneLine = { ...l, text: clean(l.text) };
+    break;
   }
 
   const lines = rawLines
@@ -120,23 +151,13 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
 
   const bank = bankSuggestion(ctx);
 
-  const ctaLine = lines.find((l) => CTA_HINT.test(l.text));
+  const ctaLine = lines.find(
+    (l) => CTA_HINT.test(l.text) && CTA_START.test(l.text) && isCleanLine(l.text) && l.confidence >= 55 && l.text.length <= VERBATIM_CTA_MAX_CHARS,
+  );
   let subLine = lines.find((l) => l !== ctaLine && SUB_HINT.test(l.text));
 
-  // Trades art: the services themselves are the details line.
-  let servicesSub: string | undefined;
-  if (genre === 'trades' && !subLine) {
-    const found: string[] = [];
-    for (const l of lines) {
-      for (const w of TRADE_WORDS) {
-        if (new RegExp(`\\b${w}\\b`, 'i').test(l.text) && !found.includes(w)) found.push(w);
-      }
-    }
-    if (found.length >= 2) servicesSub = found.slice(0, 3).join(' • ');
-  }
-
   const headlineCandidates = lines.filter(
-    (l) => l !== ctaLine && l !== subLine && l.confidence >= HEADLINE_MIN_CONFIDENCE && l.text.length >= 3 && l.text.length <= 42,
+    (l) => l !== ctaLine && l !== subLine && l.confidence >= HEADLINE_MIN_CONFIDENCE && isCleanLine(l.text) && l.text.length >= 3 && l.text.length <= 42,
   );
   let headline = '';
   let headlineLine: OcrLine | undefined;
@@ -148,6 +169,20 @@ export function classifyReadout(rawLines: OcrLine[], ctx: SuggestionContext): Re
       headline = l.text;
       headlineLine = l;
     }
+  }
+
+  // Trades art: the services themselves are the details line.
+  let servicesSub: string | undefined;
+  if (genre === 'trades' && !subLine) {
+    const found: string[] = [];
+    for (const l of lines) {
+      for (const w of TRADE_WORDS) {
+        if (new RegExp(`\\b${w}\\b`, 'i').test(l.text) && !found.includes(w)) found.push(w);
+      }
+    }
+    const withoutHeadline = found.filter((w) => !headline.toUpperCase().includes(w));
+    const picks = (withoutHeadline.length >= 2 ? withoutHeadline : found).slice(0, 3);
+    if (picks.length >= 2) servicesSub = picks.join(' • ');
   }
 
   const fields: Partial<PromoTexts> = {};
