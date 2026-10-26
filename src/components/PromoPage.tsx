@@ -68,6 +68,16 @@ import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType, updateItem } from '../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset, Project } from '../types/timeline';
+import { MAX_FADE_SECONDS } from '../lib/media/constants';
+import {
+  clampFadeSeconds,
+  computePeaks,
+  effectiveStart,
+  fittedPromoFade,
+  promoStartForWindow,
+  type SongPeaks,
+} from '../lib/media/songPart';
+import { SongPartPicker } from './SongPartPicker';
 
 /**
  * R17/R20 music start: shift the music item's window to a chosen
@@ -91,8 +101,10 @@ function applyMusicStart(project: Project, startAt: number, totalSeconds: number
 /**
  * Adds the skin's built-in beat to a built promo, fitted to its length:
  * trimmed when the promo fits inside the 8s loop, looped when it must
- * repeat, standard 0.5s fitted fade-out — the same fit math the
- * template music path uses. Pure: the caller renders + uploads the loop.
+ * repeat, with the R26 fitted fade — fade-in 0s, fade-out 2s at the
+ * fitted end, clamped by `fittedPromoFade` (the ONE definition of the
+ * rule, in lib/media/songPart). Pure: the caller renders + uploads
+ * the loop.
  */
 function addPromoMusic(project: Project, asset: MediaAsset, totalSeconds: number): Project {
   const track = getTracksByType(project, 'audio')[0];
@@ -114,7 +126,7 @@ function addPromoMusic(project: Project, asset: MediaAsset, totalSeconds: number
     muted: false,
     trimStart: 0,
     trimEnd: loops ? sourceDuration : totalSeconds,
-    fade: { fadeInDuration: 0, fadeOutDuration: Math.min(0.5, totalSeconds) },
+    fade: fittedPromoFade(totalSeconds),
     ...(loops ? { loop: true } : {}),
   };
   return addItem(addMediaAsset(project, asset), item);
@@ -183,6 +195,15 @@ interface CampaignResult {
   url?: string;
   blob?: Blob;
   error?: string;
+  /** R26 (WS-A1): the built project's fitted music item, so its fades
+      stay adjustable right here on the results card. The sliders
+      mutate + re-save that piece's saved project (see
+      handleResultFade) — a piece already rendered keeps its MP4;
+      the new fades apply when it is next rendered/opened. */
+  musicItemId?: string;
+  musicFittedSeconds?: number;
+  fadeIn?: number;
+  fadeOut?: number;
 }
 
 export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
@@ -248,6 +269,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       null = automatic (the detected hook). */
   const [musicStart, setMusicStart] = useState<number | null>(null);
   const [ownTrackSeconds, setOwnTrackSeconds] = useState<number | null>(null);
+  /** R26 (WS-A3): the picked track's detected hook + waveform peaks,
+      feeding the song-part picker before build (the build itself
+      reuses the same cached analysis). */
+  const [ownTrackHook, setOwnTrackHook] = useState<number | null>(null);
+  const [ownTrackPeaks, setOwnTrackPeaks] = useState<SongPeaks | null>(null);
+  /** R26 (WS-A1): built campaign projects by id, kept so the results
+      cards' fade sliders can mutate + re-save them in place. */
+  const builtProjectsRef = useRef(new Map<string, Project>());
   /** R20: the picked art carries no readable words — captions are
       composed from its look + the user's one-tap purpose answer. */
   const [artNoWords, setArtNoWords] = useState(false);
@@ -347,6 +376,28 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   }, []);
   const pickedRef = useRef<PickedFile[]>([]);
   pickedRef.current = picked;
+
+  // R26 (WS-A3): as soon as a track is picked, run the same cached
+  // analysis the build uses (hook position) plus the waveform peaks,
+  // so the song-part picker can show both before anything is built.
+  useEffect(() => {
+    if (!ownTrack) {
+      setOwnTrackHook(null);
+      setOwnTrackPeaks(null);
+      return;
+    }
+    let live = true;
+    const file = ownTrack;
+    void analyzeTrackFile(file, duration).then((a) => {
+      if (live) setOwnTrackHook(a ? a.hook : null);
+    });
+    void computePeaks(file).then((p) => {
+      if (live) setOwnTrackPeaks(p);
+    });
+    return () => {
+      live = false;
+    };
+  }, [ownTrack, duration, analyzeTrackFile]);
 
   // Brand kit: prefill this device's saved defaults once, on mount.
   useEffect(() => {
@@ -1422,9 +1473,21 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           );
         }
         await saveProject(project);
+        // R26 (WS-A1): keep the built project + its fitted music item
+        // so the results card can adjust the music fades in place.
+        builtProjectsRef.current.set(project.id, project);
+        const musicItem = project.items.find((i) => i.type === 'audio' && i.role === 'music');
         const entry: CampaignResult = {
           piece,
           projectId: project.id,
+          ...(musicItem && musicItem.type === 'audio'
+            ? {
+                musicItemId: musicItem.id,
+                musicFittedSeconds: musicItem.endTime - musicItem.startTime,
+                fadeIn: musicItem.fade.fadeInDuration,
+                fadeOut: musicItem.fade.fadeOutDuration,
+              }
+            : {}),
           // R24 (WS-C1/C5): posts are written from the piece's
           // planner texts + the resolved context — never scraped
           // from the rendered items (caption conversion deletes
@@ -1503,6 +1566,30 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignPct(0);
     }
   }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, musicStart, resolvedContext, captionMode, hookTrim, analyzeTrackFile, captionSize, sitePlanExtras]);
+
+  /**
+   * R26 (WS-A1): results-card fade adjustment. The campaign piece IS
+   * a normal saved Studio project — this mutates its music item's
+   * `fade` fields (clamped by the shared `clampFadeSeconds` to
+   * min(3s, fitted length)) and re-saves it, no rebuild needed. A
+   * piece already rendered here keeps its rendered MP4; the new
+   * fades are in its project for the next render / editor open (the
+   * same fields the editor's Music panel edits).
+   */
+  const handleResultFade = useCallback((r: CampaignResult, field: 'fadeIn' | 'fadeOut', rawValue: number) => {
+    if (!r.musicItemId || r.musicFittedSeconds === undefined) return;
+    const fitted = r.musicFittedSeconds;
+    const fadeIn = clampFadeSeconds(field === 'fadeIn' ? rawValue : (r.fadeIn ?? 0), fitted);
+    const fadeOut = clampFadeSeconds(field === 'fadeOut' ? rawValue : (r.fadeOut ?? 0), fitted);
+    setCampaignResults((prev) => prev.map((x) => (x.piece.id === r.piece.id ? { ...x, fadeIn, fadeOut } : x)));
+    const built = builtProjectsRef.current.get(r.projectId);
+    if (!built) return;
+    const next = updateItem(built, r.musicItemId, { fade: { fadeInDuration: fadeIn, fadeOutDuration: fadeOut } });
+    builtProjectsRef.current.set(r.projectId, next);
+    void saveProject(next).catch(() => {
+      /* the on-screen values stay; the editor still offers the same sliders */
+    });
+  }, []);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -2064,22 +2151,31 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 </p>
               )}
               {musicOn && ownTrack && ownTrackSeconds !== null && ownTrackSeconds > duration && (
-                <div className="flex flex-wrap items-center gap-2 mt-2">
-                  <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Start at</span>
-                  <button type="button" onClick={() => setMusicStart(null)} className={chipCls(musicStart === null)}>
-                    {hookTrim ? 'The hook (auto)' : 'The beginning'}
-                  </button>
-                  <input
-                    type="range"
-                    min={0}
-                    max={Math.max(0, Math.floor(ownTrackSeconds - duration))}
-                    step={0.5}
-                    value={musicStart ?? 0}
-                    onChange={(e) => setMusicStart(Number(e.target.value))}
-                    className="flex-1 min-w-[120px] accent-[#FFD100]"
-                    aria-label="Music start point, seconds into your track"
+                <div className="mt-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Pick the part</span>
+                    <button type="button" onClick={() => setMusicStart(null)} className={chipCls(musicStart === null)}>
+                      {hookTrim ? 'Auto — the hook' : 'Auto — the beginning'}
+                    </button>
+                    {musicStart !== null && (
+                      <span className="text-[11px] text-white/40">Drag the gold window — or tap Auto to go back.</span>
+                    )}
+                  </div>
+                  {/* R26 (WS-A3): the shared song-part picker. Until the
+                      user drags, it shows the EFFECTIVE start (the hook
+                      when hook-trim is on, else 0) — musicStart stays
+                      null, so the auto semantic is untouched. Dragging
+                      writes plain start seconds into musicStart, the
+                      same value applyMusicStart already honours. */}
+                  <SongPartPicker
+                    durationSeconds={ownTrackSeconds}
+                    windowSeconds={duration}
+                    value={effectiveStart(musicStart, hookTrim ? (ownTrackHook ?? 0) : 0)}
+                    hookSeconds={ownTrackHook}
+                    peaks={ownTrackPeaks}
+                    modeLabel={musicStart === null ? (hookTrim ? 'Auto — the hook' : 'Auto — from the beginning') : 'Your pick'}
+                    onChange={(start) => setMusicStart(promoStartForWindow(start, duration, ownTrackSeconds))}
                   />
-                  <span className="text-[11px] text-white/50">{musicStart === null ? 'auto' : `${musicStart.toFixed(1)}s in`}</span>
                 </div>
               )}
             </div>
@@ -2457,6 +2553,39 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                             Open in editor
                           </button>
                         </div>
+                        {r.musicItemId && r.musicFittedSeconds !== undefined && (
+                          <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 space-y-1.5">
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">
+                              Music fade — saved to this piece's project
+                            </p>
+                            {(
+                              [
+                                ['fadeIn', 'Fade in', r.fadeIn ?? 0],
+                                ['fadeOut', 'Fade out', r.fadeOut ?? 0],
+                              ] as Array<['fadeIn' | 'fadeOut', string, number]>
+                            ).map(([field, label, val]) => (
+                              <label key={field} className="flex items-center gap-2 text-[11px] text-white/60">
+                                <span className="w-14 shrink-0">{label}</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={Math.min(MAX_FADE_SECONDS, r.musicFittedSeconds ?? 0)}
+                                  step={0.1}
+                                  value={val}
+                                  onChange={(e) => handleResultFade(r, field, Number(e.target.value))}
+                                  className="flex-1 accent-[#FFD100]"
+                                  aria-label={`${r.piece.label} music ${label.toLowerCase()}, seconds`}
+                                />
+                                <span className="w-9 shrink-0 text-right text-white/80">{val.toFixed(1)}s</span>
+                              </label>
+                            ))}
+                            {r.status === 'done' && (
+                              <p className="text-[10px] text-white/35">
+                                This piece's MP4 above is already rendered — the new fades apply when you open its project and export again.
+                              </p>
+                            )}
+                          </div>
+                        )}
                         {r.posts[0] && (
                           <p className="text-[11px] text-white/45 whitespace-pre-line leading-relaxed">{r.posts[0].text}</p>
                         )}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeFadeOpacity, computeLoopedSourceTime, croppedCoverSourceRect, coverSourceRect, framingSlackPx, hasActiveFraming, interpolateTransform, pipBoxPx, resolveCropOffset, resolveCropZoom } from './compositor';
+import { computeAudioGainAtTime, computeFadeOpacity, computeLoopedSourceTime, croppedCoverSourceRect, coverSourceRect, effectiveAudioEndTime, framingSlackPx, hasActiveFraming, interpolateTransform, pipBoxPx, resolveCropOffset, resolveCropZoom } from './compositor';
 import type { Transform } from '../../types/timeline';
 
 /**
@@ -258,6 +258,107 @@ describe('R24 croppedCoverSourceRect — crop-zoom / pan geometry', () => {
     expect(framingSlackPx(1920, 1080, 500, 500, undefined, 2)).toEqual({ x: 1380, y: 540 });
     // Source aspect == box aspect at zoom 1: no slack anywhere.
     expect(framingSlackPx(1920, 1080, 1920, 1080)).toEqual({ x: 0, y: 0 });
+  });
+});
+
+/**
+ * R26 WS-A1 verification + WS-A2 render half — `computeAudioGainAtTime`
+ * is the shared gain computation both exporters use per frame (and the
+ * formula the preview's gain lines mirror). These tests prove the fade
+ * fields are honoured as gain curves: 0 at the fade boundaries, full
+ * level inside, and the Promo-style default (fadeIn 0, fadeOut 2)
+ * rendering its full 2s ramp — plus the main-track boundary clip.
+ */
+describe('R26 computeAudioGainAtTime — WS-A1 fade gain curves', () => {
+  const promoMusic = {
+    startTime: 0, endTime: 12, volume: 0.8, muted: false,
+    fade: { fadeInDuration: 0, fadeOutDuration: 2 },
+  };
+
+  it('Promo-style item (fadeIn 0, fadeOut 2): full level inside, 2s ramp at the end, 0 at the end boundary', () => {
+    expect(computeAudioGainAtTime(promoMusic, 0, null)).toBeCloseTo(0.8, 5); // no fade-in: full from the first instant
+    expect(computeAudioGainAtTime(promoMusic, 5, null)).toBeCloseTo(0.8, 5); // full level inside
+    expect(computeAudioGainAtTime(promoMusic, 10, null)).toBeCloseTo(0.8, 5); // ramp starts exactly 2s before the end
+    expect(computeAudioGainAtTime(promoMusic, 11, null)).toBeCloseTo(0.4, 5); // halfway down the 2s ramp
+    expect(computeAudioGainAtTime(promoMusic, 11.5, null)).toBeCloseTo(0.2, 5);
+    // At the item's end boundary the gain is 0 (window is half-open)…
+    expect(computeAudioGainAtTime(promoMusic, 12, null)).toBe(0);
+    // …and the underlying ramp itself reaches exactly 0 at the boundary point.
+    expect(computeFadeOpacity(promoMusic.fade, 12, 0)).toBe(0);
+  });
+
+  it('fade-in curve: 0 at the start boundary, ramping to full level at fadeInDuration', () => {
+    const item = { startTime: 2, endTime: 14, volume: 1, muted: false, fade: { fadeInDuration: 3, fadeOutDuration: 0 } };
+    expect(computeAudioGainAtTime(item, 2, null)).toBe(0);
+    expect(computeAudioGainAtTime(item, 3.5, null)).toBeCloseTo(0.5, 5);
+    expect(computeAudioGainAtTime(item, 5, null)).toBeCloseTo(1, 5);
+    expect(computeAudioGainAtTime(item, 10, null)).toBeCloseTo(1, 5);
+  });
+
+  it('no fade configured: flat volume across the whole window, 0 outside it', () => {
+    const item = { startTime: 1, endTime: 6, volume: 0.6, muted: false, fade: { fadeInDuration: 0, fadeOutDuration: 0 } };
+    expect(computeAudioGainAtTime(item, 0.5, null)).toBe(0);
+    expect(computeAudioGainAtTime(item, 1, null)).toBeCloseTo(0.6, 5);
+    expect(computeAudioGainAtTime(item, 5.999, null)).toBeCloseTo(0.6, 5);
+    expect(computeAudioGainAtTime(item, 6, null)).toBe(0);
+  });
+
+  it('muted items contribute nothing at any time', () => {
+    const item = { startTime: 0, endTime: 10, volume: 1, muted: true, fade: { fadeInDuration: 0, fadeOutDuration: 0 } };
+    expect(computeAudioGainAtTime(item, 5, null)).toBe(0);
+  });
+
+  it('with no boundary (null), the gain equals the pre-R26 formula everywhere', () => {
+    const item = { startTime: 1, endTime: 9, volume: 0.7, muted: false, fade: { fadeInDuration: 1, fadeOutDuration: 2 } };
+    for (const t of [0, 1, 1.5, 2, 5, 7, 8, 8.5, 9, 10]) {
+      const legacy = t >= item.startTime && t < item.endTime
+        ? item.volume * computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t)
+        : 0;
+      expect(computeAudioGainAtTime(item, t, null)).toBeCloseTo(legacy, 10);
+    }
+  });
+});
+
+describe('R26 computeAudioGainAtTime — WS-A2 main-track boundary clip', () => {
+  const longMusic = {
+    startTime: 0, endTime: 180, volume: 1, muted: false,
+    fade: { fadeInDuration: 0, fadeOutDuration: 2 },
+  };
+
+  it('effectiveAudioEndTime: null/non-finite boundary = no clip; a real boundary takes the min', () => {
+    expect(effectiveAudioEndTime(180, null)).toBe(180);
+    expect(effectiveAudioEndTime(180, undefined)).toBe(180);
+    expect(effectiveAudioEndTime(180, Number.NaN)).toBe(180);
+    expect(effectiveAudioEndTime(180, 12)).toBe(12);
+    expect(effectiveAudioEndTime(8, 12)).toBe(8); // boundary past the item's own end changes nothing
+  });
+
+  it('a 3-minute song under a 12s main video contributes NOTHING at or past 12s', () => {
+    expect(computeAudioGainAtTime(longMusic, 11.999, 12)).toBeGreaterThan(0);
+    expect(computeAudioGainAtTime(longMusic, 12, 12)).toBe(0);
+    expect(computeAudioGainAtTime(longMusic, 60, 12)).toBe(0);
+    expect(computeAudioGainAtTime(longMusic, 179.999, 12)).toBe(0);
+  });
+
+  it('the fade-out ramp re-anchors to the boundary: the 2s ramp lands ON 12s, not mid-ramp at 180s', () => {
+    expect(computeAudioGainAtTime(longMusic, 10, 12)).toBeCloseTo(1, 5); // ramp starts at boundary − 2s
+    expect(computeAudioGainAtTime(longMusic, 11, 12)).toBeCloseTo(0.5, 5);
+    expect(computeAudioGainAtTime(longMusic, 11.999, 12)).toBeLessThan(0.01);
+  });
+
+  it('an item entirely past the boundary is silent everywhere; an item ending before it is untouched', () => {
+    const late = { startTime: 20, endTime: 30, volume: 1, muted: false, fade: { fadeInDuration: 0, fadeOutDuration: 0 } };
+    expect(computeAudioGainAtTime(late, 25, 12)).toBe(0);
+    const early = { startTime: 0, endTime: 8, volume: 0.5, muted: false, fade: { fadeInDuration: 0, fadeOutDuration: 0 } };
+    expect(computeAudioGainAtTime(early, 4, 12)).toBeCloseTo(0.5, 5);
+    expect(computeAudioGainAtTime(early, 8, 12)).toBe(0); // its own end still applies
+  });
+
+  it('the boundary does not modify the stored item (render-time clamp only)', () => {
+    const item = { ...longMusic, fade: { ...longMusic.fade } };
+    computeAudioGainAtTime(item, 100, 12);
+    expect(item.endTime).toBe(180);
+    expect(item.fade).toEqual({ fadeInDuration: 0, fadeOutDuration: 2 });
   });
 });
 

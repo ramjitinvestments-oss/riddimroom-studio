@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Loader2, Music, Plus, Repeat, Scissors } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import type { AudioTimelineItem, MediaAsset, TimelineItem } from '../../types/timeline';
@@ -6,6 +6,9 @@ import { appendMediaToTimeline } from '../../lib/timeline/insert';
 import { getContentEndTime, loopAudioToProjectEnd, trimAudioToProjectEnd, updateItem } from '../../lib/timeline/utils';
 import { uploadMediaFile } from '../../lib/media/upload';
 import { MAX_FADE_SECONDS } from '../../lib/media/constants';
+import { computePeaks, editorWindowForStart, type SongPeaks } from '../../lib/media/songPart';
+import { hasCroppableSlack, itemTrimWindow, resolveSourceDuration } from '../../lib/timeline/trimWindow';
+import { SongPartPicker } from '../SongPartPicker';
 
 /**
  * Phase 2.3 — Music/Audio as a first-class Step 2 panel.
@@ -108,30 +111,33 @@ function AudioItemControls({ item }: { item: AudioTimelineItem }) {
       </div>
       <div className="flex items-center gap-2">
         <label className="flex flex-col gap-1 flex-1 text-xs text-white/60">
-          Fade in (s, max {maxFade.toFixed(1)})
+          Fade in ({item.fade.fadeInDuration.toFixed(1)}s, max {maxFade.toFixed(1)})
           <input
-            type="number"
+            type="range"
             min={0}
             max={maxFade}
             step={0.1}
             value={item.fade.fadeInDuration}
             onChange={(e) => patch({ fade: { fadeInDuration: Math.max(0, Math.min(Number(e.target.value), maxFade)), fadeOutDuration: item.fade.fadeOutDuration } })}
-            className="bg-white/10 rounded px-2 py-1 text-white"
+            className="w-full"
+            aria-label="Fade in, seconds"
           />
         </label>
         <label className="flex flex-col gap-1 flex-1 text-xs text-white/60">
-          Fade out (s, max {maxFade.toFixed(1)})
+          Fade out ({item.fade.fadeOutDuration.toFixed(1)}s, max {maxFade.toFixed(1)})
           <input
-            type="number"
+            type="range"
             min={0}
             max={maxFade}
             step={0.1}
             value={item.fade.fadeOutDuration}
             onChange={(e) => patch({ fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: Math.max(0, Math.min(Number(e.target.value), maxFade)) } })}
-            className="bg-white/10 rounded px-2 py-1 text-white"
+            className="w-full"
+            aria-label="Fade out, seconds"
           />
         </label>
       </div>
+      <SongPartSection item={item} />
 
       <div className="flex flex-col gap-1.5 border-t border-white/10 pt-2">
         <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Fit to project</span>
@@ -169,6 +175,50 @@ function AudioItemControls({ item }: { item: AudioTimelineItem }) {
             : 'Nothing else on the timeline to fit to yet — add video or other content first.'}
         </p>
       </div>
+    </div>
+  );
+}
+
+/**
+ * R26 (WS-A3) — song-part picker for the selected audio item: the
+ * shared picker over the source waveform, writing the SAME semantic
+ * value Promo's picker writes (start seconds into the source) into
+ * the item's trim window — `trimStart`, with `trimEnd` shifted by
+ * `editorWindowForStart` so the window length preview + export
+ * consume never changes. Hidden when there is nothing to pick (the
+ * window already covers the whole source) or the item loops (a loop
+ * has no single part).
+ */
+function SongPartSection({ item }: { item: AudioTimelineItem }) {
+  const { project, mutate } = useProject();
+  const [peaks, setPeaks] = useState<SongPeaks | null>(null);
+  const asset = project?.mediaAssets[item.mediaAssetId];
+  const sourceDuration = resolveSourceDuration(item, asset?.durationSeconds);
+  const window = itemTrimWindow(item);
+  const canPick = !!asset && !item.loop && hasCroppableSlack(item, sourceDuration);
+
+  useEffect(() => {
+    if (!canPick || !asset) return;
+    let live = true;
+    void computePeaks(asset.storageUrl, asset.id).then((p) => {
+      if (live) setPeaks(p);
+    });
+    return () => {
+      live = false;
+    };
+  }, [canPick, asset]);
+
+  if (!canPick || !asset) return null;
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-white/10 pt-2">
+      <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Which part of the song</span>
+      <SongPartPicker
+        durationSeconds={sourceDuration}
+        windowSeconds={window.length}
+        value={window.start}
+        peaks={peaks}
+        onChange={(start) => mutate((p) => updateItem(p, item.id, editorWindowForStart(item, start, sourceDuration)))}
+      />
     </div>
   );
 }

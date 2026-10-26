@@ -21,6 +21,7 @@
  */
 
 import type { MediaAssetKind } from '../../types/timeline';
+import { hashFileContent } from './fileHash';
 
 export interface ProbedMedia {
   kind: MediaAssetKind;
@@ -222,6 +223,66 @@ function probeAudio(file: Blob): Promise<Pick<ProbedMedia, 'durationSeconds'>> {
     };
     audio.src = url;
   });
+}
+
+// ---------------------------------------------------------------------------
+// WS-S1 probe cache (in-memory, keyed by sampled content hash)
+// ---------------------------------------------------------------------------
+
+/**
+ * Probing spins up a media element and waits on the browser's decoder —
+ * the slowest part of importing a file the user has already imported
+ * before. Results are cached by the file's sampled content hash
+ * (fileHash.ts), so any repeat probe of the same content in this session
+ * is free. The persistent half of the cache lives in the dedupe registry
+ * (dedupe.ts), which stores the probe result next to the asset and lets
+ * upload.ts skip probing across sessions too.
+ */
+const probeCache = new Map<string, ProbedMedia>();
+
+export function getCachedProbeResult(contentHash: string): ProbedMedia | null {
+  return probeCache.get(contentHash) ?? null;
+}
+
+export function primeProbeCache(contentHash: string, probed: ProbedMedia): void {
+  probeCache.set(contentHash, probed);
+}
+
+/** Test/maintenance helper — drops every cached probe result. */
+export function clearProbeCache(): void {
+  probeCache.clear();
+}
+
+export function probeCacheSize(): number {
+  return probeCache.size;
+}
+
+/**
+ * `probeMediaFile` with the content-hash cache in front of it. Computes
+ * the hash itself unless the caller already has it (`knownHash`, e.g.
+ * upload.ts which hashes for dedupe anyway). A hashing failure just
+ * degrades to an uncached probe — it never blocks the probe.
+ */
+export async function probeMediaFileCached(
+  file: File | Blob,
+  mimeType: string,
+  knownHash?: string | null,
+): Promise<ProbedMedia> {
+  let hash = knownHash ?? null;
+  if (!hash && typeof (file as File).size === 'number') {
+    try {
+      hash = await hashFileContent(file as File);
+    } catch {
+      hash = null;
+    }
+  }
+  if (hash) {
+    const hit = probeCache.get(hash);
+    if (hit) return hit;
+  }
+  const probed = await probeMediaFile(file, mimeType);
+  if (hash) probeCache.set(hash, probed);
+  return probed;
 }
 
 /** Probes a File/Blob's kind and intrinsic metadata. Throws if the mime type isn't image/video/audio. */

@@ -12,6 +12,9 @@ import {
   buildAvcEncoderCodecString,
   buildRawVideoProbeConfig,
   buildRawAudioProbeConfig,
+  planProjectAudioMix,
+  VIDEO_ENCODER_TUNING,
+  AUDIO_ENCODER_TUNING,
   encodeFramesToMp4,
   withStallTimeout,
   MediabunnyCapabilityError,
@@ -344,8 +347,8 @@ describe('defaultMediabunnyProber — raw WebCodecs probe of record', () => {
       bitrateMode: 'variable',
       alpha: 'discard',
       framerate: 30,
-      latencyMode: undefined,
-      hardwareAcceleration: undefined,
+      latencyMode: 'quality',
+      hardwareAcceleration: 'prefer-hardware',
       scalabilityMode: undefined,
       contentHint: undefined,
       avc: { format: 'avc' },
@@ -360,7 +363,7 @@ describe('defaultMediabunnyProber — raw WebCodecs probe of record', () => {
       numberOfChannels: 2,
       sampleRate: 48_000,
       bitrate: 192_000,
-      bitrateMode: undefined,
+      bitrateMode: 'variable',
       aac: { format: 'aac' },
     });
     expect(opusConfig).toStrictEqual({
@@ -368,7 +371,7 @@ describe('defaultMediabunnyProber — raw WebCodecs probe of record', () => {
       numberOfChannels: 2,
       sampleRate: 48_000,
       bitrate: 192_000,
-      bitrateMode: undefined,
+      bitrateMode: 'variable',
       opus: { format: 'opus' },
     });
     expect(buildRawAudioProbeConfig('aac', SETTINGS)).toStrictEqual(aacConfig);
@@ -490,6 +493,110 @@ describe('library-load failure (the round-3 phone evidence)', () => {
       vi.doUnmock('mediabunny');
       vi.resetModules();
     }
+  });
+});
+
+describe('R26 WS-S2 — encoder tuning (quality locked)', () => {
+  it('video tuning: prefer-hardware, variable bitrate, quality latency, 2s keyframes', () => {
+    expect(VIDEO_ENCODER_TUNING).toEqual({
+      hardwareAcceleration: 'prefer-hardware',
+      bitrateMode: 'variable',
+      latencyMode: 'quality',
+      keyFrameInterval: 2,
+    });
+    expect(AUDIO_ENCODER_TUNING).toEqual({ bitrateMode: 'variable' });
+  });
+
+  it('the raw probe configs carry the SAME tuning the runtime will negotiate (probe fidelity)', () => {
+    const video = buildRawVideoProbeConfig(SETTINGS);
+    expect(video.hardwareAcceleration).toBe(VIDEO_ENCODER_TUNING.hardwareAcceleration);
+    expect(video.bitrateMode).toBe(VIDEO_ENCODER_TUNING.bitrateMode);
+    expect(video.latencyMode).toBe(VIDEO_ENCODER_TUNING.latencyMode);
+    expect(buildRawAudioProbeConfig('aac', SETTINGS).bitrateMode).toBe(AUDIO_ENCODER_TUNING.bitrateMode);
+    expect(buildRawAudioProbeConfig('opus', SETTINGS).bitrateMode).toBe(AUDIO_ENCODER_TUNING.bitrateMode);
+  });
+});
+
+describe('R26 WS-A2 — planProjectAudioMix (offline mix plan, boundary-clamped)', () => {
+  const asset = (id: string) => ({
+    id, kind: 'audio' as const, fileName: `${id}.mp3`, mimeType: 'audio/mpeg',
+    storageUrl: `https://example.com/${id}.mp3`, sizeBytes: 1, durationSeconds: 180, createdAt: 1,
+  });
+  const audioItem = (id: string, startTime: number, endTime: number, extra: Record<string, unknown> = {}) => ({
+    id, type: 'audio' as const, trackId: 'audio-track', startTime, endTime, zIndex: 1, visible: true,
+    mediaAssetId: 'song', role: 'music' as const, volume: 0.9, muted: false,
+    trimStart: 0, trimEnd: 180, fade: { fadeInDuration: 0, fadeOutDuration: 2 }, ...extra,
+  });
+  const videoItem = (id: string, startTime: number, endTime: number, extra: Record<string, unknown> = {}) => ({
+    id, type: 'video' as const, trackId: 'video-track', startTime, endTime, zIndex: 0, visible: true,
+    mediaAssetId: 'clip', role: undefined, volume: 1, muted: false,
+    trimStart: 0, trimEnd: 12, speed: 1, reverse: false,
+    position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 1, ...extra,
+  });
+  const projectWith = (items: unknown[]) => ({
+    items,
+    mediaAssets: { song: asset('song'), clip: { ...asset('clip'), kind: 'video' as const } },
+  }) as unknown as Parameters<typeof planProjectAudioMix>[0];
+
+  it('clamps a long song at the main-track boundary; the stored item is not modified', () => {
+    const song = audioItem('a1', 0, 180);
+    const plan = planProjectAudioMix(projectWith([videoItem('v1', 0, 12), song]), 12);
+    const entry = plan.find((p) => p.kind === 'audio');
+    expect(entry).toBeDefined();
+    expect(entry!.startTime).toBe(0);
+    expect(entry!.endTime).toBe(12); // effective end = boundary, not the stored 180
+    expect(song.endTime).toBe(180); // render-time clamp only
+  });
+
+  it('a null boundary leaves every end untouched (pre-R26 plan)', () => {
+    const plan = planProjectAudioMix(projectWith([audioItem('a1', 0, 180)]), null);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].endTime).toBe(180);
+  });
+
+  it('an item starting at/past the boundary is absent from the plan — it can contribute nothing', () => {
+    const plan = planProjectAudioMix(
+      projectWith([audioItem('a1', 20, 40), audioItem('a2', 12, 30)]),
+      12,
+    );
+    expect(plan).toHaveLength(0);
+  });
+
+  it('video items’ embedded audio is clamped too (no audio past the main end from any source)', () => {
+    const pip = videoItem('v2', 8, 20, { mediaAssetId: 'clip' });
+    const plan = planProjectAudioMix(projectWith([pip]), 12);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].kind).toBe('video');
+    expect(plan[0].endTime).toBe(12);
+  });
+
+  it('muted / zero-volume / missing-asset items stay out of the plan, as before', () => {
+    const plan = planProjectAudioMix(
+      projectWith([
+        audioItem('a1', 0, 10, { muted: true }),
+        audioItem('a2', 0, 10, { volume: 0 }),
+        audioItem('a3', 0, 10, { mediaAssetId: 'missing' }),
+        audioItem('a4', 0, 10),
+      ]),
+      null,
+    );
+    expect(plan.map((p) => p.assetId)).toEqual(['song']);
+    expect(plan).toHaveLength(1);
+  });
+
+  it('loop-to-fill wraps inside the boundary: the plan window a looping item fills is the clamped one', () => {
+    const loopSong = audioItem('a1', 0, 180, { loop: true, trimStart: 2, trimEnd: 10 });
+    const plan = planProjectAudioMix(projectWith([loopSong]), 12);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].loop).toBe(true);
+    // The mixer fills [startTime, endTime) with trim-window passes —
+    // with the clamped window that fill ends at 12s, never past it.
+    expect(plan[0].endTime - plan[0].startTime).toBe(12);
+  });
+
+  it('fade fields ride along untouched for the gain-curve sampler (WS-A1)', () => {
+    const plan = planProjectAudioMix(projectWith([audioItem('a1', 0, 12)]), 12);
+    expect(plan[0].fade).toEqual({ fadeInDuration: 0, fadeOutDuration: 2 });
   });
 });
 

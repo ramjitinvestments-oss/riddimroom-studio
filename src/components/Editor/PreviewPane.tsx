@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { canvasFontStack, ensureFontsLoaded } from '../../lib/fonts';
 import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
-import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
+import { getItemsAtTime, getItemsByTrackType, getMainTrackEnd, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
 import { useProject } from '../../context/ProjectContext';
 
 /**
@@ -245,6 +245,13 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         return;
       }
 
+      // R26 WS-A2: the main-track boundary for this frame — audio gains
+      // below anchor their fade-out to it via `effectiveAudioEndTime`, the
+      // same computation both exporters use (`computeAudioGainAtTime`), so
+      // a boundary-clipped item fades out ON the boundary in preview
+      // exactly as it does in the exported file. Null = no main track =
+      // no clipping (pre-R26 behaviour).
+      const mainTrackEnd = getMainTrackEnd(proj);
       const videoItems = getItemsByTrackType(proj, 'video').filter((i) => i.type === 'video');
       let t = currentTimeRef.current;
       const active = videoItems.find((i) => t >= i.startTime && t < i.endTime) as
@@ -304,7 +311,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // clip's fade-in/fade-out (set via the shared Timing/fade block
           // in ItemInspector) visibly faded its picture but silently had NO
           // effect on its own audio in the live preview.
-          const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, active.endTime - t);
+          const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, effectiveAudioEndTime(active.endTime, mainTrackEnd) - t);
           videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul * masterVolumeRef.current));
 
           if (isPlayingRef.current) {
@@ -360,7 +367,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         if (!asset) return;
         activeAudioItemIds.add(item.id);
         const audioEl = getAudioEl(asset.id, asset.storageUrl);
-        const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+        const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, mainTrackEnd) - t);
         audioEl.muted = item.muted;
         audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
         // Looping items (tweaks round): the target wraps inside the trim
@@ -459,7 +466,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
               try { el.currentTime = target; } catch { /* ignore */ }
             }
           }
-          const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
+          const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, mainTrackEnd) - t);
           el.muted = item.muted;
           el.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
         }

@@ -2,7 +2,8 @@ import React, { useCallback, useRef, useState } from 'react';
 import { AudioLines, Camera, Clapperboard, PictureInPicture2 } from 'lucide-react';
 import { validateMediaFile } from '../../lib/media/validate';
 import { uploadMediaFile, type UploadProgressEvent } from '../../lib/media/upload';
-import { probeMediaFile, mediaKindForMimeType } from '../../lib/media/probe';
+import { probeMediaFileCached, mediaKindForMimeType } from '../../lib/media/probe';
+import { createImportQueue, MAX_CONCURRENT_UPLOADS, type ImportQueue } from '../../lib/media/importQueue';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import { generateTimelineId } from '../../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
@@ -30,6 +31,12 @@ import { TrimSelectModal } from './TrimSelectModal';
  * Camera recordings skip this modal entirely (the camera already
  * auto-stops at the limit) but still get defensively clamped in case of a
  * few hundred ms of stop-latency overshoot.
+ *
+ * WS-S1 (upload speed): uploads run through a bounded import queue
+ * (lib/media/importQueue.ts, max 3 concurrent), and `uploadMediaFile`
+ * dedupes by sampled content hash against the per-user registry
+ * (lib/media/dedupe.ts) — picking a file that was already imported
+ * resolves instantly to the existing asset with no re-upload.
  */
 
 interface PendingUpload {
@@ -104,17 +111,29 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   const audioInputRef = useRef<HTMLInputElement>(null);
   const assetIdByUploadId = useRef<Map<string, string>>(new Map());
   const uploadMetaByUploadId = useRef<Map<string, UploadMeta>>(new Map());
+  // WS-S1 — uploads run through a bounded queue (at most
+  // MAX_CONCURRENT_UPLOADS resumable uploads in flight at once) instead
+  // of every picked file starting its upload immediately. Per-file
+  // progress / error / retry semantics are unchanged: a queued file
+  // simply reports progress once its slot opens, and one file's failure
+  // settles only its own promise.
+  const importQueueRef = useRef<ImportQueue | null>(null);
+  if (!importQueueRef.current) {
+    importQueueRef.current = createImportQueue(MAX_CONCURRENT_UPLOADS);
+  }
 
   const runUpload = useCallback(
     (uploadId: string, file: File, assetId: string) => {
-      uploadMediaFile({
-        uid,
-        file,
-        assetId,
-        onProgress: (evt: UploadProgressEvent) => {
-          setPending((list) => list.map((u) => (u.id === uploadId ? { ...u, progress: evt.fraction } : u)));
-        },
-      })
+      importQueueRef.current!.enqueue(() =>
+        uploadMediaFile({
+          uid,
+          file,
+          assetId,
+          onProgress: (evt: UploadProgressEvent) => {
+            setPending((list) => list.map((u) => (u.id === uploadId ? { ...u, progress: evt.fraction } : u)));
+          },
+        }),
+      )
         .then(({ asset }) => {
           setPending((list) => list.map((u) => (u.id === uploadId ? { ...u, status: 'done', progress: 1 } : u)));
           const meta = uploadMetaByUploadId.current.get(uploadId);
@@ -219,7 +238,10 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         startUpload(file, { purpose });
         return;
       }
-      probeMediaFile(file, mimeType)
+      // WS-S1 — the cached probe: this result is stored under the file's
+      // content hash, so `uploadMediaFile`'s own probe of the same file
+      // resolves from the cache instead of probing the file a second time.
+      probeMediaFileCached(file, mimeType)
         .then((probed) => {
           const dur = probed.durationSeconds;
           if (typeof dur === 'number' && Number.isFinite(dur) && dur > MAX_MEDIA_SECONDS + 0.25) {

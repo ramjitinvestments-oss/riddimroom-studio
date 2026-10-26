@@ -9,6 +9,8 @@ import {
   trimItemEnd,
   setItemDuration,
   getProjectDuration,
+  getMainTrackEnd,
+  getMaxItemEnd,
   projectDurationExceedsLimit,
   applyTransition,
   getBoundaryTransition,
@@ -24,7 +26,7 @@ import {
 } from './utils';
 import { serializeProject, parseProject } from './serialization';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
-import type { AudioTimelineItem, ImageTimelineItem, MediaAsset, Project, VideoTimelineItem } from '../../types/timeline';
+import type { AudioTimelineItem, ImageTimelineItem, MediaAsset, Project, TextTimelineItem, VideoTimelineItem } from '../../types/timeline';
 
 /**
  * v1 cap tests — MAX_MEDIA_SECONDS (600s / 10 min) replaces the old
@@ -129,6 +131,158 @@ describe('project-level guard (projectDurationExceedsLimit)', () => {
     project = addItem(project, makeItem({ trackId: track.id, startTime: MAX_MEDIA_SECONDS, endTime: MAX_MEDIA_SECONDS + 10, zIndex: 1 }));
     expect(getProjectDuration(project)).toBeCloseTo(MAX_MEDIA_SECONDS + 10, 5);
     expect(projectDurationExceedsLimit(project)).toBe(true);
+  });
+});
+
+describe('main-track duration semantics (R26 WS-A2: getMainTrackEnd / getProjectDuration)', () => {
+  function makeVideo(overrides: Partial<VideoTimelineItem> & { trackId: string }): VideoTimelineItem {
+    return {
+      id: generateTimelineId('item'),
+      type: 'video',
+      startTime: 0,
+      endTime: 12,
+      zIndex: 0,
+      visible: true,
+      mediaAssetId: 'video-asset',
+      position: { x: 50, y: 50 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      trimStart: 0,
+      trimEnd: 12,
+      speed: 1,
+      reverse: false,
+      volume: 1,
+      muted: false,
+      ...overrides,
+    };
+  }
+
+  function makeAudio(overrides: Partial<AudioTimelineItem> & { trackId: string }): AudioTimelineItem {
+    return {
+      id: generateTimelineId('item'),
+      type: 'audio',
+      startTime: 0,
+      endTime: 180,
+      zIndex: 1,
+      visible: true,
+      mediaAssetId: 'audio-asset',
+      role: 'music',
+      volume: 1,
+      muted: false,
+      trimStart: 0,
+      trimEnd: 180,
+      fade: { fadeInDuration: 0, fadeOutDuration: 0 },
+      ...overrides,
+    };
+  }
+
+  function makeText(overrides: Partial<TextTimelineItem> & { trackId: string }): TextTimelineItem {
+    return {
+      id: generateTimelineId('item'),
+      type: 'text',
+      startTime: 0,
+      endTime: 7,
+      zIndex: 0,
+      visible: true,
+      text: 'Hello',
+      role: 'title',
+      font: 'Arial',
+      fontSize: 48,
+      color: '#ffffff',
+      position: { x: 50, y: 20 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      ...overrides,
+    };
+  }
+
+  function projectWithTracks(): { project: Project; ids: Record<string, string> } {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const ids: Record<string, string> = {};
+    (['video', 'image', 'text', 'caption', 'audio'] as const).forEach((type, i) => {
+      const track = createTrack(type, type, i);
+      ids[type] = track.id;
+      project = addTrack(project, track);
+    });
+    return { project, ids };
+  }
+
+  it('(a) video main 12s + 180s song → main end and project duration are 12, max-end stays 180', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    project = addItem(project, makeAudio({ trackId: ids.audio, startTime: 0, endTime: 180 }));
+    expect(getMainTrackEnd(project)).toBe(12);
+    expect(getProjectDuration(project)).toBe(12);
+    // The explicit max-end helper still reports the full extent for
+    // consumers that need it (timeline extent, Fit-to-project).
+    expect(getMaxItemEnd(project)).toBe(180);
+    // Consumer regression (ProjectContext guard / licensing-style limit):
+    // the long song no longer makes the project exceed a 30s limit.
+    expect(projectDurationExceedsLimit(project, 30)).toBe(false);
+  });
+
+  it('(b) image-only main track: a photo on the image track defines duration over a long song', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeItem({ trackId: ids.image, startTime: 0, endTime: 8, role: 'photo' }));
+    project = addItem(project, makeAudio({ trackId: ids.audio, startTime: 0, endTime: 180 }));
+    expect(getMainTrackEnd(project)).toBe(8);
+    expect(getProjectDuration(project)).toBe(8);
+  });
+
+  it('(b2) main content spans both primary tracks: video 0–12 followed by a photo 12–20 ends at 20', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    project = addItem(project, makeItem({ trackId: ids.image, startTime: 12, endTime: 20, role: 'photo' }));
+    expect(getMainTrackEnd(project)).toBe(20);
+    expect(getProjectDuration(project)).toBe(20);
+  });
+
+  it('(b3) non-main visuals do not extend the main end: PiP video, watermark and graphic stage art rules', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    // PiP overlay video running long is an overlay, not the main video.
+    project = addItem(project, makeVideo({ trackId: ids.video, startTime: 0, endTime: 30, pip: { isPip: true, shape: 'circle', borderWidth: 0, borderColor: '#000000', shadow: false } }));
+    // A watermark image running long is decoration, not main content.
+    project = addItem(project, makeItem({ trackId: ids.image, startTime: 0, endTime: 50, role: 'watermark' }));
+    expect(getMainTrackEnd(project)).toBe(12);
+    expect(getProjectDuration(project)).toBe(12);
+    // Promo stage artwork (role 'graphic', the recipes' main images) IS main content.
+    project = addItem(project, makeItem({ trackId: ids.image, startTime: 0, endTime: 15, role: 'graphic' }));
+    expect(getMainTrackEnd(project)).toBe(15);
+  });
+
+  it('(c) audio-only project → no main end, old max-end rule unchanged', () => {
+    const { project: base, ids } = projectWithTracks();
+    const project = addItem(base, makeAudio({ trackId: ids.audio, startTime: 0, endTime: 180 }));
+    expect(getMainTrackEnd(project)).toBeNull();
+    expect(getProjectDuration(project)).toBe(180);
+    expect(getMaxItemEnd(project)).toBe(180);
+  });
+
+  it('(d) text-only project → no main end, old max-end rule unchanged', () => {
+    const { project: base, ids } = projectWithTracks();
+    const project = addItem(base, makeText({ trackId: ids.text, startTime: 0, endTime: 7 }));
+    expect(getMainTrackEnd(project)).toBeNull();
+    expect(getProjectDuration(project)).toBe(7);
+  });
+
+  it('(e) empty project → main end null, duration 0', () => {
+    const { project } = projectWithTracks();
+    expect(getMainTrackEnd(project)).toBeNull();
+    expect(getProjectDuration(project)).toBe(0);
+    expect(getMaxItemEnd(project)).toBe(0);
+    expect(getMainTrackEnd(createEmptyProject({ ownerUid: 'test-uid' }))).toBeNull();
+  });
+
+  it('(f) a main item on a missing/mismatched track does not count — duration falls back to max-end', () => {
+    const { project: base, ids } = projectWithTracks();
+    // Video item pointing at the audio track (invalid placement): not on a
+    // primary visual track, so no main end; the fallback keeps its span.
+    const project = addItem(base, makeVideo({ trackId: ids.audio, startTime: 0, endTime: 12 }));
+    expect(getMainTrackEnd(project)).toBeNull();
+    expect(getProjectDuration(project)).toBe(12);
   });
 });
 

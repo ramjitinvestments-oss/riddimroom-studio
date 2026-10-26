@@ -11,6 +11,17 @@
  * progress and pause/resume/cancel are available to the UI, and so a
  * network blip mid-upload surfaces as a retryable `state_changed` error
  * rather than an opaque failed promise.
+ *
+ * WS-S1 (upload speed): before any bytes move, the file's sampled content
+ * hash (fileHash.ts) is checked against the per-user dedupe registry
+ * (dedupe.ts). A hit resolves to the EXISTING asset/storage object with
+ * no re-upload and no re-probe — instantly, across sessions. A miss
+ * uploads exactly as before and records the new asset + its probe result
+ * in the registry, and the probe itself goes through the hash-keyed
+ * probe cache (probe.ts) so the panel's pre-upload probe and this
+ * function's probe never both pay for the same content twice. Hashing,
+ * registry, and cache are all fail-soft: any failure degrades to the
+ * plain pre-WS-S1 upload path, never to a blocked import.
  */
 
 import {
@@ -22,7 +33,9 @@ import {
 import { storage } from '../firebase';
 import { generateTimelineId } from '../timeline/utils';
 import type { MediaAsset, MediaAssetKind } from '../../types/timeline';
-import { probeMediaFile, mediaKindForMimeType } from './probe';
+import { probeMediaFileCached, primeProbeCache, mediaKindForMimeType, type ProbedMedia } from './probe';
+import { hashFileContent } from './fileHash';
+import { lookupDedupedEntry, getCachedProbe, recordDedupedEntry, assetFromDedupeEntry } from './dedupe';
 
 export interface UploadProgressEvent {
   bytesTransferred: number;
@@ -41,6 +54,10 @@ export interface UploadMediaOptions {
 export interface UploadMediaResult {
   asset: MediaAsset;
   storagePath: string;
+  /** WS-S1 — true when the result resolved to an existing asset via the dedupe registry (no bytes were uploaded). */
+  deduped?: boolean;
+  /** WS-S1 — the file's sampled content hash, when hashing succeeded. */
+  contentHash?: string;
 }
 
 function sanitizeFileName(name: string): string {
@@ -48,14 +65,79 @@ function sanitizeFileName(name: string): string {
 }
 
 /**
- * Uploads one file end to end: probe metadata -> upload bytes with progress
- * -> resolve a download URL -> build the `MediaAsset` the timeline
- * foundation expects. Does not touch React or Firestore/Project state —
- * callers (MediaImportPanel, ProjectContext) decide what to do with the
- * resulting MediaAsset. Kept as a single async function (not a class) so a
+ * In-flight uploads keyed by `{uid}:{contentHash}` — two imports of the
+ * same content started in the same batch (e.g. the same file picked for
+ * the main track and again as an overlay) join ONE upload instead of
+ * racing two uploads of identical bytes to two storage objects.
+ */
+const inFlightUploads = new Map<string, Promise<UploadMediaResult>>();
+
+/**
+ * Uploads one file end to end: WS-S1 hash + dedupe check -> probe metadata
+ * -> upload bytes with progress -> resolve a download URL -> build the
+ * `MediaAsset` the timeline foundation expects -> record in the dedupe
+ * registry. Does not touch React or Firestore/Project state — callers
+ * (MediaImportPanel, ProjectContext) decide what to do with the resulting
+ * MediaAsset. Kept as a single async function (not a class) so a
  * caller-driven retry is just "call this again with the same assetId".
  */
 export async function uploadMediaFile(options: UploadMediaOptions): Promise<UploadMediaResult> {
+  const { uid, file, onProgress } = options;
+
+  // WS-S1 step 1 — sampled content hash. Fail-soft: if hashing is
+  // unavailable for any reason the import proceeds exactly as it did
+  // before WS-S1, just without dedupe.
+  let contentHash: string | null = null;
+  try {
+    contentHash = await hashFileContent(file);
+  } catch {
+    contentHash = null;
+  }
+
+  if (contentHash) {
+    // WS-S1 step 2 — dedupe. A registry hit resolves to the EXISTING
+    // asset/storage object: no upload, no probe. (A corrupt or stale
+    // index degrades to a miss inside dedupe.ts, never to an error here.)
+    const existing = lookupDedupedEntry(uid, contentHash);
+    if (existing) {
+      primeProbeCache(contentHash, existing.probe);
+      if (onProgress) {
+        onProgress({ bytesTransferred: file.size, totalBytes: file.size, fraction: 1 });
+      }
+      return { asset: assetFromDedupeEntry(existing), storagePath: existing.storagePath, deduped: true, contentHash };
+    }
+
+    // Same content already uploading in this session — join that upload
+    // instead of starting a duplicate. If it fails, fall through and run
+    // this call's own upload (per-file error/retry semantics preserved).
+    const flightKey = `${uid}:${contentHash}`;
+    const inFlight = inFlightUploads.get(flightKey);
+    if (inFlight) {
+      try {
+        const joined = await inFlight;
+        if (onProgress) {
+          onProgress({ bytesTransferred: file.size, totalBytes: file.size, fraction: 1 });
+        }
+        return { ...joined, deduped: true, contentHash };
+      } catch {
+        /* the joined upload failed — run our own below */
+      }
+    }
+
+    const own = performUpload(options, contentHash);
+    inFlightUploads.set(flightKey, own);
+    try {
+      return await own;
+    } finally {
+      if (inFlightUploads.get(flightKey) === own) inFlightUploads.delete(flightKey);
+    }
+  }
+
+  return performUpload(options, null);
+}
+
+/** The pre-WS-S1 upload path, plus registry recording + probe-cache plumbing. */
+async function performUpload(options: UploadMediaOptions, contentHash: string | null): Promise<UploadMediaResult> {
   const { uid, file, onProgress } = options;
   const assetId = options.assetId ?? generateTimelineId('asset');
   const mimeType = file.type || 'application/octet-stream';
@@ -68,13 +150,23 @@ export async function uploadMediaFile(options: UploadMediaOptions): Promise<Uplo
   // into Storage and onto the timeline. Fall back to safe unknown-duration
   // defaults (appendMediaToTimeline already treats a missing duration as
   // 5s) rather than aborting the whole upload.
-  let probed: Awaited<ReturnType<typeof probeMediaFile>>;
-  try {
-    probed = await probeMediaFile(file, mimeType);
-  } catch (err) {
-    const kind = mediaKindForMimeType(mimeType);
-    if (!kind) throw err; // genuinely unsupported type — still a real, fatal error
-    probed = { kind, durationSeconds: undefined, width: undefined, height: undefined };
+  //
+  // WS-S1: the probe goes through the hash-keyed caches first — the
+  // persistent registry's stored probe result (cross-session), then the
+  // in-memory probe cache (which the panel's pre-upload trim-gate probe
+  // already warmed for this exact content).
+  let probed: ProbedMedia;
+  const cachedProbe = contentHash ? getCachedProbe(uid, contentHash) : null;
+  if (cachedProbe) {
+    probed = cachedProbe;
+  } else {
+    try {
+      probed = await probeMediaFileCached(file, mimeType, contentHash);
+    } catch (err) {
+      const kind = mediaKindForMimeType(mimeType);
+      if (!kind) throw err; // genuinely unsupported type — still a real, fatal error
+      probed = { kind, durationSeconds: undefined, width: undefined, height: undefined };
+    }
   }
 
   const storagePath = `users/${uid}/media/${assetId}/${sanitizeFileName(file.name)}`;
@@ -123,5 +215,23 @@ export async function uploadMediaFile(options: UploadMediaOptions): Promise<Uplo
     createdAt: Date.now(),
   };
 
-  return { asset, storagePath };
+  // WS-S1 step 3 — record the completed import so the next import of this
+  // content (this session or any later one) dedupes against it, probe
+  // result included. Fail-soft inside recordDedupedEntry by design.
+  if (contentHash) {
+    primeProbeCache(contentHash, probed);
+    recordDedupedEntry(uid, contentHash, {
+      assetId,
+      storagePath,
+      downloadUrl,
+      fileName: file.name,
+      sizeBytes: file.size,
+      mimeType,
+      probe: probed,
+      createdAt: asset.createdAt,
+      importedAt: Date.now(),
+    });
+  }
+
+  return { asset, storagePath, deduped: false, ...(contentHash ? { contentHash } : {}) };
 }

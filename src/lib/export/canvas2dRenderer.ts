@@ -23,8 +23,8 @@
  */
 
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
-import { computeFadeOpacity, computeLoopedSourceTime, drawFrame } from './../render/compositor';
+import { getItemsAtTime, getMainTrackEnd, getProjectDuration } from '../timeline/utils';
+import { computeAudioGainAtTime, computeLoopedSourceTime, drawFrame } from './../render/compositor';
 import type { Renderer, RenderOptions, RenderResult } from './renderer';
 import { RenderAbortedError } from './renderer';
 
@@ -50,6 +50,12 @@ export class Canvas2DRenderer implements Renderer {
     if (totalSeconds <= 0) {
       throw new Error('This project has no timeline items to export.');
     }
+    // R26 WS-A2: the main visual track's end is the audio boundary for
+    // the whole export — every gain below is computed through
+    // `computeAudioGainAtTime`, which contributes exactly 0 at/past it
+    // (null = no visual main track = no clipping, pre-R26 behaviour).
+    // Render-time clamp only: stored items are never modified.
+    const mainTrackEnd = getMainTrackEnd(project);
 
     // Export-quality output size (Phase 2.1): defaults to the project's
     // own canvas dimensions exactly as before. When the picker asked for a
@@ -307,8 +313,11 @@ export class Canvas2DRenderer implements Renderer {
             try { (handle.element as HTMLVideoElement).currentTime = targetTime; } catch { /* not seekable yet */ }
           }
           handle.element.play().catch(() => {});
-          const videoFadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
-          handle.gain.gain.value = item.muted ? 0 : item.volume * videoFadeMul;
+          // The item's own fade (WS-A1) and the main-track boundary
+          // (WS-A2) both live in the shared gain helper — the embedded
+          // audio of a clip that overhangs the main end contributes
+          // nothing past the boundary, same as a standalone audio item.
+          handle.gain.gain.value = computeAudioGainAtTime(item, t, mainTrackEnd);
           videosMap.set(asset.id, handle.element as HTMLVideoElement);
           if (!frameActiveVideo) frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
         }
@@ -360,9 +369,13 @@ export class Canvas2DRenderer implements Renderer {
           // anywhere (found during the full-app audio audit alongside
           // exposing it in the inspector for the first time); reuses the
           // exact same ramp `drawFrame` applies to visual opacity so an
-          // audio fade and a video/image fade behave identically.
-          const audioFadeMul = computeFadeOpacity(item.fade, t - item.startTime, item.endTime - t);
-          handle.gain.gain.value = item.muted ? 0 : item.volume * audioFadeMul;
+          // audio fade and a video/image fade behave identically. R26:
+          // the shared helper also clamps the audible window at the
+          // main-track boundary (WS-A2) — a looping item keeps wrapping
+          // inside its trim window below, but its gain is exactly 0
+          // at/past the boundary, so the fill never sounds past the
+          // main end.
+          handle.gain.gain.value = computeAudioGainAtTime(item, t, mainTrackEnd);
         });
         videoHandles.forEach((h, key) => {
           if (key.startsWith('audio:')) {

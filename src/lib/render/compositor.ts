@@ -510,6 +510,65 @@ export function computeLoopedSourceTime(trimStart: number, trimEnd: number, elap
 }
 
 // ---------------------------------------------------------------------------
+// R26 WS-A2 — audio clipped at the main track's end, at RENDER time only
+//
+// `getMainTrackEnd(project)` (lib/timeline/utils.ts) returns the end of
+// the primary visual track, or null when the project has no visual main
+// track. Every render path — live preview gain computation and both
+// exporters — must let an audio-carrying item contribute NOTHING at or
+// past that boundary, without ever modifying the stored item (the
+// timeline keeps showing the item's true length; only its audible
+// window is clamped here). A null (or non-finite) boundary means "no
+// main track" → no clipping, exactly the pre-R26 behaviour.
+// ---------------------------------------------------------------------------
+
+/**
+ * The audible end of an item under the WS-A2 main-track boundary: the
+ * item's own end, pulled back to the boundary when one exists. Never
+ * moves the end later, never touches stored state.
+ */
+export function effectiveAudioEndTime(endTime: number, mainTrackEnd: number | null | undefined): number {
+  if (mainTrackEnd === null || mainTrackEnd === undefined || !Number.isFinite(mainTrackEnd)) return endTime;
+  return Math.min(endTime, mainTrackEnd);
+}
+
+/**
+ * The ONE audio-gain computation every render path shares (R26 WS-A1 +
+ * WS-A2): an item's audible level at timeline time `timeSeconds` —
+ * 0 when muted, 0 outside its audible window `[startTime,
+ * effectiveEnd)`, and inside the window `volume × computeFadeOpacity`
+ * with the fade ramps anchored to the EFFECTIVE end. Anchoring to the
+ * effective end is what makes the two workstreams compose: when the
+ * main-track boundary clips an item, its fade-out ramp lands ON the
+ * boundary (the audible fitted end) instead of being cut off mid-ramp
+ * by a hard mute. With no boundary (null) or a boundary at/past the
+ * item's own end this is exactly the pre-R26 gain formula
+ * (`muted ? 0 : volume * computeFadeOpacity(fade, t - start, end - t)`)
+ * every path already used, so nothing changes for unclipped items.
+ *
+ * Used by both exporters; the live preview's per-frame gain lines in
+ * PreviewPane compute the identical factor as
+ * `computeFadeOpacity(fade, t - start, effectiveAudioEndTime(end, main) - t)`
+ * with the boundary from `getMainTrackEnd`, so preview and export agree.
+ */
+export function computeAudioGainAtTime(
+  item: {
+    startTime: number;
+    endTime: number;
+    volume: number;
+    muted?: boolean;
+    fade?: { fadeInDuration: number; fadeOutDuration: number };
+  },
+  timeSeconds: number,
+  mainTrackEnd: number | null | undefined,
+): number {
+  if (item.muted) return 0;
+  const end = effectiveAudioEndTime(item.endTime, mainTrackEnd);
+  if (!(timeSeconds >= item.startTime && timeSeconds < end)) return 0;
+  return item.volume * computeFadeOpacity(item.fade, timeSeconds - item.startTime, end - timeSeconds);
+}
+
+// ---------------------------------------------------------------------------
 // Motion/zoom effects (Ken Burns family) — "final production fix" spec item
 // 8. Deliberately separate from `computeEntranceExit`: these run
 // CONTINUOUSLY across an item's entire on-screen duration (as a function of
@@ -1685,6 +1744,202 @@ function hexWithAlpha(color: string, alpha: number): string {
   return color;
 }
 
+// ---------------------------------------------------------------------------
+// R26 WS-S2 — static-layer cache (render speed, quality locked)
+//
+// drawFrame profiling (code-level, R26): the per-frame cost is the sum
+// of every active item's full draw — `applyTransformedDraw` state
+// save/restore, filter string construction, transform math, and the
+// `drawImage` itself — repeated identically for any item whose pixels
+// cannot change between frames. The classes that redraw byte-identical
+// output every frame are: still `image` items with no motion effect,
+// no entrance/exit animation and no fade (poster art, logos, stickers,
+// stage backdrops, a held photo) — their adjustment is the identity for
+// their entire span, so frame N and frame N+500 run the exact same op
+// stream. Everything else genuinely changes per frame and stays
+// uncached: video items (the source element's current frame is a live
+// decode, never provably constant — even under an identity motion the
+// PICTURE moves), text/caption items (kinetic reveal, word pop, and
+// the R22 text-guard may shift a box frame to frame), and any image
+// carrying motion/animation/fade/endTransform/a color grade.
+//
+// The cache renders an eligible image item ONCE — through the very
+// same `drawImageItem` code path, at full canvas size — into an
+// offscreen canvas, and composites it thereafter with a single
+// `drawImage(canvas, 0, 0)`. Pixel-identity argument: the offscreen
+// render runs identical draw calls with identical arguments at
+// identical size; eligibility additionally requires opacity exactly 1
+// and no filter/overlay/mask (identity adjustment, no color grade), so
+// compositing is a plain source-over of the cached raster at the
+// identity transform — the same result as drawing the item directly.
+// Anything outside that proof stays uncached (see
+// `isStaticLayerCacheEligible` for the per-class exclusions).
+//
+// Entries live in a WeakMap keyed by the project OBJECT: the editor's
+// immutable updates replace the project on every edit, which drops the
+// whole cache automatically, and each entry is also keyed by a
+// signature of every item field that affects its pixels (plus the
+// source image's identity/dimensions), so a same-object mutation that
+// changes any of them re-renders instead of serving a stale layer.
+// ---------------------------------------------------------------------------
+
+/** A canvas the static-layer cache can render into (real canvas or a test fake). */
+export interface StaticLayerCanvas {
+  canvas: HTMLCanvasElement | OffscreenCanvas;
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+}
+
+type StaticLayerCanvasFactory = (width: number, height: number) => StaticLayerCanvas | null;
+
+let staticLayerCacheEnabled = true;
+let staticLayerCanvasFactoryOverride: StaticLayerCanvasFactory | null = null;
+
+/** Test/diagnostic switch: turn the static-layer cache off to render every layer directly (the frame-hash gate compares the two modes). */
+export function setStaticLayerCacheEnabled(enabled: boolean): void {
+  staticLayerCacheEnabled = enabled;
+}
+
+/** Test seam: inject the offscreen-canvas factory (the test env has no DOM canvas). Pass null to restore the platform default. */
+export function setStaticLayerCanvasFactory(factory: StaticLayerCanvasFactory | null): void {
+  staticLayerCanvasFactoryOverride = factory;
+}
+
+function defaultStaticLayerCanvas(width: number, height: number): StaticLayerCanvas | null {
+  try {
+    if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      return ctx ? { canvas, ctx } : null;
+    }
+    if (typeof OffscreenCanvas !== 'undefined') {
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d');
+      return ctx ? { canvas, ctx } : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Conservative eligibility for the static-layer cache — an image item
+ * qualifies ONLY when its rendered pixels are provably identical at
+ * every instant of its span:
+ * - no `endTransform` (its transform interpolates across the span);
+ * - no motion effect (`motion` absent or type 'none') — excludes
+ *   Ken Burns / tours / parallax / a held tour stop alike: tour stops
+ *   and homecoming blends are still time functions, and "held" is a
+ *   property of one instant, not the span;
+ * - no entrance/exit animation (absent, or both presets 'none') and no
+ *   fade (absent, or both durations 0) — the combined adjustment must
+ *   be the identity for the WHOLE span, not just the current frame;
+ * - opacity exactly 1 — a translucent layer composited through an
+ *   intermediate raster can round differently than a direct draw, so
+ *   it stays uncached (this excludes most watermark/logo items);
+ * - no color grade — the grade is a `ctx.filter` string applied at
+ *   draw time; filtered rasterization is excluded rather than assumed
+ *   identical through the intermediate canvas.
+ * Static transforms (position/scale/rotation), crop windows and R24
+ * framing/flip ARE eligible: they are constants of the item, rendered
+ * by the same `drawImageItem` call into the cache canvas.
+ */
+export function isStaticLayerCacheEligible(item: ImageTimelineItem): boolean {
+  if (item.endTransform) return false;
+  if (item.motion && item.motion.type !== 'none') return false;
+  const animation = item.animation;
+  if (
+    animation &&
+    ((animation.entrance && animation.entrance !== 'none') || (animation.exit && animation.exit !== 'none'))
+  ) {
+    return false;
+  }
+  if (item.fade && (item.fade.fadeInDuration > 0 || item.fade.fadeOutDuration > 0)) return false;
+  if (item.opacity !== 1) return false;
+  if (item.colorGrade && colorGradeToFilter(item.colorGrade)) return false;
+  return true;
+}
+
+/** Every item field that can change the item's rendered pixels, plus the source image's identity/dimensions and the canvas size. */
+function staticLayerSignature(item: ImageTimelineItem, img: HTMLImageElement, canvasWidth: number, canvasHeight: number): string {
+  return JSON.stringify([
+    item.mediaAssetId,
+    img.naturalWidth,
+    img.naturalHeight,
+    canvasWidth,
+    canvasHeight,
+    item.position.x,
+    item.position.y,
+    item.scale,
+    item.rotation,
+    item.opacity,
+    item.crop ?? null,
+    item.flipX === true,
+    item.cropZoom ?? null,
+    item.cropOffsetX ?? null,
+    item.cropOffsetY ?? null,
+  ]);
+}
+
+interface StaticLayerEntry {
+  signature: string;
+  img: HTMLImageElement;
+  canvas: HTMLCanvasElement | OffscreenCanvas;
+  /** Cache generation at render time; `clearStaticLayerCache` invalidates by bumping the generation. */
+  generation: number;
+}
+
+/** Bounds cache memory: at most this many full-canvas layers per project; further eligible items simply draw directly. */
+const MAX_STATIC_LAYER_ENTRIES = 8;
+
+const staticLayerCaches = new WeakMap<Project, Map<string, StaticLayerEntry>>();
+let staticLayerGeneration = 0;
+
+/** Drops every cached layer (all projects) — the next frame re-renders each eligible item once. */
+export function clearStaticLayerCache(): void {
+  staticLayerGeneration += 1;
+}
+
+/**
+ * Draws `item` through the static-layer cache when eligible. Returns
+ * true when the item was drawn (from cache or a fresh cache render);
+ * false when the caller must draw it directly (ineligible, cache
+ * disabled, at capacity, or no canvas factory available in this
+ * environment — the honest fallback is the direct draw, never a skip).
+ */
+function drawImageItemCached(
+  ctx: CanvasRenderingContext2D,
+  project: Project,
+  item: ImageTimelineItem,
+  img: HTMLImageElement,
+  canvasWidth: number,
+  canvasHeight: number,
+  timeSeconds: number,
+): boolean {
+  if (!staticLayerCacheEnabled) return false;
+  if (!isStaticLayerCacheEligible(item)) return false;
+  let perProject = staticLayerCaches.get(project);
+  if (!perProject) {
+    perProject = new Map();
+    staticLayerCaches.set(project, perProject);
+  }
+  const signature = staticLayerSignature(item, img, canvasWidth, canvasHeight);
+  const existing = perProject.get(item.id);
+  if (existing && existing.generation === staticLayerGeneration && existing.signature === signature && existing.img === img) {
+    ctx.drawImage(existing.canvas, 0, 0);
+    return true;
+  }
+  if (!existing && perProject.size >= MAX_STATIC_LAYER_ENTRIES) return false;
+  const layer = (staticLayerCanvasFactoryOverride ?? defaultStaticLayerCanvas)(canvasWidth, canvasHeight);
+  if (!layer) return false;
+  drawImageItem(layer.ctx as CanvasRenderingContext2D, item, img, canvasWidth, canvasHeight, timeSeconds);
+  perProject.set(item.id, { signature, img, canvas: layer.canvas, generation: staticLayerGeneration });
+  ctx.drawImage(layer.canvas, 0, 0);
+  return true;
+}
+
 /** Draws one composited frame for `project` at `timeSeconds` into `ctx`. Clears and fills black first. */
 export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeSeconds: number, assets: FrameAssets): void {
   const { canvasWidth, canvasHeight } = project;
@@ -1736,7 +1991,14 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
         // fetch/CORS-rejected/still-loading) — see its doc comment above.
         // This is a render-loop safety net, not a fix for *why* an image
         // might fail to load (e.g. missing Storage CORS config).
-        if (img && isImageReady(img)) drawImageItem(ctx, item, img, canvasWidth, canvasHeight, timeSeconds);
+        // R26 WS-S2: provably-static images go through the static-layer
+        // cache (rendered once, composited thereafter); everything else
+        // draws directly, exactly as before.
+        if (img && isImageReady(img)) {
+          if (!drawImageItemCached(ctx, project, item, img, canvasWidth, canvasHeight, timeSeconds)) {
+            drawImageItem(ctx, item, img, canvasWidth, canvasHeight, timeSeconds);
+          }
+        }
         break;
       }
       case 'text': {

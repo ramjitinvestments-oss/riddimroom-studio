@@ -48,8 +48,8 @@
  */
 
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
-import { computeFadeOpacity, computeLoopedSourceTime, drawFrame } from '../render/compositor';
+import { getItemsAtTime, getMainTrackEnd, getProjectDuration } from '../timeline/utils';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime } from '../render/compositor';
 import type { Renderer, RenderOptions, RenderResult, RenderResultMetadata } from './renderer';
 import { RenderAbortedError } from './renderer';
 import { Canvas2DRenderer } from './canvas2dRenderer';
@@ -284,13 +284,43 @@ export function buildAvcEncoderCodecString(width: number, height: number, bitrat
 }
 
 /**
+ * R26 WS-S2 — the encoder tuning this module encodes with, quality
+ * locked: hardware acceleration PREFERRED (never required — WebCodecs
+ * treats it as a hint and falls back to software where no hardware
+ * encoder exists, so `prefer-hardware` can only speed the encode up,
+ * never change what a platform can do), variable bitrate mode (the
+ * encoder may spend bits on complex frames and save them on still
+ * ones — the quality-preserving mode, and the one Mediabunny's config
+ * builder already used by default), 'quality' latency mode (no frame
+ * dropping for realtime's sake — this is an offline export), and a
+ * 2-second keyframe interval (the library default, pinned explicitly:
+ * short enough for clean seeking/error recovery in short-form exports
+ * without the file-size cost of frequent keyframes).
+ */
+export const VIDEO_ENCODER_TUNING = {
+  hardwareAcceleration: 'prefer-hardware',
+  bitrateMode: 'variable',
+  latencyMode: 'quality',
+  keyFrameInterval: 2,
+} as const;
+
+/** Audio encoder tuning — variable bitrate, same quality-first reasoning as the video side. */
+export const AUDIO_ENCODER_TUNING = {
+  bitrateMode: 'variable',
+} as const;
+
+/**
  * The exact video config object Mediabunny's runtime builder
  * (`buildVideoEncoderConfigs`, bitrate candidate) hands to
  * `VideoEncoder.isConfigSupported` for this module's export settings —
  * including the members the builder copies straight through as
  * `undefined` (WebIDL drops them, but the shape is replicated
  * faithfully so the probe asks about the runtime's config, not a
- * paraphrase of it).
+ * paraphrase of it). R26: `latencyMode`/`hardwareAcceleration` now
+ * carry the module's tuning values (VIDEO_ENCODER_TUNING), because
+ * the runtime builder copies those members straight through from the
+ * CanvasSource config — the probe must ask about the tuned config the
+ * runtime will actually negotiate, not the pre-tuning one.
  */
 export function buildRawVideoProbeConfig(
   settings: MediabunnyCapabilitySettings,
@@ -302,11 +332,11 @@ export function buildRawVideoProbeConfig(
     displayWidth: undefined,
     displayHeight: undefined,
     bitrate: settings.videoBitrate,
-    bitrateMode: 'variable',
+    bitrateMode: VIDEO_ENCODER_TUNING.bitrateMode,
     alpha: 'discard',
     framerate: settings.frameRate,
-    latencyMode: undefined,
-    hardwareAcceleration: undefined,
+    latencyMode: VIDEO_ENCODER_TUNING.latencyMode,
+    hardwareAcceleration: VIDEO_ENCODER_TUNING.hardwareAcceleration,
     scalabilityMode: undefined,
     contentHint: undefined,
     avc: { format: 'avc' }, // getVideoEncoderConfigExtension: "Ensure the format is not Annex B"
@@ -317,9 +347,10 @@ export function buildRawVideoProbeConfig(
  * The exact audio config object Mediabunny's runtime builder
  * (`buildAudioEncoderConfig`) hands to `AudioEncoder.isConfigSupported`
  * — codec string from `buildAudioCodecString` ('mp4a.40.2' / 'opus'),
- * the explicit bitrate from Quality, `bitrateMode: undefined` (no
- * Quality bitrate mode and no caller bitrateMode in this module's
- * path), plus the per-codec format member the library always adds.
+ * the explicit bitrate from Quality, the caller's bitrate mode (R26:
+ * AUDIO_ENCODER_TUNING's 'variable' — the builder's fallback when the
+ * Quality carries no mode of its own), plus the per-codec format
+ * member the library always adds.
  */
 export function buildRawAudioProbeConfig(
   codec: 'aac' | 'opus',
@@ -330,7 +361,7 @@ export function buildRawAudioProbeConfig(
     numberOfChannels: settings.audioChannels,
     sampleRate: settings.audioSampleRate,
     bitrate: settings.audioBitrate,
-    bitrateMode: undefined,
+    bitrateMode: AUDIO_ENCODER_TUNING.bitrateMode,
     [codec]: { format: codec }, // getAudioEncoderConfigExtension: aac "not ADTS" / opus format member
   };
 }
@@ -579,7 +610,12 @@ export async function encodeFramesToMp4(
   const videoSource = new CanvasSource(canvas, {
     codec: 'avc',
     bitrate: options.videoBitrate,
-    keyFrameInterval: 2,
+    // R26 WS-S2 encoder tuning (VIDEO_ENCODER_TUNING) — the raw
+    // capability probe above asks about exactly these values.
+    keyFrameInterval: VIDEO_ENCODER_TUNING.keyFrameInterval,
+    hardwareAcceleration: VIDEO_ENCODER_TUNING.hardwareAcceleration,
+    bitrateMode: VIDEO_ENCODER_TUNING.bitrateMode,
+    latencyMode: VIDEO_ENCODER_TUNING.latencyMode,
     onEncoderConfig: (config) => {
       videoCodecString = config.codec;
     },
@@ -591,6 +627,7 @@ export async function encodeFramesToMp4(
     audioSource = new AudioBufferSource({
       codec: negotiated.audioCodec,
       bitrate: options.audioBitrate,
+      bitrateMode: AUDIO_ENCODER_TUNING.bitrateMode,
       onEncoderConfig: (config) => {
         audioCodecString = config.codec;
       },
@@ -689,8 +726,21 @@ function waitForSeek(element: HTMLVideoElement, timeoutMs = SEEK_TIMEOUT_MS): Pr
   });
 }
 
-interface AudioScheduleItem {
+/**
+ * One entry of the offline audio-mix plan (R26): a single audible
+ * timeline item resolved to everything the mixer needs, with its
+ * audible window ALREADY clamped to the main-track boundary (WS-A2) —
+ * `endTime` here is the item's EFFECTIVE end (`effectiveAudioEndTime`),
+ * never the stored end. An item the boundary clips away entirely
+ * (effective duration ≤ 0) is absent from the plan altogether.
+ */
+export interface AudioMixPlanItem {
+  assetId: string;
+  assetUrl: string;
+  fileName: string;
+  kind: 'audio' | 'video';
   startTime: number;
+  /** Effective (boundary-clamped) end — the mixer schedules nothing at/past this instant. */
   endTime: number;
   trimStart: number;
   trimEnd: number;
@@ -699,6 +749,43 @@ interface AudioScheduleItem {
   loop: boolean;
   volume: number;
   fade?: { fadeInDuration: number; fadeOutDuration: number };
+}
+
+/**
+ * The pure scheduling plan behind `mixProjectAudioOffline` — exported
+ * so the WS-A2 boundary behaviour is testable without an
+ * OfflineAudioContext: every audio-carrying item (standalone audio AND
+ * video items' embedded audio) that is audible at all (not muted,
+ * volume > 0, asset present) appears with its end clamped to
+ * `mainTrackEnd`; a null boundary leaves every end untouched (the
+ * pre-R26 plan). Stored items are never modified — this is a
+ * render-time view only.
+ */
+export function planProjectAudioMix(project: Project, mainTrackEnd: number | null): AudioMixPlanItem[] {
+  const plan: AudioMixPlanItem[] = [];
+  for (const item of project.items) {
+    if (item.type !== 'audio' && item.type !== 'video') continue;
+    if (item.muted || item.volume <= 0) continue;
+    const asset = project.mediaAssets[item.mediaAssetId];
+    if (!asset) continue;
+    const endTime = effectiveAudioEndTime(item.endTime, mainTrackEnd);
+    if (endTime - item.startTime <= 0) continue;
+    plan.push({
+      assetId: asset.id,
+      assetUrl: asset.storageUrl,
+      fileName: asset.fileName || asset.id,
+      kind: item.type,
+      startTime: item.startTime,
+      endTime,
+      trimStart: item.trimStart,
+      trimEnd: item.trimEnd,
+      speed: item.type === 'video' ? item.speed || 1 : 1,
+      loop: item.type === 'audio' ? item.loop === true : false,
+      volume: item.volume,
+      fade: item.fade,
+    });
+  }
+  return plan;
 }
 
 /**
@@ -720,32 +807,13 @@ async function mixProjectAudioOffline(
   project: Project,
   totalSeconds: number,
 ): Promise<AudioBuffer | null> {
-  const audible: { item: AudioScheduleItem; assetId: string; assetUrl: string; fileName: string; kind: 'audio' | 'video' }[] = [];
-  for (const item of project.items) {
-    if (item.type !== 'audio' && item.type !== 'video') continue;
-    if (item.muted || item.volume <= 0) continue;
-    const asset = project.mediaAssets[item.mediaAssetId];
-    if (!asset) continue;
-    if (item.type === 'audio') {
-      audible.push({
-        item: {
-          startTime: item.startTime, endTime: item.endTime,
-          trimStart: item.trimStart, trimEnd: item.trimEnd,
-          speed: 1, loop: item.loop === true, volume: item.volume, fade: item.fade,
-        },
-        assetId: asset.id, assetUrl: asset.storageUrl, fileName: asset.fileName || asset.id, kind: 'audio',
-      });
-    } else {
-      audible.push({
-        item: {
-          startTime: item.startTime, endTime: item.endTime,
-          trimStart: item.trimStart, trimEnd: item.trimEnd,
-          speed: item.speed || 1, loop: false, volume: item.volume, fade: item.fade,
-        },
-        assetId: asset.id, assetUrl: asset.storageUrl, fileName: asset.fileName || asset.id, kind: 'video',
-      });
-    }
-  }
+  // R26 WS-A2: the plan clamps every item's audible window at the main
+  // track's end (getMainTrackEnd; null = no visual main track = no
+  // clipping). Scheduling below only ever sees the clamped windows, so
+  // the mixed buffer can contain no audio energy past the boundary —
+  // and loop-to-fill wraps inside it, because the loop below fills
+  // only the clamped timeline duration. Stored items are untouched.
+  const audible = planProjectAudioMix(project, getMainTrackEnd(project));
   if (audible.length === 0) return null;
 
   const offline = new OfflineAudioContext(
@@ -779,13 +847,18 @@ async function mixProjectAudioOffline(
   for (const entry of audible) {
     const decoded = decodedByAsset.get(entry.assetId);
     if (!decoded) continue;
-    const { item } = entry;
-    const timelineDuration = Math.max(0, item.endTime - item.startTime);
-    if (timelineDuration <= 0) continue;
+    const item = entry;
+    // The plan guarantees a positive duration (its end is the item's
+    // boundary-clamped effective end).
+    const timelineDuration = item.endTime - item.startTime;
 
     const gain = offline.createGain();
     // Fade/volume automation sampled from computeFadeOpacity at 33
     // points across the item — the same curve the preview applies.
+    // R26: sampled over the CLAMPED duration, so a fade-out ramp
+    // completes exactly at the main-track boundary rather than being
+    // cut off mid-ramp (the same anchoring `computeAudioGainAtTime`
+    // applies in the realtime paths).
     const SAMPLES = 32;
     const curve = new Float32Array(SAMPLES + 1);
     for (let i = 0; i <= SAMPLES; i++) {
@@ -807,7 +880,8 @@ async function mixProjectAudioOffline(
     if (item.loop) {
       // Wrap inside the trim window (computeLoopedSourceTime semantics):
       // schedule consecutive trim-window passes until the item's span
-      // is filled.
+      // is filled. The span here is the CLAMPED duration, so the fill
+      // wraps inside the main-track boundary and never past it.
       const span = item.trimEnd - item.trimStart;
       if (span > 0) {
         let elapsed = 0;

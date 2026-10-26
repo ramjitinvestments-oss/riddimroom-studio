@@ -223,10 +223,76 @@ export function getItemDuration(item: Pick<TimelineItem, 'startTime' | 'endTime'
   return item.endTime - item.startTime;
 }
 
-/** Total timeline duration: the latest endTime across every item, or 0 for an empty project. */
-export function getProjectDuration(project: Project): number {
+/** Latest endTime across EVERY item on every track, or 0 for an empty project — the pre-R26 project-duration rule, kept as an explicit helper for consumers that genuinely need the full timeline extent (e.g. a scrollable timeline ruler that must still reach an over-long audio item, or the explicit Fit-to-project helpers below). `getProjectDuration` itself no longer uses this rule when a main track exists — see `getMainTrackEnd`. */
+export function getMaxItemEnd(project: Project): number {
   if (project.items.length === 0) return 0;
   return Math.max(...project.items.map((item) => item.endTime));
+}
+
+/**
+ * True for the items that constitute MAIN content — the same main-vs-overlay
+ * classification the codebase already uses elsewhere:
+ * - video items that are not PiP overlays (`lib/pip.ts`'s `isPipItem` /
+ *   `findMainVideoForPip`: the main video is the non-PiP video; inlined here
+ *   because `pip.ts` imports from this module, so importing it back would
+ *   be circular), and
+ * - image items with role `photo` or `graphic` (`lib/timeline/insert.ts`'s
+ *   `visualClassRank`: photo/graphic are layer class 0, main content, while
+ *   overlay/watermark/logo/sticker are class 2 decoration; templates'
+ *   slottable-media rule in `lib/templates/apply.ts` is the narrower
+ *   photo-only subset of this, and Promo recipes/posters place their main
+ *   stage artwork as `graphic`/`photo` images).
+ * Text, caption and audio items are never main content, and neither are
+ * PiP videos or watermark/logo/sticker/overlay images — those accompany
+ * the main content, they don't define how long the project is.
+ */
+function isMainVisualItem(item: TimelineItem): boolean {
+  if (item.type === 'video') return !item.pip?.isPip;
+  if (item.type === 'image') return item.role === 'photo' || item.role === 'graphic';
+  return false;
+}
+
+/**
+ * R26 (WS-A2) — the end time (seconds) of the project's PRIMARY VISUAL
+ * TRACKS, or null when the project has no main content.
+ *
+ * "Primary visual track" in this model: the project's `video` and `image`
+ * tracks (`createDefaultProject` in `lib/projects/persistence.ts` creates
+ * exactly one of each — "Main Video" and the image track that
+ * `appendMediaToTimeline`/`lib/promo` place main photos and stage artwork
+ * on). Main video/image clips live across those two tracks, not just one:
+ * templates pack a sequential reel across both, and Promo builds its main
+ * stage from images while other projects use video. So the main end is
+ * the latest endTime among MAIN items (see `isMainVisualItem`) sitting on
+ * a track of the matching type — an item whose track is missing, or whose
+ * track type doesn't match the item, is not on a primary visual track and
+ * doesn't count. Null (not 0) when no such track/items exist, so callers
+ * can distinguish "no main content" from "main content ending at 0".
+ */
+export function getMainTrackEnd(project: Project): number | null {
+  const mainTrackIds = new Set(
+    project.tracks.filter((track) => track.type === 'video' || track.type === 'image').map((track) => track.id),
+  );
+  if (mainTrackIds.size === 0) return null;
+  let end: number | null = null;
+  for (const item of project.items) {
+    if (!mainTrackIds.has(item.trackId) || !isMainVisualItem(item)) continue;
+    end = end === null ? item.endTime : Math.max(end, item.endTime);
+  }
+  return end;
+}
+
+/**
+ * Total timeline duration (R26, WS-A2): when the project has main content,
+ * the MAIN track defines the duration (`getMainTrackEnd`) — a 3-minute
+ * song under a 12s video makes a 12s project, and audio past the main end
+ * is clipped at render time rather than extending the project. When there
+ * is no main track (audio-only, text-only, caption-only or empty
+ * projects), this falls back to the old latest-end-across-every-item rule
+ * (`getMaxItemEnd`), so those projects keep exactly their old duration.
+ */
+export function getProjectDuration(project: Project): number {
+  return getMainTrackEnd(project) ?? getMaxItemEnd(project);
 }
 
 /**
@@ -238,7 +304,11 @@ export function getProjectDuration(project: Project): number {
  * `ProjectContext`'s `mutate` calls this after every edit and blocks (rather
  * than silently applying) any mutation that would push the total duration
  * past the limit, so the problem surfaces immediately in the editor instead
- * of only at export time.
+ * of only at export time. R26: "total duration" here is `getProjectDuration`'s
+ * main-track semantics — an over-long audio item under a short main track no
+ * longer trips this guard (the song doesn't make the project longer; the
+ * per-item cap in `trimItemEnd`/`appendMediaToTimeline` still bounds the
+ * audio item itself), while growing the main track past the limit still does.
  */
 export function projectDurationExceedsLimit(project: Project, maxSeconds: number = MAX_MEDIA_SECONDS): boolean {
   return getProjectDuration(project) > maxSeconds + DURATION_LIMIT_EPSILON_SECONDS;
@@ -678,7 +748,7 @@ export function setItemSpeed(project: Project, itemId: string, newSpeed: number)
 /** Fade-out (seconds) the fit helpers default at the fitted end when the item has none. */
 export const FIT_FADE_OUT_SECONDS = 0.5;
 
-/** Latest endTime among all items except `excludeItemId` — "the end of the project this item accompanies". 0 when the item is alone on the timeline. */
+/** Latest endTime among all items except `excludeItemId` — "the end of the project this item accompanies". 0 when the item is alone on the timeline. Deliberately MAX-END semantics (not `getProjectDuration`'s R26 main-track semantics): this backs the explicit Fit-to-project tools, whose job is to align audio with everything else on the timeline, whatever track it's on. */
 export function getContentEndTime(project: Project, excludeItemId?: string): number {
   return project.items.reduce((max, i) => (i.id === excludeItemId ? max : Math.max(max, i.endTime)), 0);
 }
