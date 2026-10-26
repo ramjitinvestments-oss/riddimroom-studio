@@ -73,6 +73,14 @@ export interface CampaignInput {
       words — schedule labels become actual post dates. */
   eventDate?: Date | null;
   font?: string;
+  /** R21: when a website profile is driving the campaign, the caller
+      passes a guard that approves lines whose factual tokens all
+      trace to the confirmed profile. Genre-bank alternates that fail
+      the guard are dropped, so a bank line can never smuggle an
+      unapproved price, date or phone number into a site campaign.
+      Caller-supplied pools are the caller's own sources and are not
+      filtered here. */
+  factGuard?: (line: string) => boolean;
 }
 
 const MONTH_INDEX: Record<string, number> = {
@@ -196,12 +204,17 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     }
     return out;
   };
+  const bankLines = (field: 'sub' | 'cta'): string[] => {
+    if (!input.genre) return [];
+    const lines = bankAlternatesForGenre(field, input.genre);
+    return input.factGuard ? lines.filter(input.factGuard) : lines;
+  };
   const subPool = poolOf(
-    [...(input.altSubs ?? []), ...(input.genre ? bankAlternatesForGenre('sub', input.genre) : [])],
+    [...(input.altSubs ?? []), ...bankLines('sub')],
     base.sub,
   );
   const ctaPool = poolOf(
-    [...(input.altCtas ?? []), ...(input.genre ? bankAlternatesForGenre('cta', input.genre) : [])],
+    [...(input.altCtas ?? []), ...bankLines('cta')],
     base.cta,
   );
   let subIdx = 0;

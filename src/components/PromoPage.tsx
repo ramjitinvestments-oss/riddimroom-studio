@@ -13,6 +13,13 @@ import { createProject, saveProject } from '../lib/projects/persistence';
 import { uploadMediaFile } from '../lib/media/upload';
 import { probeAudioDurationSeconds } from '../lib/media/tracks';
 import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
+import type { ExtractedSite } from '../lib/promo/siteExtract';
+import {
+  approvedFacts, clearSiteProfile, loadSiteProfile, profileFromScan, saveSiteProfile,
+  siteCampaignPools, type SiteProfile,
+} from '../lib/promo/siteProfile';
+import { checkFactTexts, lineFactsApproved, type FactReceipt } from '../lib/promo/factCheck';
+import { fetchSiteImageFile, requestSiteScan } from '../lib/promo/siteScanClient';
 import {
   bankSuggestion,
   type NoTextPurpose,
@@ -192,6 +199,18 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [readLines, setReadLines] = useState<OcrLine[]>([]);
   /** R16 provenance: where each field's words came from. */
   const [fieldSources, setFieldSources] = useState<Partial<Record<SuggestionField, FieldSource | 'yours'>>>({});
+  /** R21: URL campaign — the scan draft, the confirmed website
+      profile, and the offer the campaign is grounded in. */
+  const [siteUrl, setSiteUrl] = useState('');
+  const [siteScanning, setSiteScanning] = useState(false);
+  const [siteScanError, setSiteScanError] = useState<string | null>(null);
+  const [siteScan, setSiteScan] = useState<ExtractedSite | null>(null);
+  const [siteProfile, setSiteProfile] = useState<SiteProfile | null>(null);
+  const [siteOfferId, setSiteOfferId] = useState('');
+  const [sitePicks, setSitePicks] = useState<Partial<Record<'phone' | 'email', string>>>({});
+  const [siteEdits, setSiteEdits] = useState<Partial<Record<'name' | 'tagline' | 'phone' | 'email' | 'address', string>>>({});
+  const [siteImageBusy, setSiteImageBusy] = useState(false);
+  const [siteNote, setSiteNote] = useState<string | null>(null);
   /** R16: the engine read too little — ask for the headline once. */
   const [needsHeadlineAsk, setNeedsHeadlineAsk] = useState(false);
   const [askValue, setAskValue] = useState('');
@@ -300,6 +319,17 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         brandNameRef.current = kit.brandName;
       }
       setKitNote('Brand defaults loaded from this device.');
+    }
+  }, []);
+
+  // R21: a website profile confirmed on this device is offered again.
+  useEffect(() => {
+    const saved = loadSiteProfile();
+    if (saved) {
+      setSiteProfile(saved);
+      setSiteUrl(saved.url);
+      if (saved.offers.length > 0) setSiteOfferId(saved.offers[0].id);
+      setSiteNote('Website profile loaded from this device — scan again any time to refresh it.');
     }
   }, []);
 
@@ -546,6 +576,131 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     }
   }, [runSuggestion]);
 
+  /** R21: scan a website into a DRAFT profile — nothing is used
+      until the user reviews and confirms it below. */
+  const handleSiteScan = useCallback(async () => {
+    if (!currentUser) {
+      setSiteScanError('Sign in first — website scanning is for approved accounts.');
+      return;
+    }
+    const url = siteUrl.trim();
+    if (!url) {
+      setSiteScanError('Paste your website address first.');
+      return;
+    }
+    setSiteScanning(true);
+    setSiteScanError(null);
+    setSiteNote(null);
+    try {
+      const token = await currentUser.getIdToken();
+      const outcome = await requestSiteScan(url, token);
+      if (!outcome.ok) {
+        setSiteScanError(outcome.error);
+        return;
+      }
+      const scan = outcome.scan;
+      if (!scan.readable) {
+        setSiteScan(null);
+        setSiteScanError(
+          scan.reason === 'blocked'
+            ? 'That website refused the scan — many sites block automated reads. A screenshot or flyer upload above will work instead.'
+            : scan.reason === 'spa'
+              ? 'That website builds its pages with JavaScript, so there is no readable text to scan. A screenshot or flyer upload above will work instead.'
+              : scan.reason === 'http-error'
+                ? 'That page returned an error — double-check the address and try again.'
+                : 'We could not find readable content at that address — double-check it and try again.',
+        );
+        return;
+      }
+      setSiteScan(scan);
+      setSiteEdits({
+        name: scan.name?.value ?? '',
+        tagline: scan.tagline?.value ?? '',
+        phone: scan.phone?.value ?? '',
+        email: scan.email?.value ?? '',
+        address: scan.address?.value ?? '',
+      });
+      setSitePicks({ phone: scan.phone?.value, email: scan.email?.value });
+      setSiteOfferId(scan.offers.length > 0 ? 'offer-0' : '');
+      setSiteNote('We read your website — check every word below. Nothing is used until you confirm.');
+    } catch {
+      setSiteScanError('The scan could not be completed — try again in a moment.');
+    } finally {
+      setSiteScanning(false);
+    }
+  }, [currentUser, siteUrl]);
+
+  /** R21: confirmation is the accuracy gate — only now do the
+      website's facts become campaign material (verbatim, 'site'
+      provenance, protected from bank overwrites). */
+  const handleConfirmSiteProfile = useCallback(() => {
+    if (!siteScan) return;
+    const profile = profileFromScan(siteScan, { picks: sitePicks, edits: siteEdits });
+    const offer = profile.offers.find((o) => o.id === siteOfferId) ?? null;
+    setSiteProfile(profile);
+    saveSiteProfile(profile);
+    setSiteScan(null);
+    const services = offer && offer.services.length ? offer.services : profile.services;
+    const next: PromoTexts = {};
+    const sources: Partial<Record<SuggestionField, FieldSource | 'yours'>> = {};
+    const fill = (field: SuggestionField, value: string | null | undefined) => {
+      const v = (value ?? '').trim();
+      if (!v) return;
+      next[field] = v;
+      sources[field] = 'site';
+      touchedRef.current.add(field);
+    };
+    fill('hook1', offer?.name ?? profile.name?.value);
+    fill('hook2', profile.tagline?.value ?? services[0]);
+    fill('sub', services.slice(0, 2).join(' • '));
+    fill('cta', profile.phone?.value ? `CALL ${profile.phone.value}` : null);
+    setTexts((t) => ({ ...t, ...next }));
+    setFieldSources((prev) => ({ ...prev, ...sources }));
+    if (profile.name?.value) {
+      setBrandName(profile.name.value);
+      brandNameRef.current = profile.name.value;
+    }
+    saveBrandKit({
+      ctaText: next.cta ?? textsRef.current.cta ?? '',
+      subText: next.sub ?? textsRef.current.sub ?? '',
+      skinId: skin,
+      brandName: profile.name?.value ?? '',
+    });
+    setSiteNote(
+      'Profile confirmed. Pick one of your website images below to use as the artwork — or upload your own above — then build as usual. Every campaign piece will be checked against these facts.',
+    );
+  }, [siteScan, sitePicks, siteEdits, siteOfferId, skin]);
+
+  const handleSiteImage = useCallback(
+    async (imageUrl: string) => {
+      if (!currentUser || siteImageBusy) return;
+      setSiteImageBusy(true);
+      setSiteScanError(null);
+      try {
+        const token = await currentUser.getIdToken();
+        const outcome = await fetchSiteImageFile(imageUrl, token);
+        if (!outcome.ok) {
+          setSiteScanError(outcome.error);
+          return;
+        }
+        await handleFiles([outcome.file]);
+      } catch {
+        setSiteScanError('That image could not be loaded — try another, or upload your own above.');
+      } finally {
+        setSiteImageBusy(false);
+      }
+    },
+    [currentUser, siteImageBusy, handleFiles],
+  );
+
+  const handleForgetSite = useCallback(() => {
+    setSiteProfile(null);
+    setSiteScan(null);
+    setSiteOfferId('');
+    clearSiteProfile();
+    setSiteNote(null);
+  }, []);
+
   const handleSample = useCallback(async () => {
     try {
       const res = await fetch('/sample-flyer.svg');
@@ -785,6 +940,21 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     return [...fromArt, ...bank.filter((b) => !fromArt.some((a) => a.toUpperCase() === b.toUpperCase()))];
   }, [texts.hook1, texts.hook2, texts.sub, texts.cta]);
 
+  /** R21: when a website profile drives the campaign, build the
+      planner extras once: pools from approved site facts only, a
+      fact guard for bank lines, and the offer's real date. */
+  const sitePlanExtras = useCallback(() => {
+    if (!siteProfile) return null;
+    const facts = approvedFacts(siteProfile);
+    const offer = siteProfile.offers.find((o) => o.id === siteOfferId) ?? null;
+    const pools = siteCampaignPools(siteProfile, offer);
+    const t = textsRef.current;
+    const confirmedTexts = [t.hook1 ?? '', t.hook2 ?? '', t.sub ?? '', t.cta ?? ''];
+    const guard = (line: string) => lineFactsApproved(line, facts, confirmedTexts);
+    const parsed = offer?.date ? new Date(offer.date) : null;
+    return { facts, offer, pools, guard, offerDate: parsed && !Number.isNaN(parsed.getTime()) ? parsed : null };
+  }, [siteProfile, siteOfferId]);
+
   /**
    * The Campaign Engine runner: plan the set, upload the artwork
    * ONCE, build + save every piece's project, then render MP4s in
@@ -797,17 +967,25 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     if (!currentUser || picked.length === 0 || !analysis || fileProblem || campaignRunning) return;
     const uid = currentUser.uid;
     const base = cleanName(picked[0].file.name);
+    const extras = sitePlanExtras();
     const plan = planCampaign({
       texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
       masterRecipe: recipe,
       masterFormatId: ratioId,
       kind: analysis.suggestedKind,
-      altHookPairs: currentAltPairs(),
-      altSubs: campaignAltSubs(),
-      altCtas: suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : [],
+      altHookPairs: extras
+        ? [...extras.pools.altHookPairs, ...currentAltPairs().filter((pair) => extras.guard(pair[0]) && extras.guard(pair[1]))]
+        : currentAltPairs(),
+      altSubs: extras ? [...extras.pools.altSubs, ...campaignAltSubs().filter(extras.guard)] : campaignAltSubs(),
+      altCtas: extras
+        ? [...extras.pools.altCtas, ...(suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : []).filter(extras.guard)]
+        : suggestCtxRef.current
+          ? fieldAlternates('cta', suggestCtxRef.current)
+          : [],
       genre: detectedPostGenre(),
-      eventDate: parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
+      eventDate: extras?.offerDate ?? parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
       font: fontFamily,
+      factGuard: extras?.guard,
     });
     setCampaignRunning(true);
     setCampaignNote(null);
@@ -993,7 +1171,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, musicStart, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile, captionSize]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, musicStart, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile, captionSize, sitePlanExtras]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -1027,18 +1205,45 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
   const planPreview: CampaignPlan | null =
     phase !== 'pick' && analysis
-      ? planCampaign({
-          texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
-          masterRecipe: recipe,
-          masterFormatId: ratioId,
-          kind: analysis.suggestedKind,
-          altHookPairs: currentAltPairs(),
-          altSubs: campaignAltSubs(),
-          altCtas: suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : [],
-          genre: detectedPostGenre(),
-          eventDate: parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
-          font: fontFamily,
-        })
+      ? (() => {
+          const extras = sitePlanExtras();
+          return planCampaign({
+            texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
+            masterRecipe: recipe,
+            masterFormatId: ratioId,
+            kind: analysis.suggestedKind,
+            altHookPairs: extras
+              ? [...extras.pools.altHookPairs, ...currentAltPairs().filter((pair) => extras.guard(pair[0]) && extras.guard(pair[1]))]
+              : currentAltPairs(),
+            altSubs: extras ? [...extras.pools.altSubs, ...campaignAltSubs().filter(extras.guard)] : campaignAltSubs(),
+            altCtas: extras
+              ? [...extras.pools.altCtas, ...(suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : []).filter(extras.guard)]
+              : suggestCtxRef.current
+                ? fieldAlternates('cta', suggestCtxRef.current)
+                : [],
+            genre: detectedPostGenre(),
+            eventDate: extras?.offerDate ?? parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
+            font: fontFamily,
+            factGuard: extras?.guard,
+          });
+        })()
+      : null;
+
+  /** R21 factual receipt: every campaign piece + post checked
+      against the confirmed website profile. */
+  const campaignReceipt: FactReceipt | null =
+    siteProfile && campaignResults.length > 0
+      ? checkFactTexts(
+          campaignResults.map((r) => ({
+            label: r.piece.label,
+            texts: [
+              ...Object.values(r.piece.texts).filter((v): v is string => typeof v === 'string'),
+              ...r.posts.map((post) => post.text.replace(/#\w+/g, '')),
+            ],
+          })),
+          approvedFacts(siteProfile),
+          [texts.hook1 ?? '', texts.hook2 ?? '', texts.sub ?? '', texts.cta ?? ''],
+        )
       : null;
 
   return (
@@ -1107,6 +1312,165 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               )}
             </div>
           )}
+        </div>
+
+        <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4">
+          <label className="block text-xs font-bold uppercase tracking-wide text-white/60 mb-2">
+            Or · Build from your website
+          </label>
+          <p className="text-xs text-white/50">
+            Paste your business website and we read it — your name, services, prices and contact details,
+            copied exactly as printed. You check and confirm every fact before anything is built from it.
+          </p>
+          {!siteProfile && !siteScan && (
+            <div className="mt-3 flex gap-2">
+              <input
+                value={siteUrl}
+                onChange={(e) => setSiteUrl(e.target.value)}
+                placeholder="yourbusiness.com"
+                className={inputCls}
+              />
+              <button
+                onClick={() => void handleSiteScan()}
+                disabled={siteScanning}
+                className="shrink-0 min-h-[44px] px-4 rounded-lg bg-gold text-black text-xs font-black uppercase disabled:opacity-50"
+              >
+                {siteScanning ? 'Scanning…' : 'Scan website'}
+              </button>
+            </div>
+          )}
+          {siteScanError && <p className="text-xs text-amber-300 mt-3">{siteScanError}</p>}
+          {siteScan && (
+            <div className="mt-4 space-y-3">
+              <p className="text-xs font-bold text-white/80">
+                Check your website profile — nothing is used until you confirm.
+              </p>
+              {(['name', 'tagline', 'phone', 'email', 'address'] as const).map((key) => (
+                <div key={key}>
+                  <label className="block text-[10px] font-bold uppercase tracking-wider text-white/40 mb-1">
+                    {key === 'tagline' ? 'Tagline' : key}
+                  </label>
+                  <input
+                    value={siteEdits[key] ?? ''}
+                    onChange={(e) => setSiteEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                    className={inputCls}
+                    placeholder={key === 'name' ? 'Business name' : `No ${key} found — type it if you want it used`}
+                  />
+                </div>
+              ))}
+              {siteScan.conflicts.map((conflict) => (
+                <div key={conflict.field} className="rounded-lg border border-amber-300/30 bg-amber-300/5 p-3">
+                  <p className="text-[11px] font-bold text-amber-200">
+                    Your site shows two different {conflict.field === 'phone' ? 'phone numbers' : 'email addresses'} —
+                    which one should campaigns use?
+                  </p>
+                  <div className="mt-2 space-y-1">
+                    {conflict.values.map((v) => (
+                      <label key={v.value} className="flex items-center gap-2 text-xs text-white/80">
+                        <input
+                          type="radio"
+                          name={`site-conflict-${conflict.field}`}
+                          checked={sitePicks[conflict.field] === v.value}
+                          onChange={() => setSitePicks((prev) => ({ ...prev, [conflict.field]: v.value }))}
+                        />
+                        {v.value}
+                        <span className="text-white/40">
+                          ({v.layer} · {v.sourceUrl.replace(/^https?:\/\//, '')})
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {siteScan.services.length > 0 && (
+                <p className="text-xs text-white/60">
+                  Services read: <span className="text-white">{siteScan.services.join(' · ')}</span>
+                </p>
+              )}
+              {siteScan.offers.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-white/40 mb-1">
+                    Build the campaign around
+                  </p>
+                  <div className="space-y-1">
+                    {siteScan.offers.map((offer, i) => (
+                      <label key={offer.url + offer.name} className="flex items-center gap-2 text-xs text-white/80">
+                        <input
+                          type="radio"
+                          name="site-offer"
+                          checked={siteOfferId === `offer-${i}`}
+                          onChange={() => setSiteOfferId(`offer-${i}`)}
+                        />
+                        {offer.name}
+                        {offer.price ? ` — ${offer.price}` : ''}
+                        {offer.date ? ` — ${offer.date}` : ''}
+                      </label>
+                    ))}
+                    <label className="flex items-center gap-2 text-xs text-white/80">
+                      <input
+                        type="radio"
+                        name="site-offer"
+                        checked={siteOfferId === ''}
+                        onChange={() => setSiteOfferId('')}
+                      />
+                      The business as a whole (no single offer)
+                    </label>
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleConfirmSiteProfile}
+                  className="min-h-[44px] px-4 rounded-lg bg-gold text-black text-xs font-black uppercase"
+                >
+                  Confirm profile
+                </button>
+                <button
+                  onClick={() => setSiteScan(null)}
+                  className="min-h-[44px] px-4 rounded-lg border border-white/15 bg-white/5 text-xs font-bold text-white/70"
+                >
+                  Discard scan
+                </button>
+              </div>
+            </div>
+          )}
+          {siteProfile && (
+            <div className="mt-3 space-y-3">
+              <p className="text-xs text-white/70">
+                Campaigns are grounded in{' '}
+                <span className="text-white font-bold">{siteProfile.name?.value ?? siteProfile.url}</span>
+                {siteProfile.phone?.value ? <> · {siteProfile.phone.value}</> : ''} — read from your website and
+                confirmed by you.
+              </p>
+              {siteProfile.images.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-white/40 mb-2">
+                    Use one of your website images as the artwork
+                  </p>
+                  <div className="flex gap-2 flex-wrap">
+                    {siteProfile.images.map((img) => (
+                      <button
+                        key={img.url}
+                        onClick={() => void handleSiteImage(img.url)}
+                        disabled={siteImageBusy}
+                        className="rounded-lg border border-white/15 overflow-hidden hover:border-gold/60 disabled:opacity-50"
+                      >
+                        <img src={img.url} alt={img.alt || 'Website image'} className="w-16 h-16 object-cover" />
+                      </button>
+                    ))}
+                  </div>
+                  {siteImageBusy && <p className="text-[11px] text-white/40 mt-2">Loading that image…</p>}
+                </div>
+              )}
+              <button
+                onClick={handleForgetSite}
+                className="text-[11px] font-bold text-white/40 underline underline-offset-2"
+              >
+                Forget this website profile
+              </button>
+            </div>
+          )}
+          {siteNote && <p className="text-[11px] text-white/40 mt-3">{siteNote}</p>}
         </div>
 
         {phase !== 'pick' && (
@@ -1323,12 +1687,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                     </button>
                     </div>
                     {(texts[field] ?? '').trim() && fieldSources[field] && (
-                      <p className={`mt-1 text-[10px] font-bold uppercase tracking-wider ${fieldSources[field] === 'art' ? 'text-gold/80' : 'text-white/35'}`}>
+                      <p className={`mt-1 text-[10px] font-bold uppercase tracking-wider ${(fieldSources[field] === 'art' || fieldSources[field] === 'site') ? 'text-gold/80' : 'text-white/35'}`}>
                         {fieldSources[field] === 'art'
                           ? 'From your artwork'
-                          : fieldSources[field] === 'yours'
-                            ? 'Your words'
-                            : 'Suggested — tap ↻ for another'}
+                          : fieldSources[field] === 'site'
+                            ? 'From your website'
+                            : fieldSources[field] === 'yours'
+                              ? 'Your words'
+                              : 'Suggested — tap ↻ for another'}
                       </p>
                     )}
                   </div>
@@ -1527,6 +1893,34 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 </div>
                 {campaignResults.length > 0 && (
                   <div className="space-y-2 pt-1">
+                    {campaignReceipt && (
+                      <div
+                        className={`rounded-lg border p-3 ${
+                          campaignReceipt.clean ? 'border-gold/40 bg-gold/5' : 'border-amber-300/40 bg-amber-300/5'
+                        }`}
+                      >
+                        <p
+                          className={`text-xs font-black uppercase tracking-wide ${
+                            campaignReceipt.clean ? 'text-gold' : 'text-amber-200'
+                          }`}
+                        >
+                          {campaignReceipt.summaryLine}
+                        </p>
+                        {campaignReceipt.clean ? (
+                          <p className="text-[11px] text-white/50 mt-1">
+                            Every price, date and number in this set traces to the website profile you confirmed.
+                          </p>
+                        ) : (
+                          <ul className="mt-1 space-y-0.5">
+                            {campaignReceipt.flags.slice(0, 6).map((f, i) => (
+                              <li key={i} className="text-[11px] text-amber-100/80">
+                                {f.label}: “{f.token}” in “{f.context}” is not on your confirmed website profile.
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
                     {campaignResults.map((r) => (
                       <div key={r.piece.id} className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2">
                         <div className="flex items-center gap-2 flex-wrap">

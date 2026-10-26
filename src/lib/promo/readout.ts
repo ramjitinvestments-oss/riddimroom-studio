@@ -31,7 +31,7 @@ export interface OcrLine {
   box?: { x: number; y: number; w: number; h: number };
 }
 
-export type FieldSource = 'art' | 'suggested';
+export type FieldSource = 'art' | 'suggested' | 'site';
 
 export interface ReadoutResult {
   fields: Partial<PromoTexts>;
