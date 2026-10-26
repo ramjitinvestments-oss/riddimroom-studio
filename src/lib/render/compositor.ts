@@ -42,6 +42,8 @@ import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle, resolveCaptionFontPx } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
 import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
+import { cineInOut, lerp, returnBlend, smootherstep } from '../motion/easing';
+import { claimTextBox, type TextBox } from './textGuard';
 import { MAX_FADE_SECONDS } from '../media/constants';
 
 export interface FrameAssets {
@@ -576,7 +578,7 @@ export function computeMotionAdjustment(
             if (p >= s0.t && p <= s1.t) {
               const span = Math.max(0.0001, s1.t - s0.t);
               const u0 = (p - s0.t) / span;
-              const u = u0 * u0 * (3 - 2 * u0);
+              const u = smootherstep(u0);
               a.offsetXPx += (s0.x + (s1.x - s0.x) * u) * canvasWidth;
               a.offsetYPx += (s0.y + (s1.y - s0.y) * u) * canvasHeight;
               a.scaleMul *= s0.scale + (s1.scale - s0.scale) * u;
@@ -589,16 +591,17 @@ export function computeMotionAdjustment(
     }
     case 'ken-burns': {
       const { dx, dy } = motionDirectionVector(motion.direction, 'x');
-      a.offsetXPx += -(p - 0.5) * canvasWidth * 0.12 * k * dx;
-      a.offsetYPx += -(p - 0.5) * canvasHeight * 0.12 * k * dy;
-      a.scaleMul *= 1 + p * 0.15 * k;
+      const ke = cineInOut(p);
+      a.offsetXPx += -(ke - 0.5) * canvasWidth * 0.12 * k * dx;
+      a.offsetYPx += -(ke - 0.5) * canvasHeight * 0.12 * k * dy;
+      a.scaleMul *= 1 + ke * 0.15 * k;
       break;
     }
     case 'slow-zoom-in':
-      a.scaleMul *= 1 + p * 0.2 * k;
+      a.scaleMul *= 1 + cineInOut(p) * 0.2 * k;
       break;
     case 'slow-zoom-out':
-      a.scaleMul *= 1 + (1 - p) * 0.2 * k;
+      a.scaleMul *= 1 + (1 - cineInOut(p)) * 0.2 * k;
       break;
     case 'dynamic-zoom':
       a.scaleMul *= 1 + Math.sin(p * Math.PI) * 0.18 * k;
@@ -620,6 +623,27 @@ export function computeMotionAdjustment(
       a.scaleMul *= 1.08;
       break;
     }
+    case 'dolly-push':
+      // R22: a confident cinematic push — eased scale with a whisper
+      // of forward drift. Pairs with homecoming for the return.
+      a.scaleMul *= 1 + cineInOut(p) * 0.12 * k;
+      a.offsetYPx += -Math.sin(p * Math.PI) * canvasHeight * 0.012 * k;
+      break;
+    case 'orbit-drift': {
+      // R22: a slow orbital sway on a full cycle — home at both
+      // ends by construction.
+      const sway = Math.sin(p * Math.PI * 2);
+      a.rotationDeltaDeg += sway * 2 * k;
+      a.offsetXPx += sway * canvasWidth * 0.02 * k;
+      a.scaleMul *= 1.05;
+      break;
+    }
+    case 'focus-pull':
+      // R22: rack into focus — opening blur resolves over the first
+      // third while an opening scale settles to 1.
+      a.blurPx = Math.max(a.blurPx, (1 - smootherstep(p / 0.32)) * 9 * k);
+      a.scaleMul *= 1 + (1 - cineInOut(p)) * 0.04 * k;
+      break;
     case 'subtle-shake':
       // Continuous, not decaying — this is the "handheld camera" feel for
       // the item's whole on-screen lifespan, distinct from the transition
@@ -653,6 +677,19 @@ export function computeMotionAdjustment(
       break;
     default:
       break;
+  }
+  // R22 Homecoming: a flagged move blends back to the home framing
+  // (the identity adjustment) across its final stretch, so the
+  // piece lands on the full, uncropped artwork — on the same curve
+  // it left on, never a snap.
+  if (motion.homecoming) {
+    const blend = returnBlend(p, 0.8);
+    if (blend > 0) {
+      a.scaleMul = lerp(a.scaleMul, 1, blend);
+      a.offsetXPx = lerp(a.offsetXPx, 0, blend);
+      a.offsetYPx = lerp(a.offsetYPx, 0, blend);
+      a.rotationDeltaDeg = lerp(a.rotationDeltaDeg, 0, blend);
+    }
   }
   a.overlayAlpha = clamp01(a.overlayAlpha);
   a.vignetteAlpha = clamp01(a.vignetteAlpha);
@@ -1124,7 +1161,7 @@ function kineticRevealText(text: string, preset: AnimationPreset | undefined, si
   return text;
 }
 
-function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, canvasWidth: number, canvasHeight: number, timeSeconds: number) {
+function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, canvasWidth: number, canvasHeight: number, timeSeconds: number, claimed?: TextBox[]) {
   const centerX = (item.position.x / 100) * canvasWidth;
   const centerY = (item.position.y / 100) * canvasHeight;
   const adjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
@@ -1139,6 +1176,28 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
   // effective font size is what makes that slider (and canvas-drag resize,
   // see PreviewPane.tsx) do something real.
   const effectiveFontSize = item.fontSize * (item.scale || 1);
+  // R22 occupancy guard: measure the real glyph box and claim it
+  // against the frame's shared text map. A colliding text item is
+  // shifted clear; one that cannot be placed is not drawn this
+  // frame (entrances settle, and the next frame re-claims).
+  let drawAdjustment = adjustment;
+  if (claimed) {
+    ctx.save();
+    ctx.font = `${effectiveFontSize}px ${canvasFontStack(item.font)}`;
+    const measuredWidth = ctx.measureText(displayText || ' ').width * Math.max(0.1, adjustment.scaleMul);
+    ctx.restore();
+    const box: TextBox = {
+      x: centerX + adjustment.offsetXPx - measuredWidth / 2,
+      y: centerY + adjustment.offsetYPx - effectiveFontSize * 0.59,
+      w: measuredWidth,
+      h: effectiveFontSize * 1.18,
+    };
+    const res = claimTextBox(claimed, box, canvasWidth, canvasHeight);
+    if (!res.box) return;
+    if (res.shiftedByPx !== 0) {
+      drawAdjustment = { ...adjustment, offsetYPx: adjustment.offsetYPx + res.shiftedByPx };
+    }
+  }
   applyTransformedDraw(
     ctx,
     (c) => {
@@ -1157,7 +1216,7 @@ function drawTextItem(ctx: CanvasRenderingContext2D, item: TextTimelineItem, can
     item,
     centerX,
     centerY,
-    adjustment,
+    drawAdjustment,
     // Estimated text box (drawTextItem has no fixed draw box — see the
     // overlay note above) so a mask-reveal on a text item clips around
     // roughly the glyphs instead of skipping the mask entirely.
@@ -1266,6 +1325,7 @@ function drawCaptionItem(
   relativeTime: number,
   canvasWidth: number,
   canvasHeight: number,
+  claimed?: TextBox[],
 ) {
   const style = getCaptionStyle(item.captionStyleId);
   const centerX = canvasWidth / 2;
@@ -1292,7 +1352,12 @@ function drawCaptionItem(
     const spaceWidth = ctx.measureText(' ').width;
     lines = wrapCaptionWords(ctx, words, spaceWidth, maxLineWidth);
     const widestWord = Math.max(0, ...lines.flatMap((l) => l.widths));
-    if (widestWord <= maxLineWidth && lines.length <= 3) break;
+    // R22 zone discipline: a caption block may never grow past
+    // ~36% of the frame height, whatever the size tier — a taller
+    // block is what let big cues climb out of their anchor zone
+    // into the next one (worst in square formats).
+    const blockHeightPx = lines.length * fontPx * 1.28;
+    if (widestWord <= maxLineWidth && lines.length <= 3 && blockHeightPx <= canvasHeight * 0.36) break;
   }
   const spaceWidth = ctx.measureText(' ').width;
 
@@ -1302,13 +1367,39 @@ function drawCaptionItem(
   // centers the block; top pins the first line under the top safe
   // area.
   const anchor = item.anchorY ?? 'bottom';
-  const lastLineCenterY =
+  let lastLineCenterY =
     anchor === 'middle'
       ? canvasHeight * 0.5 + ((lines.length - 1) * lineHeight) / 2
       : anchor === 'top'
         ? canvasHeight * CAPTION_SAFE_AREA_TOP_FRACTION + (lines.length - 1) * lineHeight
         : canvasHeight * CAPTION_SAFE_AREA_BOTTOM_FRACTION;
-  const firstLineCenterY = lastLineCenterY - (lines.length - 1) * lineHeight;
+  let firstLineCenterY = lastLineCenterY - (lines.length - 1) * lineHeight;
+
+  // R22 occupancy guard: this cue claims its rendered block
+  // against every text already drawn this frame (captions AND
+  // recipe text items share one map). A cue that cannot be placed
+  // without overlapping is shifted — or not drawn this frame.
+  if (claimed) {
+    const padX = fontPx * 0.34;
+    const padY = fontPx * 0.2;
+    const widest = Math.max(0, ...lines.map((l) => l.totalWidth));
+    const top = firstLineCenterY - fontPx / 2 - padY;
+    const height = (lines.length - 1) * lineHeight + fontPx + padY * 2;
+    const res = claimTextBox(
+      claimed,
+      { x: centerX - widest / 2 - padX, y: top, w: widest + padX * 2, h: height },
+      canvasWidth,
+      canvasHeight,
+    );
+    if (!res.box) {
+      ctx.restore();
+      return;
+    }
+    if (res.shiftedByPx !== 0) {
+      firstLineCenterY += res.shiftedByPx;
+      lastLineCenterY += res.shiftedByPx;
+    }
+  }
 
   if (style.background) {
     const paddingX = fontPx * 0.34;
@@ -1387,6 +1478,8 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
   const activeItems = getItemsAtTime(project, timeSeconds); // already sorted back-to-front by zIndex
+  // R22: one occupancy map for ALL text drawn this frame.
+  const claimedTexts: TextBox[] = [];
 
   // R20 guarantee: at most ONE caption per anchor zone is drawn at
   // any instant — the newest cue in the zone wins (latest start,
@@ -1432,12 +1525,12 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
         break;
       }
       case 'text': {
-        drawTextItem(ctx, item, canvasWidth, canvasHeight, timeSeconds);
+        drawTextItem(ctx, item, canvasWidth, canvasHeight, timeSeconds, claimedTexts);
         break;
       }
       case 'caption': {
         if (captionWinners.has(item.id)) {
-          drawCaptionItem(ctx, item, timeSeconds - item.startTime, canvasWidth, canvasHeight);
+          drawCaptionItem(ctx, item, timeSeconds - item.startTime, canvasWidth, canvasHeight, claimedTexts);
         }
         break;
       }

@@ -46,7 +46,8 @@ import { canExportToday, exportsRemainingToday, recordExport } from '../lib/lice
 import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { loadArtworkFixes, saveArtworkFixes } from '../lib/promo/fixes';
 import type { SnapCorrection } from '../lib/promo/snap';
-import { applyCameraTour, applyStageBackdrop } from '../lib/promo/camera';
+import { applyCameraTour, applyHomecoming, applyStageBackdrop } from '../lib/promo/camera';
+import { enforceTextLayout } from '../lib/promo/layout';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType, updateItem } from '../lib/timeline/utils';
@@ -837,6 +838,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       const readout = lastReadoutRef.current;
       if (readout) project = applyCameraTour(project, readout);
       project = applyStageBackdrop(project);
+      project = applyHomecoming(project);
+      project = enforceTextLayout(project);
 
       // R17 Viral Finish: start the music at its hook, then (in
       // Viral Words mode) turn the field lines into beat-timed
@@ -1080,6 +1083,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         if (musicAsset) project = addPromoMusic(project, musicAsset, duration);
         if (readout) project = applyCameraTour(project, readout);
         project = applyStageBackdrop(project);
+        project = applyHomecoming(project);
+        project = enforceTextLayout(project);
         // R17/R20 Viral Finish, per piece (see the single build).
         let appliedHook = 0;
         const startAt = musicStart ?? (hookTrim && trackAnalysis ? trackAnalysis.hook : 0);

@@ -114,10 +114,15 @@ export function bakeTourMotion(project: Project, hero: ImageTimelineItem, stops:
     return { x: ox, y: oy, scale: s.zoom };
   });
   const n = baked.length;
+  // R22 Homecoming: the word stops play out by ~66% and the camera
+  // then glides HOME — the full artwork, uncropped — and holds it
+  // for the close. A tour that ends on a zoomed word box leaves the
+  // viewer inside a crop; the homecoming is the premium landing.
   const tourStops = [
     { t: 0, x: 0, y: 0, scale: 1 },
-    ...baked.map((b, i) => ({ t: 0.14 + (0.72 * (i + 1)) / n, ...b })),
-    { t: 1, ...baked[n - 1] },
+    ...baked.map((b, i) => ({ t: 0.12 + (0.54 * (i + 1)) / n, ...b })),
+    { t: 0.84, x: 0, y: 0, scale: 1 },
+    { t: 1, x: 0, y: 0, scale: 1 },
   ];
   return { type: 'word-tour', tourStops };
 }
@@ -135,10 +140,50 @@ export function applyCameraTour(project: Project, result: ReadoutResult): Projec
   // recipes (many short items) keep their own dealt motion.
   if (projectSpan > 0 && heroSpan < projectSpan * 0.6) return project;
   const motion = bakeTourMotion(project, hero.item, stops);
+  // R22 parallax: a dimmed backdrop copy of the same artwork drifts
+  // AGAINST the tour at a fraction of its travel — two layers moving
+  // at different rates is what makes the camera feel three-
+  // dimensional instead of a flat zoom.
+  const backdropStops = (motion.tourStops ?? []).map((st) => ({
+    t: st.t,
+    x: -st.x * 0.35,
+    y: -st.y * 0.35,
+    scale: 1 + (st.scale - 1) * 0.3,
+  }));
   return {
     ...project,
-    items: project.items.map((item) => (item.id === hero.item.id ? { ...item, motion } : item)),
+    items: project.items.map((item) => {
+      if (item.id === hero.item.id) return { ...item, motion };
+      if (
+        item.type === 'image' &&
+        (item.opacity ?? 1) < 0.9 &&
+        item.mediaAssetId === hero.item.mediaAssetId &&
+        backdropStops.length > 0
+      ) {
+        return { ...item, motion: { type: 'word-tour' as const, tourStops: backdropStops } };
+      }
+      return item;
+    }),
   };
+}
+
+/**
+ * R22 Homecoming for continuous motions: flag every image item's
+ * motion so the renderer blends it back to the home framing over
+ * its final stretch. The word-tour carries its own baked home
+ * stop; this covers ken-burns / slow-zoom / product-focus heroes
+ * and the stage backdrop alike.
+ */
+export function applyHomecoming(project: Project): Project {
+  let changed = false;
+  const items = project.items.map((item) => {
+    if (item.type !== 'image' || !item.motion || item.motion.type === 'none' || item.motion.homecoming) {
+      return item;
+    }
+    changed = true;
+    return { ...item, motion: { ...item.motion, homecoming: true } };
+  });
+  return changed ? { ...project, items } : project;
 }
 
 /**

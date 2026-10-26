@@ -173,7 +173,10 @@ export type MotionEffectType =
   | 'vignette'
   | 'flash'
   | 'light-sweep'
-  | 'word-tour';
+  | 'word-tour'
+  | 'dolly-push'
+  | 'orbit-drift'
+  | 'focus-pull';
 
 /** Used only by the directional effects (ken-burns, parallax); ignored by the rest. */
 export type MotionDirection = 'left' | 'right' | 'up' | 'down' | 'zoom-in' | 'zoom-out';
@@ -200,6 +203,14 @@ export interface MotionSettings {
    * size. Built by `lib/promo/camera.ts`; not a user-pickable effect.
    */
   tourStops?: MotionTourStop[];
+  /**
+   * R22 Homecoming: when true, a continuous move (ken-burns, slow
+   * zooms, product-focus, dolly-push) blends back to the home
+   * framing — identity adjustment, the full artwork uncropped —
+   * across its final 20%, instead of ending mid-move. Promo
+   * builders set this on hero motions (see applyHomecoming).
+   */
+  homecoming?: boolean;
   /**
    * 0.5-2, multiplies the effect's displacement/scale/overlay amount (same
    * range and meaning as `AnimationSettings.intensity`). Undefined behaves

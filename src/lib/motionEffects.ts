@@ -33,6 +33,9 @@ export const MOTION_EFFECTS: MotionEffectInfo[] = [
   { id: 'vignette', label: 'Vignette', description: 'Softly darkened edges, framing the subject.', usesDirection: false },
   { id: 'flash', label: 'Flash', description: 'Periodic bright strobe pulses.', usesDirection: false },
   { id: 'light-sweep', label: 'Light Sweep', description: 'A bright band of light sweeping across the frame once.', usesDirection: false },
+  { id: 'dolly-push', label: 'Dolly Push', description: 'A confident, eased push toward the subject — the cinematic standard.', usesDirection: false },
+  { id: 'orbit-drift', label: 'Orbit Drift', description: 'A slow orbital sway that starts and ends at the home framing.', usesDirection: false },
+  { id: 'focus-pull', label: 'Focus Pull', description: 'Starts soft and racks into sharp focus over the first third.', usesDirection: false },
 ];
 
 export const MOTION_INTENSITY_MIN = 0.5;
