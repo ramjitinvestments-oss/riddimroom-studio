@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { ArrowLeftRight, FlipHorizontal2, Volume2, VolumeX } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
-import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
+import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipShapeRefitZoom, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
+import { PipRingControls, PipShapeStrip } from './PipShapeControls';
 import { framingSlackPx, pipBoxPx, resolveCropOffset, resolveCropZoom } from '../../lib/render/compositor';
 import { updateItem } from '../../lib/timeline/utils';
 import type { ImageTimelineItem, MediaAsset, TimelineItem, VideoTimelineItem } from '../../types/timeline';
@@ -176,21 +177,24 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           </button>
           {selectedPip?.pip && (
             <>
-              <div className="flex items-center gap-1">
-                <span className="text-[11px] text-white/50 mr-1">Shape</span>
-                {(['circle', 'rounded', 'square'] as const).map((shape) => (
-                  <button
-                    key={shape}
-                    onClick={() => patchSelectedPip({ pip: { ...selectedPip.pip!, shape } })}
-                    aria-pressed={selectedPip.pip!.shape === shape}
-                    className={`px-2 py-1 text-[10px] font-bold uppercase rounded min-h-9 ${
-                      selectedPip.pip!.shape === shape ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
-                    }`}
-                  >
-                    {shape}
-                  </button>
-                ))}
-              </div>
+              {/* R25 — the nine premium shapes as live thumbnail chips.
+                  Changing shape also re-fits the crop-zoom by the new
+                  shape's safe factor (pipShapeRefitZoom): pointed/lobed
+                  shapes relax a deep zoom so the subject is not left
+                  clipped; zoom/pan stay the user's to re-set after. */}
+              <PipShapeStrip
+                value={selectedPip.pip.shape}
+                onChange={(shape) =>
+                  patchFramable({
+                    pip: { ...selectedPip.pip!, shape },
+                    cropZoom: pipShapeRefitZoom(cropZoom, shape),
+                  })
+                }
+              />
+              <PipRingControls
+                pip={selectedPip.pip}
+                onPatch={(p) => patchSelectedPip({ pip: { ...selectedPip.pip!, ...p } })}
+              />
               {selectedPip.pip.fit === 'source' && selectedPip.pip.shape !== 'circle' && (
                 <p className="text-[10px] text-white/30 -mt-1">Camera framing: the whole recording is shown (head-and-shoulders). The Circle shape crops to a square, as before.</p>
               )}

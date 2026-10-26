@@ -300,16 +300,39 @@ interface TimelineItemBase {
   locked?: boolean;
 }
 
-export type PipShape = 'circle' | 'rounded' | 'square';
+/**
+ * PiP shapes (R25 premium set). The first three are the original shapes —
+ * their rendered clip regions are unchanged. The rest are drawn from the
+ * same path registry (`PIP_SHAPES` in `lib/pip.ts`): one trace function
+ * drives the clip, the border stroke, the glow and the picker thumbnails,
+ * so a shape can never look different in preview vs export.
+ */
+export type PipShape =
+  | 'circle' | 'rounded' | 'square'
+  | 'squircle' | 'diamond' | 'hexagon' | 'star' | 'heart' | 'arch';
 
 export interface PipSettings {
-  /** PiP shape. 'circle' = talking-head bubble, 'rounded' = rounded rect, 'square' = plain rect. */
+  /** PiP shape. 'circle' = talking-head bubble, 'rounded' = rounded rect, 'square' = plain rect; R25 adds squircle/diamond/hexagon/star/heart/arch. */
   shape: PipShape;
   /** Border width in px (canvas space). 0 = no border. */
   borderWidth: number;
   borderColor: string;
+  /**
+   * R25 — when true, the border is stroked with the two-stop brand-gold
+   * gradient ring instead of the flat `borderColor` (the gradient IS the
+   * colour; `borderColor` is kept for when the flag is turned back off).
+   * Optional/absent = flat colour, exactly as before.
+   */
+  ringGradient?: boolean;
   /** Soft drop shadow. */
   shadow: boolean;
+  /**
+   * R25 — soft coloured glow around the shape (for dark scenes), drawn
+   * under the media from the same shape path. Optional/absent = off.
+   */
+  glow?: boolean;
+  /** Glow colour (hex). Absent = brand gold (#FFD100). */
+  glowColor?: string;
   /** True when this video item is a PiP overlay (drawn on top of the main video). */
   isPip: boolean;
   /**

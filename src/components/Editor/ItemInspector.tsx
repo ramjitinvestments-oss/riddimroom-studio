@@ -4,7 +4,9 @@ import { ArrowLeft, ArrowLeftToLine, ArrowRight, ArrowRightToLine, Check, Crop, 
 import { SlotTrimPicker } from './SlotTrimPicker';
 import { ReframePicker } from './ReframePicker';
 import { hasCroppableSlack, resolveSourceDuration } from '../../lib/timeline/trimWindow';
-import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, TimelineItem } from '../../types/timeline';
+import type { AnimationPreset, AudioTimelineItem, CaptionTimelineItem, MotionDirection, MotionEffectType, MotionSettings, PipSettings, PipShape, TimelineItem } from '../../types/timeline';
+import { pipShapeRefitZoom } from '../../lib/pip';
+import { PipRingControls, PipShapeStrip } from './PipShapeControls';
 import { useProject } from '../../context/ProjectContext';
 import {
   updateItem,
@@ -333,18 +335,30 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
           </div>
           {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
             <>
-              <label className="flex flex-col gap-1 text-xs">
-                Shape
-                <select
-                  value={(item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded'}
-                  onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, shape: e.target.value } })}
-                  className="bg-white/10 rounded px-2 py-2 text-white min-h-11"
-                >
-                  <option value="circle">Circle</option>
-                  <option value="rounded">Rounded</option>
-                  <option value="square">Square</option>
-                </select>
-              </label>
+              {/* R25 — same nine shapes + finishes as the PiP panel
+                  (shared PipShapeControls), incl. the shape-change
+                  crop-zoom refit by the new shape's safe factor. */}
+              <PipShapeStrip
+                value={((item as { pip?: { shape?: PipShape } }).pip?.shape ?? 'rounded') as PipShape}
+                onChange={(shape) =>
+                  patch({
+                    pip: { ...(item as { pip?: object }).pip, shape },
+                    cropZoom: pipShapeRefitZoom((item as { cropZoom?: number }).cropZoom, shape),
+                  })
+                }
+              />
+              <PipRingControls
+                pip={
+                  ((item as { pip?: PipSettings }).pip ?? {
+                    shape: 'rounded',
+                    borderWidth: 4,
+                    borderColor: '#FFFFFF',
+                    shadow: true,
+                    isPip: true,
+                  }) as PipSettings
+                }
+                onPatch={(p) => patch({ pip: { ...(item as { pip?: object }).pip, ...p } })}
+              />
               <label className="flex flex-col gap-1 text-xs">
                 Border width ({(item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4}px)
                 <input type="range" min={0} max={12} step={1} value={(item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4} onChange={(e) => patch({ pip: { ...(item as { pip?: object }).pip, borderWidth: Number(e.target.value) } })} />

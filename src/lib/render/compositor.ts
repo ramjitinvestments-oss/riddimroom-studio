@@ -37,6 +37,7 @@
 
 import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSettings, EndTransformSettings, FramingSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { canvasFontStack } from '../fonts';
+import { PIP_GOLD_RING_STOPS, tracePipShapePath } from '../pip';
 import { getItemsAtTime } from '../timeline/utils';
 import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle, resolveCaptionFontPx } from '../captions/styles';
@@ -1075,9 +1076,94 @@ export function pipBoxPx(
   return { w, h };
 }
 
+/** The PiP finish fields the compositor consumes (mirrors PipSettings). */
+export interface PipDrawSettings {
+  shape: string;
+  borderWidth: number;
+  borderColor: string;
+  /** R25: stroke the border with the two-stop gold gradient ring. */
+  ringGradient?: boolean;
+  shadow: boolean;
+  /** R25: soft coloured glow under the media, from the same shape path. */
+  glow?: boolean;
+  glowColor?: string;
+  isPip: boolean;
+  fit?: 'cover' | 'source';
+}
+
+/**
+ * R25 — clip the context to a PiP shape's outline (box w × h, centred on
+ * the origin). The outline comes from the ONE registry tracer in
+ * `lib/pip.ts`, so the clip, the border and the glow can never disagree
+ * about a shape's geometry. Exported for the geometry tests.
+ */
+export function clipPipShape(
+  c: CanvasRenderingContext2D,
+  shape: string,
+  w: number,
+  h: number,
+): void {
+  c.beginPath();
+  tracePipShapePath(c, shape, w, h);
+  c.clip();
+}
+
+/**
+ * R25 — stroke a PiP shape's outline as its border. Flat `borderColor`,
+ * or the two-stop gold gradient ring when `ringGradient` is set. Traces
+ * the same registry path as `clipPipShape` — the ring sits exactly on
+ * the clipped edge. Exported for the geometry tests.
+ */
+export function strokePipBorder(
+  c: CanvasRenderingContext2D,
+  pip: { shape: string; borderWidth: number; borderColor: string; ringGradient?: boolean },
+  w: number,
+  h: number,
+): void {
+  c.save();
+  c.lineWidth = pip.borderWidth;
+  if (pip.ringGradient) {
+    const grad = c.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+    grad.addColorStop(0, PIP_GOLD_RING_STOPS[0]);
+    grad.addColorStop(1, PIP_GOLD_RING_STOPS[1]);
+    c.strokeStyle = grad;
+  } else {
+    c.strokeStyle = pip.borderColor;
+  }
+  c.beginPath();
+  tracePipShapePath(c, pip.shape, w, h);
+  c.stroke();
+  c.restore();
+}
+
+/**
+ * R25 — paint the soft glow: the shape path filled with the glow colour
+ * while a same-colour shadow bleeds outward. Drawn BEFORE the media (the
+ * media covers the fill; only the bled shadow shows, hugging the shape).
+ * Exported for the geometry tests.
+ */
+export function paintPipGlow(
+  c: CanvasRenderingContext2D,
+  pip: { shape: string; glowColor?: string },
+  w: number,
+  h: number,
+): void {
+  const color = pip.glowColor ?? '#FFD100';
+  c.save();
+  c.shadowColor = color;
+  c.shadowBlur = 26;
+  c.shadowOffsetX = 0;
+  c.shadowOffsetY = 0;
+  c.fillStyle = color;
+  c.beginPath();
+  tracePipShapePath(c, pip.shape, w, h);
+  c.fill();
+  c.restore();
+}
+
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; flipX?: boolean; cropZoom?: number; cropOffsetX?: number; cropOffsetY?: number; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean; fit?: 'cover' | 'source' } },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; flipX?: boolean; cropZoom?: number; cropOffsetX?: number; cropOffsetY?: number; pip?: PipDrawSettings },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -1105,21 +1191,15 @@ function drawVideoItem(
       // PiP clipping: circle / rounded-rect clip + optional border + shadow.
       // Runs inside the item's own transform context, so it tracks position/rotation/scale.
       const pip = isPip ? item.pip! : null;
+      if (pip?.glow) paintPipGlow(c, pip, w, h);
       if (pip) {
         c.save();
         if (pip.shadow) { c.shadowColor = 'rgba(0,0,0,0.45)'; c.shadowBlur = 18; c.shadowOffsetY = 6; }
-        c.beginPath();
-        if (pip.shape === 'circle') {
-          // Circle inscribed in the video rect (uses min side so it stays round even for 16:9 sources).
-          const r = Math.min(w, h) / 2;
-          c.arc(0, 0, r, 0, Math.PI * 2);
-        } else if (pip.shape === 'rounded') {
-          const rad = Math.min(28, Math.min(w, h) * 0.12);
-          c.roundRect(-w / 2, -h / 2, w, h, rad);
-        } else {
-          c.rect(-w / 2, -h / 2, w, h);
-        }
-        c.clip();
+        // R25: the clip outline comes from the shape registry — for the
+        // original three shapes the traced regions are identical to the
+        // hand-coded branches they replace (arc / roundRect radius /
+        // rect); the six new shapes trace their own outlines here.
+        clipPipShape(c, pip.shape, w, h);
       }
       try {
         // COVER fit: crop the source to the target rect's aspect (see
@@ -1160,23 +1240,11 @@ function drawVideoItem(
       }
       if (pip) {
         c.restore();
-        // Border drawn after restore (outside clip) so it is not clipped away.
+        // Border drawn after restore (outside clip) so it is not clipped
+        // away — stroked along the same registry path as the clip (flat
+        // colour, or the R25 gold gradient ring).
         if (pip.borderWidth > 0) {
-          c.save();
-          c.lineWidth = pip.borderWidth;
-          c.strokeStyle = pip.borderColor;
-          c.beginPath();
-          if (pip.shape === 'circle') {
-            const r = Math.min(w, h) / 2;
-            c.arc(0, 0, r, 0, Math.PI * 2);
-          } else if (pip.shape === 'rounded') {
-            const rad = Math.min(28, Math.min(w, h) * 0.12);
-            c.roundRect(-w / 2, -h / 2, w, h, rad);
-          } else {
-            c.rect(-w / 2, -h / 2, w, h);
-          }
-          c.stroke();
-          c.restore();
+          strokePipBorder(c, pip, w, h);
         }
       }
       drawAdjustmentOverlay(c, w / 2, h / 2, adjustment);
