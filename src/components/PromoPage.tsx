@@ -9,7 +9,7 @@ import {
   PROMO_SKINS, type PromoRecipeId, type PromoSkinId, type PromoTexts, type SliceInput,
 } from '../lib/promo/recipes';
 import { ASPECT_RATIO_OPTIONS } from '../lib/aspectRatios';
-import { createProject, saveProject } from '../lib/projects/persistence';
+import { createDefaultProject, createProject, saveProject } from '../lib/projects/persistence';
 import { uploadMediaFile } from '../lib/media/upload';
 import { probeAudioDurationSeconds } from '../lib/media/tracks';
 import { loadBrandKit, saveBrandKit } from '../lib/promo/brandKit';
@@ -24,6 +24,8 @@ import {
   bankSuggestion,
   type NoTextPurpose,
   cycleAlternate,
+  posterAlternates,
+  posterSuggestion,
   fieldAlternates,
   mergeIntoUntouched,
   splitHeadline,
@@ -48,6 +50,18 @@ import { loadArtworkFixes, saveArtworkFixes } from '../lib/promo/fixes';
 import type { SnapCorrection } from '../lib/promo/snap';
 import { applyCameraTour, applyHomecoming, applyStageBackdrop } from '../lib/promo/camera';
 import { enforceTextLayout } from '../lib/promo/layout';
+import {
+  POSTER_FORMATS,
+  buildPosterProject,
+  createCanvasMeasurer,
+  createScrimFile,
+  pickPosterLayout,
+  renderPosterStillBlob,
+  type PosterFormatId,
+  type PosterLayout,
+  type PosterLayoutChoice,
+} from '../lib/promo/poster';
+import type { FrameAssets } from '../lib/render/compositor';
 import { RefreshCw } from 'lucide-react';
 import { DEFAULT_PROMO_FONT, FONT_OPTIONS, ensureFontsLoaded } from '../lib/fonts';
 import { addItem, addMediaAsset, generateTimelineId, getTracksByType, updateItem } from '../lib/timeline/utils';
@@ -281,6 +295,31 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [captionSize, setCaptionSize] = useState<CaptionSizeTier>('L');
   const [hookTrim, setHookTrim] = useState(true);
   const trackAnalysisCacheRef = useRef(new Map<string, Promise<{ beats: number[]; bpm: number; hook: number } | null>>());
+
+  /** R23 Headline Poster: the user's own photo + one headline + one
+      sub, built as a normal project by lib/promo/poster. Suggestions
+      fill only fields the user has not touched (posterTouchedRef),
+      exactly like the artwork flow's touchedRef rule. */
+  const [posterOpen, setPosterOpen] = useState(false);
+  const [posterPicked, setPosterPicked] = useState<PickedFile | null>(null);
+  const [posterAnalysis, setPosterAnalysis] = useState<ArtworkAnalysis | null>(null);
+  const [posterTexts, setPosterTexts] = useState<{ headline: string; sub: string }>({ headline: '', sub: '' });
+  const posterTouchedRef = useRef<Set<'headline' | 'sub'>>(new Set());
+  const [posterLayoutChoice, setPosterLayoutChoice] = useState<PosterLayoutChoice>('auto');
+  const [posterPurpose, setPosterPurpose] = useState<NoTextPurpose | null>(null);
+  const [posterProject, setPosterProject] = useState<Project | null>(null);
+  const [posterPreviewUrl, setPosterPreviewUrl] = useState<string | null>(null);
+  const [posterStatus, setPosterStatus] = useState('');
+  const [posterError, setPosterError] = useState<string | null>(null);
+  const [posterNote, setPosterNote] = useState<string | null>(null);
+  /** Uploaded assets of the built master, kept so the 4:5 / 1:1
+      derivatives reuse the same photo (scrims are per-format). */
+  const posterBuiltRef = useRef<{
+    photo: MediaAsset;
+    layout: PosterLayout;
+    scrims: Partial<Record<PosterFormatId, MediaAsset | null>>;
+    stillBlob: Blob | null;
+  } | null>(null);
 
   /** Decode a track once (cached per file) and read its beat grid
       + hook position — the Viral Finish runs on these. */
@@ -576,6 +615,250 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setError(err?.message || 'That file could not be read as an image.');
     }
   }, [runSuggestion]);
+
+  /** R23: the SuggestionContext for poster copy — the same
+      construction the artwork flow builds in runSuggestion (kind +
+      file name + purpose + brand name), pointed at the poster photo. */
+  const posterCtx = useCallback(
+    (pickedFile: PickedFile, a: ArtworkAnalysis, purpose: NoTextPurpose | null): SuggestionContext => ({
+      kind: a.suggestedKind,
+      fileName: pickedFile.file.name,
+      purpose,
+      brandName: brandNameRef.current || undefined,
+    }),
+    [],
+  );
+
+  /** R23: fill headline/sub from the poster bank — untouched fields
+      only; a field the user has typed in or cycled is theirs. */
+  const applyPosterSuggestion = useCallback(
+    (pickedFile: PickedFile, a: ArtworkAnalysis, purpose: NoTextPurpose | null) => {
+      const s = posterSuggestion(posterCtx(pickedFile, a, purpose));
+      setPosterTexts((t) => ({
+        headline: posterTouchedRef.current.has('headline') ? t.headline : s.headline || t.headline,
+        sub: posterTouchedRef.current.has('sub') ? t.sub : s.sub || t.sub,
+      }));
+    },
+    [posterCtx],
+  );
+
+  const handlePosterPurpose = useCallback(
+    (purpose: NoTextPurpose) => {
+      setPosterPurpose(purpose);
+      if (posterPicked && posterAnalysis) applyPosterSuggestion(posterPicked, posterAnalysis, purpose);
+    },
+    [posterPicked, posterAnalysis, applyPosterSuggestion],
+  );
+
+  const cyclePosterField = useCallback(
+    (field: 'headline' | 'sub') => {
+      if (!posterPicked || !posterAnalysis) return;
+      posterTouchedRef.current.add(field);
+      const alternates = posterAlternates(field, posterCtx(posterPicked, posterAnalysis, posterPurpose));
+      setPosterTexts((t) => ({ ...t, [field]: cycleAlternate(alternates, t[field]) }));
+    },
+    [posterPicked, posterAnalysis, posterCtx, posterPurpose],
+  );
+
+  const handlePosterFile = useCallback(
+    async (file: File) => {
+      setPosterError(null);
+      try {
+        const { analysis: a, bitmap } = await analyzeImageFile(file);
+        const next: PickedFile = { file, bitmap, previewUrl: URL.createObjectURL(file) };
+        setPosterPicked((prev) => {
+          if (prev) URL.revokeObjectURL(prev.previewUrl);
+          return next;
+        });
+        setPosterAnalysis(a);
+        // A new photo invalidates any poster built from the old one.
+        setPosterProject(null);
+        posterBuiltRef.current = null;
+        setPosterPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return null;
+        });
+        applyPosterSuggestion(next, a, posterPurpose);
+      } catch (err: any) {
+        setPosterError(err?.message || 'That file could not be read as an image.');
+      }
+    },
+    [applyPosterSuggestion, posterPurpose],
+  );
+
+  const resolvedPosterLayout = useCallback((): PosterLayout => {
+    if (posterLayoutChoice !== 'auto') return posterLayoutChoice;
+    return posterAnalysis ? pickPosterLayout(posterAnalysis) : 'B';
+  }, [posterLayoutChoice, posterAnalysis]);
+
+  /** R23: FrameAssets for a still render, mirroring the export
+      renderer's preload (canvas2dRenderer): one detached <img> per
+      image asset in the project, keyed by asset id and loaded from
+      the asset's storage URL, waiting for load before drawing. */
+  const loadPosterFrameAssets = useCallback(async (project: Project): Promise<FrameAssets> => {
+    const images = new Map<string, HTMLImageElement>();
+    await Promise.all(
+      Object.values(project.mediaAssets)
+        .filter((asset) => asset.kind === 'image')
+        .map(
+          (asset) =>
+            new Promise<void>((resolve) => {
+              const el = new Image();
+              el.crossOrigin = 'anonymous';
+              el.addEventListener('load', () => resolve(), { once: true });
+              el.addEventListener('error', () => resolve(), { once: true });
+              el.src = asset.storageUrl;
+              images.set(asset.id, el);
+              if (el.complete) resolve();
+            }),
+        ),
+    );
+    return { images };
+  }, []);
+
+  const downloadPosterBlob = useCallback((blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }, []);
+
+  const handleBuildPoster = useCallback(async () => {
+    if (!currentUser || !posterPicked || !posterAnalysis) return;
+    setPosterError(null);
+    setPosterNote(null);
+    try {
+      const uid = currentUser.uid;
+      const format = POSTER_FORMATS['9:16'];
+      const layout = resolvedPosterLayout();
+      const base = cleanName(posterPicked.file.name);
+      setPosterStatus('Creating your poster project…');
+      // Same licensing rule as handleBuild: free-tier projects carry
+      // the watermark, so the still does too (the compositor draws
+      // the watermark pill into the frame).
+      let project = await createProject(uid, `Headline Poster — ${base}`, format.canvasWidth, format.canvasHeight, {
+        watermarkEnabled: tier !== 'lifetime',
+      });
+      setPosterStatus('Uploading your photo…');
+      const photo = (await uploadMediaFile({ uid, file: posterPicked.file })).asset;
+      setPosterStatus('Building the poster…');
+      const scrimFile = await createScrimFile(layout, format.canvasWidth, format.canvasHeight);
+      const scrim = (await uploadMediaFile({ uid, file: scrimFile })).asset;
+      project = buildPosterProject(
+        project,
+        photo,
+        scrim,
+        {
+          headline: posterTexts.headline.trim(),
+          sub: posterTexts.sub.trim() || undefined,
+          headlineFont: fontFamily,
+        },
+        { layout },
+        createCanvasMeasurer(),
+      );
+      project = enforceTextLayout(project);
+      setPosterStatus('Saving…');
+      project = await saveProject(project);
+      setPosterProject(project);
+      posterBuiltRef.current = { photo, layout, scrims: { '9:16': scrim }, stillBlob: null };
+      setPosterStatus('Rendering your preview…');
+      const blob = await renderPosterStillBlob(project, await loadPosterFrameAssets(project));
+      if (posterBuiltRef.current) posterBuiltRef.current.stillBlob = blob;
+      setPosterPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setPosterNote(
+        'Poster saved as its own project — download it below, re-render it in another format, open it in the editor, or animate it.',
+      );
+    } catch (err: any) {
+      setPosterError(err?.message || 'The poster could not be built. Try again.');
+    } finally {
+      setPosterStatus('');
+    }
+  }, [currentUser, posterPicked, posterAnalysis, resolvedPosterLayout, posterTexts, fontFamily, tier, loadPosterFrameAssets]);
+
+  /** R23: download the 9:16 master still, or a 4:5 / 1:1 derivative —
+      a FRESH build at that format's canvas (the builder re-lays the
+      text out; never a crop), rendered and downloaded without saving
+      a second project. The photo asset is reused; the scrim is
+      created per format because its gradient is sized to its canvas. */
+  const handleDownloadPoster = useCallback(
+    async (formatId: PosterFormatId) => {
+      const master = posterProject;
+      const built = posterBuiltRef.current;
+      if (!currentUser || !master || !built) return;
+      setPosterError(null);
+      try {
+        if (formatId === '9:16') {
+          const blob = built.stillBlob ?? (await renderPosterStillBlob(master, await loadPosterFrameAssets(master)));
+          downloadPosterBlob(blob, 'headline-poster-9x16.png');
+          return;
+        }
+        const format = POSTER_FORMATS[formatId];
+        setPosterStatus(`Rendering the ${formatId} poster…`);
+        let scrim = built.scrims[formatId];
+        if (scrim === undefined) {
+          const scrimFile = await createScrimFile(built.layout, format.canvasWidth, format.canvasHeight);
+          scrim = (await uploadMediaFile({ uid: currentUser.uid, file: scrimFile })).asset;
+          built.scrims[formatId] = scrim;
+        }
+        // createDefaultProject (not createProject): the derivative
+        // is rendered and discarded — only the 9:16 master is saved.
+        let derivative = createDefaultProject(currentUser.uid, master.name, format.canvasWidth, format.canvasHeight, {
+          watermarkEnabled: tier !== 'lifetime',
+        });
+        derivative = buildPosterProject(
+          derivative,
+          built.photo,
+          scrim,
+          {
+            headline: posterTexts.headline.trim(),
+            sub: posterTexts.sub.trim() || undefined,
+            headlineFont: fontFamily,
+          },
+          { layout: built.layout },
+          createCanvasMeasurer(),
+        );
+        derivative = enforceTextLayout(derivative);
+        const blob = await renderPosterStillBlob(derivative, await loadPosterFrameAssets(derivative));
+        downloadPosterBlob(blob, `headline-poster-${formatId.replace(':', 'x')}.png`);
+      } catch (err: any) {
+        setPosterError(err?.message || 'That poster could not be rendered. Try again.');
+      } finally {
+        setPosterStatus('');
+      }
+    },
+    [currentUser, posterProject, posterTexts, fontFamily, tier, loadPosterFrameAssets, downloadPosterBlob],
+  );
+
+  /** R23 WS4: flatten the built poster to a PNG and hand it to the
+      existing promo flow as source art — handleFiles runs the same
+      analysis/suggestion path as a user upload, so recipes, the word
+      camera tour and Homecoming all apply to it unchanged. The
+      layered poster project stays saved for editing. */
+  const handleAnimatePoster = useCallback(async () => {
+    const master = posterProject;
+    const built = posterBuiltRef.current;
+    if (!master || !built) return;
+    setPosterError(null);
+    try {
+      setPosterStatus('Flattening your poster…');
+      const blob = built.stillBlob ?? (await renderPosterStillBlob(master, await loadPosterFrameAssets(master)));
+      built.stillBlob = blob;
+      const file = new File([blob], 'headline-poster.png', { type: 'image/png' });
+      await handleFiles([file]);
+      setPosterNote(
+        'Your poster is loaded as the artwork — pick a recipe and style in the sections below, then build. The layered poster project stays saved.',
+      );
+    } catch (err: any) {
+      setPosterError(err?.message || 'The poster could not be handed to the promo builder. Try again.');
+    } finally {
+      setPosterStatus('');
+    }
+  }, [posterProject, loadPosterFrameAssets, handleFiles]);
 
   /** R21: scan a website into a DRAFT profile — nothing is used
       until the user reviews and confirms it below. */
@@ -1476,6 +1759,186 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
             </div>
           )}
           {siteNote && <p className="text-[11px] text-white/40 mt-3">{siteNote}</p>}
+        </div>
+
+        <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4">
+          <label className="block text-xs font-bold uppercase tracking-wide text-white/60 mb-2">
+            Or · Headline Poster
+          </label>
+          <p className="text-xs text-white/50">
+            Turn your own photo into the poster format — one heavy headline, one sub-line, locked premium
+            type over your picture. Download it as a still, open it in the editor, or animate it with the
+            promo engine. The photo is yours — the app adds no photography of its own.
+          </p>
+          <button
+            onClick={() => setPosterOpen((v) => !v)}
+            className="mt-3 min-h-[44px] px-4 rounded-lg bg-gold text-black text-xs font-black uppercase"
+          >
+            {posterOpen ? 'Close the poster builder' : 'Make a headline poster'}
+          </button>
+          {posterOpen && (
+            <div className="mt-4 space-y-3">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handlePosterFile(f);
+                  e.target.value = '';
+                }}
+                className="block w-full text-sm text-white/70 file:mr-3 file:px-4 file:py-2 file:rounded-lg file:border file:border-gold/60 file:bg-gold/15 file:text-gold file:text-xs file:font-bold file:uppercase"
+              />
+              {posterPicked && (
+                <div className="flex gap-4 items-start">
+                  <img src={posterPicked.previewUrl} alt="Poster photo" className="w-20 rounded-lg border border-white/10" />
+                  {posterAnalysis && (
+                    <div className="text-xs text-white/60 space-y-1">
+                      <p>
+                        {posterAnalysis.width} × {posterAnalysis.height}px — layout auto-pick reads the calm
+                        zones of your photo; override it below any time.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">What's it for?</span>
+                {(
+                  [
+                    ['event', 'Party / Event'],
+                    ['product', 'Product'],
+                    ['business', 'Business'],
+                    ['look', 'Just the look'],
+                  ] as Array<[NoTextPurpose, string]>
+                ).map(([id, label]) => (
+                  <button key={id} type="button" onClick={() => handlePosterPurpose(id)} className={chipCls(posterPurpose === id)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {(
+                [
+                  ['headline', 'Headline — e.g. ON ISLAND TIME.'],
+                  ['sub', 'Sub line — one quiet scene line'],
+                ] as Array<['headline' | 'sub', string]>
+              ).map(([field, placeholder]) => (
+                <div key={field}>
+                  <div className="relative">
+                    <input
+                      className={`${inputCls} pr-10`}
+                      placeholder={placeholder}
+                      value={posterTexts[field]}
+                      onChange={(e) => {
+                        posterTouchedRef.current.add(field);
+                        setPosterTexts((t) => ({ ...t, [field]: e.target.value }));
+                      }}
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Another suggestion for the poster ${field}`}
+                      title="Another suggestion"
+                      onClick={() => cyclePosterField(field)}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
+                    >
+                      <RefreshCw size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <p className="text-[11px] text-white/40">Suggestions from the poster bank — your words always win. Type anything and it stays yours.</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Layout</span>
+                <button type="button" onClick={() => setPosterLayoutChoice('auto')} className={chipCls(posterLayoutChoice === 'auto')}>
+                  Auto
+                </button>
+                <button type="button" onClick={() => setPosterLayoutChoice('B')} className={chipCls(posterLayoutChoice === 'B')}>
+                  Bottom band
+                </button>
+                <button type="button" onClick={() => setPosterLayoutChoice('T')} className={chipCls(posterLayoutChoice === 'T')}>
+                  Top overlay
+                </button>
+                {posterAnalysis && (
+                  <span className="text-[11px] text-white/40">
+                    {posterLayoutChoice === 'auto'
+                      ? `Auto picked: ${pickPosterLayout(posterAnalysis) === 'B' ? 'Bottom band' : 'Top overlay'}`
+                      : posterLayoutChoice === 'B'
+                        ? 'Bottom band — text in the lower third over a dark scrim'
+                        : 'Top overlay — text over the calm top zone'}
+                  </span>
+                )}
+              </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Headline type style</span>
+                <select
+                  aria-label="Poster headline font"
+                  value={fontFamily}
+                  onChange={(e) => setFontFamily(e.target.value)}
+                  className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-gold/60"
+                  style={{ fontFamily }}
+                >
+                  {FONT_OPTIONS.map((f) => (
+                    <option key={f.family} value={f.family}>
+                      {f.label} — {f.vibe}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                onClick={() => void handleBuildPoster()}
+                disabled={!posterPicked || !!posterStatus || !currentUser}
+                className="w-full min-h-[48px] py-3 rounded-lg bg-gold hover:bg-gold-bright disabled:opacity-50 text-black text-sm font-black uppercase tracking-wide"
+              >
+                {posterStatus || 'Build poster'}
+              </button>
+              {posterError && <p className="text-xs text-red-400">{posterError}</p>}
+              {posterNote && <p className="text-[11px] text-white/50">{posterNote}</p>}
+              {posterProject && posterPreviewUrl && (
+                <div className="space-y-3 pt-1">
+                  <img
+                    src={posterPreviewUrl}
+                    alt="Your headline poster"
+                    className="mx-auto w-full max-w-[240px] rounded-md border border-white/10"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => void handleDownloadPoster('9:16')}
+                      disabled={!!posterStatus}
+                      className="min-h-[40px] px-3 rounded-lg bg-gold text-black text-[11px] font-black uppercase disabled:opacity-50"
+                    >
+                      Download poster (PNG)
+                    </button>
+                    {(['4:5', '1:1'] as PosterFormatId[]).map((formatId) => (
+                      <button
+                        key={formatId}
+                        onClick={() => void handleDownloadPoster(formatId)}
+                        disabled={!!posterStatus}
+                        className="min-h-[40px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80 disabled:opacity-50"
+                      >
+                        Download {formatId}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => onOpenProject(posterProject.id)}
+                      className="min-h-[40px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                    >
+                      Open in editor
+                    </button>
+                    <button
+                      onClick={() => void handleAnimatePoster()}
+                      disabled={!!posterStatus}
+                      className="min-h-[40px] px-3 rounded-lg border border-gold bg-gold/15 hover:bg-gold/25 text-gold text-[11px] font-black uppercase disabled:opacity-50"
+                    >
+                      Animate this poster
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-white/35">
+                    The 4:5 and 1:1 posters are re-laid out for their canvas — never a crop of the 9:16.
+                    Animating loads the finished poster as artwork above, ready to pick a recipe.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {phase !== 'pick' && (

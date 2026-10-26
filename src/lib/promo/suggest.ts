@@ -219,6 +219,107 @@ export function fieldAlternates(field: SuggestionField, ctx: SuggestionContext):
   }
 }
 
+// ---------------------------------------------------------------------------
+// R23 WS3 — Headline Poster bank.
+//
+// Generic, user-facing poster copy for every Studio user: no
+// RiddimRoom branding and no Caribbean-only slang (this bank ships
+// to all users, unlike the genre banks above). Formula per pair: a
+// stamped identity phrase as the headline (short, caps-ready, and —
+// the bank's one punctuation convention — always ending with a
+// period; the builder uppercases it) plus one scene line with a
+// quiet claim as the sub, in sentence case.
+//
+// Context mapping onto the types that already exist in this file:
+// the R20 `NoTextPurpose` ('event' | 'product' | 'business' |
+// 'look') is the bank key when the user answered the purpose
+// question. Without a purpose, the genre resolution decides:
+// business / real-estate genres read as 'business', a portrait
+// with no stated purpose reads as 'look', and everything else
+// (flyers, logos, the party genres) reads as 'event'.
+// ---------------------------------------------------------------------------
+
+export interface PosterSuggestion {
+  headline: string;
+  sub: string;
+}
+
+interface PosterBank {
+  pairs: PosterSuggestion[];
+  extraHeadlines: string[];
+  extraSubs: string[];
+}
+
+const POSTER_BANKS: Record<NoTextPurpose, PosterBank> = {
+  event: {
+    pairs: [
+      { headline: 'ONE NIGHT ONLY.', sub: 'A single night, done properly, with everyone in the room.' },
+      { headline: 'THE NIGHT IS SET.', sub: 'Good music, good people, and a real reason to be there.' },
+      { headline: 'MAKE IT A NIGHT.', sub: 'Clear the calendar and bring someone who loves a night out.' },
+      { headline: 'ALL IN ONE NIGHT.', sub: 'The performances, the people, and the moments in between.' },
+    ],
+    extraHeadlines: ['DOORS OPEN SOON.', 'SEE YOU THERE.'],
+    extraSubs: ['Arrive early and stay for the whole thing.', 'Tickets and full details are in the link.'],
+  },
+  product: {
+    pairs: [
+      { headline: 'MADE TO BE USED.', sub: 'Built for everyday use and made to last.' },
+      { headline: 'QUALITY YOU CAN FEEL.', sub: 'Every detail is finished with care, inside and out.' },
+      { headline: 'YOUR NEW FAVORITE.', sub: 'Simple, reliable, and ready from day one.' },
+      { headline: 'BUILT TO LAST.', sub: 'Strong materials and a finish that holds up.' },
+    ],
+    extraHeadlines: ['READY WHEN YOU ARE.', 'MADE WITH CARE.'],
+    extraSubs: ['Designed to fit the way you already live.', 'Available now, while stock lasts.'],
+  },
+  business: {
+    pairs: [
+      { headline: 'OPEN FOR BUSINESS.', sub: 'Local service you can book with confidence.' },
+      { headline: 'NOW BOOKING.', sub: 'Appointments are open for new and returning clients.' },
+      { headline: 'DONE PROPERLY.', sub: 'Careful work, clear prices, and a finish we stand behind.' },
+      { headline: 'TRUSTED LOCALLY.', sub: 'Serving our community with pride, every single week.' },
+    ],
+    extraHeadlines: ['BOOK WITH CONFIDENCE.', 'HERE TO HELP.'],
+    extraSubs: ['Message us today to get started.', 'Walk-ins and appointments are both welcome.'],
+  },
+  look: {
+    pairs: [
+      { headline: 'THE LOOK.', sub: 'Clean lines, strong color, and a finish that photographs beautifully.' },
+      { headline: 'OWN THE LOOK.', sub: 'A style that speaks before you say a word.' },
+      { headline: 'MADE TO BE SEEN.', sub: 'Bold enough for the camera and easy enough for every day.' },
+      { headline: 'SIMPLY STRIKING.', sub: 'No extra noise, just the look, exactly as it should be.' },
+    ],
+    extraHeadlines: ['FRESH LOOK.', 'STYLE, SIMPLIFIED.'],
+    extraSubs: ['Shot in natural light, with nothing to hide.', 'Wear it your way, any day of the week.'],
+  },
+};
+
+/** Which poster bank a suggestion context resolves to (see above). */
+function posterBankKey(ctx: SuggestionContext): NoTextPurpose {
+  if (ctx.purpose) return ctx.purpose;
+  const genre = genreForContext(ctx);
+  if (genre === 'business' || genre === 'realestate') return 'business';
+  if (ctx.kind === 'portrait') return 'look';
+  return 'event';
+}
+
+/** The instant, offline poster suggestion — the bank's lead pair. */
+export function posterSuggestion(ctx: SuggestionContext): PosterSuggestion {
+  const pair = POSTER_BANKS[posterBankKey(ctx)].pairs[0];
+  return { headline: pair.headline, sub: pair.sub };
+}
+
+/**
+ * Alternates for one poster field (the ↻ cycle, via
+ * `cycleAlternate`): every paired value for that field in bank
+ * order, then the field's standalone alternates.
+ */
+export function posterAlternates(field: 'headline' | 'sub', ctx: SuggestionContext): string[] {
+  const bank = POSTER_BANKS[posterBankKey(ctx)];
+  const paired = bank.pairs.map((p) => (field === 'headline' ? p.headline : p.sub));
+  const extras = field === 'headline' ? bank.extraHeadlines : bank.extraSubs;
+  return [...new Set([...paired, ...extras])];
+}
+
 /** Next value in a cycle: the entry after `current`, wrapping. */
 export function cycleAlternate(alternates: string[], current: string): string {
   const list = alternates.filter((a) => a.trim().length > 0);
