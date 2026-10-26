@@ -86,13 +86,18 @@ describe('planCampaign — business logo (no event)', () => {
     expect(plan.pieces.map((p) => p.id)).toContain('series-offer');
   });
 
-  it('the story cut is led by the details line, the offer cut by the CTA', () => {
+  it('R24: series cuts keep every field in its own field — no line is promoted', () => {
+    // Before R24 the story cut split the SUB into its hook and the
+    // offer cut ran the CTA as hook AND CTA (defect B6). Series
+    // hooks now come only from the alternates pool; with no pool,
+    // the variants keep the master's hook and the sub/CTA stay put.
     const story = plan.pieces.find((p) => p.id === 'series-story')!;
-    expect(story.texts.hook1).toBe('CONCRETE • FLOORING');
-    expect(story.texts.sub).toBe('ELECTRICAL');
+    expect(story.texts.hook1).toBe('ELECTRICAL');
+    expect(story.texts.sub).toBe('CONCRETE • FLOORING • REMODELING');
+    expect(story.texts.cta).toBe('CALL US TODAY');
     const offer = plan.pieces.find((p) => p.id === 'series-offer')!;
-    expect(offer.texts.hook1).toBe('CALL US');
-    expect(offer.texts.hook2).toBe('TODAY');
+    expect(offer.texts.hook1).toBe('ELECTRICAL');
+    expect(offer.texts.cta).toBe('CALL US TODAY');
     expect(offer.scheduleLabel).toBe('Day 7 — push the call to action');
   });
 

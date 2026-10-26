@@ -56,6 +56,21 @@ export interface AddPipOptions {
    * quick-mute button — all write the same `muted`/`volume` fields).
    */
   muted?: boolean;
+  /**
+   * R24 — the asset is a camera recording (the CameraCapture "Use as
+   * Overlay (PiP)" path). Camera PiPs get the WS-P3 framing default: a
+   * ROUNDED-RECTANGLE, source-aspect box (`pip.fit: 'source'`) showing
+   * the whole frame (head-and-shoulders), not the centre-cropped circle
+   * — plus the talking-head audio default above. An explicit `shape`
+   * option still wins over the rounded default. When omitted, the
+   * existing camera signal is honoured instead: the camera flow is the
+   * only current caller that passes `muted: false` (see `muted` above
+   * and MediaImportPanel/EditorShell), so `muted === false` without an
+   * explicit `fromCamera` is treated as a camera recording too — that
+   * keeps the framing correct through the wiring that already exists,
+   * with no change needed in the capture/import components.
+   */
+  fromCamera?: boolean;
 }
 
 /**
@@ -68,7 +83,12 @@ export interface AddPipOptions {
  */
 export function addPipOverlay(project: Project, asset: MediaAsset, options: AddPipOptions = {}): Project {
   const layout = getPipLayout(options.layoutId ?? 'bottom-right');
-  const shape = options.shape ?? layout.shape;
+  // R24 WS-P3: camera recordings default to the rounded, source-aspect
+  // framing — even when the caller picked the (circular) bottom-right
+  // layout, as EditorShell's overlay path always does. An explicit
+  // `shape` option is the only override.
+  const isCamera = options.fromCamera ?? options.muted === false;
+  const shape = options.shape ?? (isCamera ? 'rounded' : layout.shape);
   let next = addMediaAsset(project, asset);
   const tracks = getItemsByTrackType(next, 'video');
   void tracks;
@@ -100,8 +120,17 @@ export function addPipOverlay(project: Project, asset: MediaAsset, options: AddP
     speed: 1,
     reverse: false,
     volume: 1,
-    muted: options.muted ?? true,
-    pip: { shape, borderWidth: options.borderWidth ?? 4, borderColor: '#FFFFFF', shadow: true, isPip: true },
+    muted: options.muted ?? !isCamera,
+    pip: {
+      shape,
+      borderWidth: options.borderWidth ?? 4,
+      borderColor: '#FFFFFF',
+      shadow: true,
+      isPip: true,
+      // Camera items carry the source-aspect fit explicitly; every
+      // other PiP omits the field and keeps the legacy cover framing.
+      ...(isCamera ? { fit: 'source' as const } : {}),
+    },
   };
   return addItem(next, item);
 }

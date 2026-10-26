@@ -142,3 +142,57 @@ describe('swapMainAndPip + size mapping', () => {
     expect(swapMainAndPip(project, pip.id)).toBe(project);
   });
 });
+
+describe('addPipOverlay camera framing (R24 WS-P3)', () => {
+  const findPip = (items: ReturnType<typeof createDefaultProject>['items']) =>
+    items.find((i) => i.type === 'video' && (i as { pip?: { isPip?: boolean } }).pip?.isPip);
+
+  it('fromCamera: rounded rectangle + source-aspect fit + sound on — even with the circular bottom-right layout', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right', fromCamera: true });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.pip?.shape).toBe('rounded');
+    expect(pip.pip?.fit).toBe('source');
+    expect(pip.muted).toBe(false);
+    expect(validateProject(next).valid).toBe(true);
+  });
+
+  it('the existing camera signal (muted: false, as the capture/import path passes) gets the same framing', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right', muted: false });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.pip?.shape).toBe('rounded');
+    expect(pip.pip?.fit).toBe('source');
+  });
+
+  it('an explicit shape still wins for a camera recording (the circle stays one tap away)', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { fromCamera: true, shape: 'circle' });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.pip?.shape).toBe('circle');
+    expect(pip.pip?.fit).toBe('source');
+  });
+
+  it('explicit fromCamera: false keeps the legacy framing even when the overlay starts unmuted', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right', fromCamera: false, muted: false });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.pip?.shape).toBe('circle');
+    expect(pip.pip?.fit).toBeUndefined();
+    expect(pip.muted).toBe(false);
+  });
+
+  it('non-camera defaults are unchanged: circle layout, no fit field, muted', () => {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right' });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.pip?.shape).toBe('circle');
+    expect(pip.pip?.fit).toBeUndefined();
+    expect(pip.muted).toBe(true);
+  });
+});

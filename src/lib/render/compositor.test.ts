@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeFadeOpacity, computeLoopedSourceTime, interpolateTransform } from './compositor';
+import { computeFadeOpacity, computeLoopedSourceTime, croppedCoverSourceRect, coverSourceRect, framingSlackPx, hasActiveFraming, interpolateTransform, pipBoxPx, resolveCropOffset, resolveCropZoom } from './compositor';
 import type { Transform } from '../../types/timeline';
 
 /**
@@ -136,5 +136,244 @@ describe('croppedCoverSourceRect (item.crop is honored by the renderer)', () => 
     // full-width top band of a tall source into a wide box
     expect(croppedCoverSourceRect(1080, 1920, 1920, 1080, { x: 0, y: 10, width: 100, height: 30 }))
       .toEqual({ sx: 28, sy: 192, sw: 1024, sh: 576 });
+  });
+});
+
+describe('R24 framing resolvers — identity defaults reproduce the old rendering', () => {
+  it('zoom resolves to 1 when absent/invalid/below range and clamps at 3', () => {
+    expect(resolveCropZoom(undefined)).toBe(1);
+    expect(resolveCropZoom(Number.NaN)).toBe(1);
+    expect(resolveCropZoom(0.25)).toBe(1);
+    expect(resolveCropZoom(2)).toBe(2);
+    expect(resolveCropZoom(99)).toBe(3);
+  });
+  it('offsets resolve to 0 when absent/invalid and clamp to -1..1', () => {
+    expect(resolveCropOffset(undefined)).toBe(0);
+    expect(resolveCropOffset(Number.NaN)).toBe(0);
+    expect(resolveCropOffset(0.5)).toBe(0.5);
+    expect(resolveCropOffset(7)).toBe(1);
+    expect(resolveCropOffset(-7)).toBe(-1);
+  });
+  it('zoom 1 + centred pan (or no framing at all) is NOT active framing', () => {
+    expect(hasActiveFraming(undefined)).toBe(false);
+    expect(hasActiveFraming({})).toBe(false);
+    expect(hasActiveFraming({ cropZoom: 1, cropOffsetX: 0, cropOffsetY: 0 })).toBe(false);
+    expect(hasActiveFraming({ cropZoom: 1.5 })).toBe(true);
+    expect(hasActiveFraming({ cropOffsetX: -0.2 })).toBe(true);
+  });
+});
+
+describe('R24 croppedCoverSourceRect — crop-zoom / pan geometry', () => {
+  it('zoom-1 identity: explicit identity framing returns the exact base rect', () => {
+    const cases: Array<[number, number, number, number, { x: number; y: number; width: number; height: number } | undefined]> = [
+      [1920, 1080, 1080, 1920, undefined],
+      [1920, 1080, 500, 500, undefined],
+      [1000, 1000, 500, 500, { x: 50, y: 0, width: 50, height: 100 }],
+      [1080, 1920, 1920, 1080, { x: 0, y: 10, width: 100, height: 30 }],
+    ];
+    for (const [sw, sh, dw, dh, crop] of cases) {
+      const base = croppedCoverSourceRect(sw, sh, dw, dh, crop);
+      expect(croppedCoverSourceRect(sw, sh, dw, dh, crop, { cropZoom: 1, cropOffsetX: 0, cropOffsetY: 0 })).toEqual(base);
+      expect(croppedCoverSourceRect(sw, sh, dw, dh, crop, {})).toEqual(base);
+    }
+  });
+
+  it('zoom 2 centred shrinks the cover window around its centre, aspect preserved', () => {
+    // 16:9 source into a square box: base cover = centred 1080×1080 at sx 420.
+    const r = croppedCoverSourceRect(1920, 1080, 500, 500, undefined, { cropZoom: 2 });
+    expect(r).toEqual({ sx: 690, sy: 270, sw: 540, sh: 540 });
+  });
+
+  it('pan at zoom 1 slides across exactly the cover-fit slack, and only on the slack axis', () => {
+    const right = croppedCoverSourceRect(1920, 1080, 500, 500, undefined, { cropOffsetX: 1, cropOffsetY: 1 });
+    expect(right.sx + right.sw).toBe(1920); // pinned to the right edge
+    expect(right.sy).toBe(0); // no vertical slack at zoom 1 — offset ignored there
+    const left = croppedCoverSourceRect(1920, 1080, 500, 500, undefined, { cropOffsetX: -1 });
+    expect(left.sx).toBe(0);
+    // Tall source into a wide box: the slack is vertical instead.
+    const bottom = croppedCoverSourceRect(1080, 1920, 1920, 1080, undefined, { cropOffsetX: 1, cropOffsetY: 1 });
+    expect(bottom.sy + bottom.sh).toBe(1920);
+    expect(bottom.sx).toBe(0);
+  });
+
+  it('zooming keeps a panned edge pinned (zoom around the current pan position)', () => {
+    for (const zoom of [1, 1.5, 2, 3]) {
+      const r = croppedCoverSourceRect(1920, 1080, 500, 500, undefined, { cropZoom: zoom, cropOffsetX: 1 });
+      expect(r.sx + r.sw).toBeCloseTo(1920, 6);
+      const l = croppedCoverSourceRect(1920, 1080, 500, 500, undefined, { cropZoom: zoom, cropOffsetX: -1 });
+      expect(l.sx).toBeCloseTo(0, 6);
+    }
+  });
+
+  it('the window never leaves the source bounds at any zoom/pan corner', () => {
+    const sources: Array<[number, number]> = [[1920, 1080], [1080, 1920], [1000, 1000], [640, 480]];
+    const dests: Array<[number, number]> = [[500, 500], [1080, 1920], [1920, 1080], [345, 614]];
+    for (const [sw, sh] of sources) {
+      for (const [dw, dh] of dests) {
+        for (const zoom of [1, 1.25, 2, 3]) {
+          for (const ox of [-1, 0, 1]) {
+            for (const oy of [-1, 0, 1]) {
+              const r = croppedCoverSourceRect(sw, sh, dw, dh, undefined, { cropZoom: zoom, cropOffsetX: ox, cropOffsetY: oy });
+              expect(r.sx).toBeGreaterThanOrEqual(-1e-6);
+              expect(r.sy).toBeGreaterThanOrEqual(-1e-6);
+              expect(r.sx + r.sw).toBeLessThanOrEqual(sw + 1e-6);
+              expect(r.sy + r.sh).toBeLessThanOrEqual(sh + 1e-6);
+              expect(r.sw).toBeGreaterThan(0);
+              expect(r.sh).toBeGreaterThan(0);
+              // The window always carries the destination aspect (no distortion).
+              expect(r.sw / r.sh).toBeCloseTo(dw / dh, 6);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('the window never leaves the item crop window either (a preset crop is not violated)', () => {
+    const crop = { x: 10, y: 10, width: 50, height: 50 }; // 100..600 px on a 1000×1000 source
+    for (const zoom of [1, 2, 3]) {
+      for (const ox of [-1, 1]) {
+        for (const oy of [-1, 1]) {
+          const r = croppedCoverSourceRect(1000, 1000, 500, 500, crop, { cropZoom: zoom, cropOffsetX: ox, cropOffsetY: oy });
+          expect(r.sx).toBeGreaterThanOrEqual(100 - 1e-6);
+          expect(r.sy).toBeGreaterThanOrEqual(100 - 1e-6);
+          expect(r.sx + r.sw).toBeLessThanOrEqual(600 + 1e-6);
+          expect(r.sy + r.sh).toBeLessThanOrEqual(600 + 1e-6);
+        }
+      }
+    }
+  });
+
+  it('out-of-range stored values are clamped, not honoured literally', () => {
+    const r = croppedCoverSourceRect(1920, 1080, 500, 500, undefined, { cropZoom: 99, cropOffsetX: 42, cropOffsetY: -42 });
+    expect(r.sw).toBeCloseTo(1080 / 3, 6);
+    expect(r.sx + r.sw).toBeCloseTo(1920, 6);
+    expect(r.sy).toBeCloseTo(0, 6);
+  });
+
+  it('framingSlackPx reports per-axis room to pan (what the PiP panel gates its sliders on)', () => {
+    // Landscape into square at zoom 1: horizontal slack only.
+    expect(framingSlackPx(1920, 1080, 500, 500)).toEqual({ x: 840, y: 0 });
+    // Zooming in creates slack on BOTH axes.
+    expect(framingSlackPx(1920, 1080, 500, 500, undefined, 2)).toEqual({ x: 1380, y: 540 });
+    // Source aspect == box aspect at zoom 1: no slack anywhere.
+    expect(framingSlackPx(1920, 1080, 1920, 1080)).toEqual({ x: 0, y: 0 });
+  });
+});
+
+describe('R24 pipBoxPx — source-fit PiP box', () => {
+  it('legacy PiPs (no fit) keep the canvas-aspect box', () => {
+    expect(pipBoxPx(0.32, 1920, 1080, { shape: 'rounded' }, 720, 1280)).toEqual({ w: 614.4, h: 345.6 });
+    expect(pipBoxPx(0.32, 1920, 1080, undefined, 720, 1280)).toEqual({ w: 614.4, h: 345.6 });
+  });
+  it('source fit: height follows the source aspect at the same width (whole frame visible)', () => {
+    const box = pipBoxPx(0.32, 1920, 1080, { shape: 'rounded', fit: 'source' }, 720, 1280);
+    expect(box.w).toBeCloseTo(614.4, 6);
+    expect(box.h).toBeCloseTo((614.4 * 1280) / 720, 6);
+    expect(box.w / box.h).toBeCloseTo(720 / 1280, 6);
+  });
+  it('the circle keeps the legacy box even with source fit (its square crops by design)', () => {
+    expect(pipBoxPx(0.32, 1920, 1080, { shape: 'circle', fit: 'source' }, 720, 1280)).toEqual({ w: 614.4, h: 345.6 });
+  });
+  it('falls back to the legacy box until the source has decoded dimensions', () => {
+    expect(pipBoxPx(0.32, 1920, 1080, { shape: 'rounded', fit: 'source' }, 0, 0)).toEqual({ w: 614.4, h: 345.6 });
+  });
+});
+
+/**
+ * R24 flip render tests — `drawFrame` against a recording fake 2D
+ * context (the repo's render tests are pure/node, no DOM canvas): the
+ * flip must appear as a -1 x-scale transform around the media draw,
+ * and must NOT appear for un-flipped items.
+ */
+function makeRecordingCtx() {
+  const scaleCalls: Array<[number, number]> = [];
+  const drawImageCalls: unknown[][] = [];
+  const gradient = { addColorStop: () => {} };
+  const ctx: Record<string, unknown> = {
+    globalAlpha: 1,
+    filter: '',
+    fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
+    font: '',
+    textAlign: '',
+    textBaseline: '',
+    shadowColor: '',
+    shadowBlur: 0,
+    shadowOffsetY: 0,
+    globalCompositeOperation: 'source-over',
+    save: () => {},
+    restore: () => {},
+    clearRect: () => {},
+    fillRect: () => {},
+    fill: () => {},
+    stroke: () => {},
+    beginPath: () => {},
+    clip: () => {},
+    arc: () => {},
+    rect: () => {},
+    roundRect: () => {},
+    fillText: () => {},
+    translate: () => {},
+    rotate: () => {},
+    transform: () => {},
+    scale: (x: number, y: number) => {
+      scaleCalls.push([x, y]);
+    },
+    measureText: (t: string) => ({ width: t.length * 6 }),
+    createRadialGradient: () => gradient,
+    createLinearGradient: () => gradient,
+    drawImage: (...args: unknown[]) => {
+      drawImageCalls.push(args);
+    },
+  };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, scaleCalls, drawImageCalls };
+}
+
+describe('R24 drawFrame — Flip mirrors the media draw transform', () => {
+  it('a flipped PiP video draws with a -1 x-scale; an un-flipped one never does', async () => {
+    const { drawFrame } = await import('./compositor');
+    const { createDefaultProject } = await import('../projects/persistence');
+    const { addPipOverlay } = await import('../pip');
+    const asset = {
+      id: 'flip-vid', kind: 'video' as const, fileName: 'head.mp4', mimeType: 'video/mp4',
+      storageUrl: 'https://example.com/v.mp4', sizeBytes: 1, durationSeconds: 10, width: 1280, height: 720, createdAt: 1,
+    };
+    const videoEl = { videoWidth: 1280, videoHeight: 720 } as unknown as HTMLVideoElement;
+
+    const plain = addPipOverlay(createDefaultProject('uid-1'), asset, {});
+    const plainRec = makeRecordingCtx();
+    drawFrame(plainRec.ctx, plain, 1, { images: new Map(), videos: new Map([[asset.id, videoEl]]) });
+    expect(plainRec.drawImageCalls.length).toBeGreaterThan(0);
+    expect(plainRec.scaleCalls.some(([x]) => x === -1)).toBe(false);
+
+    const flippedProject = addPipOverlay(createDefaultProject('uid-1'), asset, {});
+    const pipItem = flippedProject.items.find((i) => i.type === 'video');
+    if (!pipItem || pipItem.type !== 'video') throw new Error('expected a PiP video item');
+    pipItem.flipX = true;
+    const flipRec = makeRecordingCtx();
+    drawFrame(flipRec.ctx, flippedProject, 1, { images: new Map(), videos: new Map([[asset.id, videoEl]]) });
+    expect(flipRec.drawImageCalls.length).toBeGreaterThan(0);
+    expect(flipRec.scaleCalls).toContainEqual([-1, 1]);
+  });
+
+  it('a flipped image item draws with a -1 x-scale too', async () => {
+    const { drawFrame } = await import('./compositor');
+    const { createDefaultProject } = await import('../projects/persistence');
+    const { appendMediaToTimeline } = await import('../timeline/insert');
+    const asset = {
+      id: 'flip-img', kind: 'image' as const, fileName: 'photo.jpg', mimeType: 'image/jpeg',
+      storageUrl: 'https://example.com/p.jpg', sizeBytes: 1, width: 400, height: 300, createdAt: 1,
+    };
+    const imgEl = { complete: true, naturalWidth: 400, naturalHeight: 300 } as unknown as HTMLImageElement;
+    const project = appendMediaToTimeline(createDefaultProject('uid-1'), asset, {});
+    const imgItem = project.items.find((i) => i.type === 'image');
+    if (!imgItem || imgItem.type !== 'image') throw new Error('expected an image item');
+    imgItem.flipX = true;
+    const rec = makeRecordingCtx();
+    drawFrame(rec.ctx, project, 0.5, { images: new Map([[asset.id, imgEl]]), videos: new Map() });
+    expect(rec.drawImageCalls.length).toBeGreaterThan(0);
+    expect(rec.scaleCalls).toContainEqual([-1, 1]);
   });
 });

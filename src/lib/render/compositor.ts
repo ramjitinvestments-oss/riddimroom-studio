@@ -35,7 +35,7 @@
  * opposing opacity ramps.
  */
 
-import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSettings, EndTransformSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
+import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSettings, EndTransformSettings, FramingSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { canvasFontStack } from '../fonts';
 import { getItemsAtTime } from '../timeline/utils';
 import { colorGradeToFilter } from '../grades';
@@ -951,26 +951,133 @@ export function coverSourceRect(
  * `item.crop` real — before this helper existed the field was written
  * by nothing and read by nothing.
  */
+/** R24 — clamps a stored crop-zoom to its supported range; anything unusable (absent, non-finite, < 1) is exactly 1 = today's cover fit. */
+export function resolveCropZoom(zoom: number | undefined): number {
+  if (zoom === undefined || !Number.isFinite(zoom)) return 1;
+  return Math.max(1, Math.min(3, zoom));
+}
+
+/** R24 — clamps a stored crop-pan offset to -1..1; absent/non-finite = 0 = centred (today's cover fit). */
+export function resolveCropOffset(offset: number | undefined): number {
+  if (offset === undefined || !Number.isFinite(offset)) return 0;
+  return Math.max(-1, Math.min(1, offset));
+}
+
+/** True when a framing (R24 zoom/pan) actually changes the source rect — zoom 1 with centred pan is the pre-R24 cover fit, bit for bit. */
+export function hasActiveFraming(framing?: FramingSettings): boolean {
+  if (!framing) return false;
+  return resolveCropZoom(framing.cropZoom) !== 1 || resolveCropOffset(framing.cropOffsetX) !== 0 || resolveCropOffset(framing.cropOffsetY) !== 0;
+}
+
 export function croppedCoverSourceRect(
   srcW: number,
   srcH: number,
   destW: number,
   destH: number,
   crop?: { x: number; y: number; width: number; height: number },
+  framing?: FramingSettings,
 ): { sx: number; sy: number; sw: number; sh: number } {
-  if (!crop) return coverSourceRect(srcW, srcH, destW, destH);
-  const wx = (crop.x / 100) * srcW;
-  const wy = (crop.y / 100) * srcH;
-  const ww = (crop.width / 100) * srcW;
-  const wh = (crop.height / 100) * srcH;
-  if (!(ww > 0 && wh > 0)) return coverSourceRect(srcW, srcH, destW, destH);
+  // The base WINDOW the framing lives inside: the item's crop rect when
+  // one is set (and non-degenerate), else the whole source.
+  let wx = 0;
+  let wy = 0;
+  let ww = srcW;
+  let wh = srcH;
+  if (crop) {
+    const cx = (crop.x / 100) * srcW;
+    const cy = (crop.y / 100) * srcH;
+    const cw = (crop.width / 100) * srcW;
+    const ch = (crop.height / 100) * srcH;
+    if (cw > 0 && ch > 0) {
+      wx = cx;
+      wy = cy;
+      ww = cw;
+      wh = ch;
+    }
+  }
   const inner = coverSourceRect(ww, wh, destW, destH);
-  return { sx: wx + inner.sx, sy: wy + inner.sy, sw: inner.sw, sh: inner.sh };
+  const base = { sx: wx + inner.sx, sy: wy + inner.sy, sw: inner.sw, sh: inner.sh };
+  // Fast path: no R24 framing (or framing at its identity values) returns
+  // the base rect untouched — rendering is identical to before R24.
+  if (!hasActiveFraming(framing)) return base;
+  // Zoom: shrink the cover window by 1/zoom (aspect preserved — the
+  // cover rect already carries the destination aspect). Pan: the offset
+  // (-1..1) positions the zoomed window across its feasible range inside
+  // the base window, so the SAME stored offset keeps the same edge
+  // pinned at every zoom ("zoom around the current pan position"), and
+  // at zoom 1 it pans across exactly the cover-fit slack.
+  const zoom = resolveCropZoom(framing?.cropZoom);
+  const zw = base.sw / zoom;
+  const zh = base.sh / zoom;
+  const rangeX = Math.max(0, ww - zw);
+  const rangeY = Math.max(0, wh - zh);
+  const fracX = (resolveCropOffset(framing?.cropOffsetX) + 1) / 2;
+  const fracY = (resolveCropOffset(framing?.cropOffsetY) + 1) / 2;
+  // Final clamp: the window never leaves the base window (and therefore
+  // never leaves the source), whatever the stored values were.
+  const sx = Math.max(wx, Math.min(wx + rangeX, wx + rangeX * fracX));
+  const sy = Math.max(wy, Math.min(wy + rangeY, wy + rangeY * fracY));
+  return { sx, sy, sw: zw, sh: zh };
+}
+
+/**
+ * R24 — per-axis pan slack (source px) for a framing at `zoom`: how far
+ * the crop window can still travel inside its base window on each axis.
+ * The PiP panel enables its X/Y sliders exactly when the matching slack
+ * is > 0 — i.e. whenever the source is cover-fitted with room to move,
+ * at zoom 1 or deeper — never gated on trim/source-duration slack.
+ */
+export function framingSlackPx(
+  srcW: number,
+  srcH: number,
+  destW: number,
+  destH: number,
+  crop?: { x: number; y: number; width: number; height: number },
+  zoom?: number,
+): { x: number; y: number } {
+  let ww = srcW;
+  let wh = srcH;
+  if (crop) {
+    const cw = (crop.width / 100) * srcW;
+    const ch = (crop.height / 100) * srcH;
+    if (cw > 0 && ch > 0) {
+      ww = cw;
+      wh = ch;
+    }
+  }
+  const cover = coverSourceRect(ww, wh, destW, destH);
+  const z = resolveCropZoom(zoom);
+  return { x: Math.max(0, ww - cover.sw / z), y: Math.max(0, wh - cover.sh / z) };
+}
+
+/**
+ * R24 — the on-canvas box (px) of a PiP video item. Legacy framing
+ * ('cover'/absent, and ALWAYS for the circle shape): the box follows the
+ * canvas aspect, `canvas × scale` per axis. 'source' fit (camera PiP
+ * default): the box's height follows the SOURCE aspect at the same
+ * width, so the whole frame is visible at zoom 1. Falls back to the
+ * legacy box while the source has no decoded dimensions yet — the next
+ * frame corrects it, same philosophy as drawVideoItem's draw fallback.
+ */
+export function pipBoxPx(
+  scale: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  pip: { shape: string; fit?: 'cover' | 'source' } | undefined,
+  srcW: number,
+  srcH: number,
+): { w: number; h: number } {
+  const w = canvasWidth * scale;
+  let h = canvasHeight * scale;
+  if (pip?.fit === 'source' && pip.shape !== 'circle' && srcW > 0 && srcH > 0) {
+    h = (w * srcH) / srcW;
+  }
+  return { w, h };
 }
 
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean } },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; flipX?: boolean; cropZoom?: number; cropOffsetX?: number; cropOffsetY?: number; pip?: { shape: string; borderWidth: number; borderColor: string; shadow: boolean; isPip: boolean; fit?: 'cover' | 'source' } },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -981,8 +1088,13 @@ function drawVideoItem(
   const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
   const centerX = (effective.position.x / 100) * canvasWidth;
   const centerY = (effective.position.y / 100) * canvasHeight;
-  const w = canvasWidth * effective.scale;
-  const h = canvasHeight * effective.scale;
+  // R24: a source-fit PiP's box height follows the source aspect (see
+  // pipBoxPx); every other video keeps the canvas-aspect box.
+  const box = item.pip?.isPip
+    ? pipBoxPx(effective.scale, canvasWidth, canvasHeight, item.pip, videoEl.videoWidth, videoEl.videoHeight)
+    : { w: canvasWidth * effective.scale, h: canvasHeight * effective.scale };
+  const w = box.w;
+  const h = box.h;
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
@@ -1017,22 +1129,32 @@ function drawVideoItem(
         // element has no decoded dimensions yet (videoWidth/Height 0).
         const srcW = videoEl.videoWidth;
         const srcH = videoEl.videoHeight;
+        // R24 Flip: mirror ONLY the media (inside the PiP clip, under the
+        // un-flipped border/overlays) via a -1 x-scale around the item's
+        // centre — the destination rect is symmetric, so scale(-1, 1)
+        // mirrors it in place.
+        const flip = item.flipX === true;
+        if (flip) {
+          c.save();
+          c.scale(-1, 1);
+        }
         if (pip?.shape === 'circle') {
           // Cover-fit inside the circle: draw so the circle is fully filled (no letterbox).
           const r = Math.min(w, h) / 2;
           const size = r * 2;
           if (srcW > 0 && srcH > 0) {
-            const s = croppedCoverSourceRect(srcW, srcH, size, size, item.crop);
+            const s = croppedCoverSourceRect(srcW, srcH, size, size, item.crop, item);
             c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -size / 2, -size / 2, size, size);
           } else {
             c.drawImage(videoEl, -size / 2, -size / 2, size, size);
           }
         } else if (srcW > 0 && srcH > 0) {
-          const s = croppedCoverSourceRect(srcW, srcH, w, h, item.crop);
+          const s = croppedCoverSourceRect(srcW, srcH, w, h, item.crop, item);
           c.drawImage(videoEl, s.sx, s.sy, s.sw, s.sh, -w / 2, -h / 2, w, h);
         } else {
           c.drawImage(videoEl, -w / 2, -h / 2, w, h);
         }
+        if (flip) c.restore();
       } catch {
         // Video not yet seekable/decoded to this frame — skip this frame rather than throw.
       }
@@ -1108,11 +1230,26 @@ function drawImageItem(
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
+  // R24 framing (zoom/pan): when active, the drawn source rect comes
+  // from the same cover/zoom/pan math the video path uses, cover-fitting
+  // inside the item's crop window (or the whole image) at the box's
+  // aspect — at the box aspect the zoom-1 rect is exactly the window
+  // above, so activating framing never jumps the framing at zoom 1.
+  const framingActive = hasActiveFraming(item) && img.naturalWidth > 0 && img.naturalHeight > 0;
   applyTransformedDraw(
     ctx,
     (c) => {
       try {
-        if (hasCrop) {
+        // R24 Flip: mirror only the media, in place (see drawVideoItem).
+        const flip = item.flipX === true;
+        if (flip) {
+          c.save();
+          c.scale(-1, 1);
+        }
+        if (framingActive) {
+          const s = croppedCoverSourceRect(img.naturalWidth, img.naturalHeight, w, h, hasCrop ? crop : undefined, item);
+          c.drawImage(img, s.sx, s.sy, s.sw, s.sh, -w / 2, -h / 2, w, h);
+        } else if (hasCrop) {
           c.drawImage(
             img,
             (crop.x / 100) * img.naturalWidth,
@@ -1127,6 +1264,7 @@ function drawImageItem(
         } else {
           c.drawImage(img, -w / 2, -h / 2, w, h);
         }
+        if (flip) c.restore();
       } catch {
         // Defense in depth only — the isImageReady() gate in drawFrame is
         // the real guard against a broken image. Mirrors drawVideoItem's
@@ -1249,18 +1387,27 @@ export interface ItemBoundsPercent {
 }
 
 export function getItemBoundsPercent(
-  item: { position: Transform['position']; scale: number },
+  item: { position: Transform['position']; scale: number; pip?: { shape: string; fit?: 'cover' | 'source'; isPip: boolean } },
   itemType: 'video' | 'image' | 'text',
   canvasWidth: number,
   canvasHeight: number,
-  opts: { naturalImageAspect?: number; textWidthPx?: number; textHeightPx?: number } = {},
+  opts: { naturalImageAspect?: number; textWidthPx?: number; textHeightPx?: number; naturalVideoAspect?: number } = {},
 ): ItemBoundsPercent {
   let widthPx: number;
   let heightPx: number;
   if (itemType === 'video') {
-    // Mirrors drawVideoItem: fills the canvas at scale 1.
-    widthPx = canvasWidth * item.scale;
-    heightPx = canvasHeight * item.scale;
+    // Mirrors drawVideoItem: fills the canvas at scale 1. R24: a
+    // source-fit PiP's box height follows the source aspect instead —
+    // via pipBoxPx, the same helper drawVideoItem uses, whenever the
+    // caller can supply the source's aspect.
+    if (item.pip?.isPip && opts.naturalVideoAspect && opts.naturalVideoAspect > 0) {
+      const box = pipBoxPx(item.scale, canvasWidth, canvasHeight, item.pip, opts.naturalVideoAspect, 1);
+      widthPx = box.w;
+      heightPx = box.h;
+    } else {
+      widthPx = canvasWidth * item.scale;
+      heightPx = canvasHeight * item.scale;
+    }
   } else if (itemType === 'image') {
     // Mirrors drawImageItem: 25% of canvas width at scale 1, source aspect preserved.
     const baseWidth = canvasWidth * 0.25 * item.scale;

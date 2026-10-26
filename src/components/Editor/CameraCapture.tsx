@@ -1,6 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Clapperboard, PictureInPicture2 } from 'lucide-react';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
+import {
+  buildCaptureAttempts,
+  isLadderRetryableError,
+  previewMirrorTransform,
+  recorderOptionsForTrackSettings,
+  zoomCapabilityFromCapabilities,
+  type CaptureFpsChoice,
+  type CaptureQualityChoice,
+  type ZoomCapability,
+} from '../../lib/camera/captureQuality';
 
 /**
  * Live camera capture (photo + short video), front/back toggle.
@@ -22,6 +32,22 @@ import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
  * negotiates its own best match rather than failing; (2) auto-stops at
  * `MAX_MEDIA_SECONDS` (10 min) with a visible REC countdown instead of
  * recording indefinitely until the user manually stops.
+ *
+ * R24 (PiP camera quality): (WS-P1) capture now walks a constraint ladder
+ * (see `lib/camera/captureQuality`) — 2160 -> 1440 -> 1080 short side at
+ * the chosen fps, backing off to 30fps, ending on the exact pre-R24
+ * permissive ideal-1080 request — with a user-facing Auto / 4K / HD +
+ * 60 / 30fps chip row, and `MediaRecorder` gets tier bitrates derived
+ * from the negotiated track settings instead of the browser default.
+ * (WS-P2) the FRONT camera's live preview is CSS-mirrored so movement
+ * matches phone-camera convention; the recorded stream/file is never
+ * transformed (true-to-life), and the review screen shows it as-is.
+ * (WS-P3) a toggleable rule-of-thirds + headroom guide overlay (DOM
+ * only — the recording captures the media stream, never the DOM, so
+ * guides can never appear in a recording). (WS-P4a) where the video
+ * track exposes a `zoom` capability, a slider drives the real camera
+ * zoom via `applyConstraints`; where it doesn't (iOS Safari), no zoom
+ * control is rendered at all.
  */
 
 export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blob: Blob };
@@ -50,23 +76,6 @@ function formatClock(totalSeconds: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-/**
- * Roughly "1080p-class" ideal recording dimensions for a given project
- * aspect ratio: the SHORTER side is targeted at 1080px, the longer side
- * derived from the ratio — e.g. 16:9 -> 1920x1080, 9:16 -> 1080x1920, 1:1 ->
- * 1080x1080, 4:5 -> 1080x1350. Passed to `getUserMedia` as `ideal` (never
- * `exact`/`min`) constraints, so a camera that can't reach this just
- * negotiates its own best available match instead of failing outright —
- * "graceful fallback", per the spec.
- */
-function idealRecordingDimensions(canvasWidth: number, canvasHeight: number): { width: number; height: number; ratio: number } {
-  const ratio = canvasWidth > 0 && canvasHeight > 0 ? canvasWidth / canvasHeight : 9 / 16;
-  if (ratio >= 1) {
-    return { width: Math.round(1080 * ratio), height: 1080, ratio };
-  }
-  return { width: 1080, height: Math.round(1080 / ratio), ratio };
-}
-
 export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -74,6 +83,17 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
   const chunksRef = useRef<Blob[]>([]);
 
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  // R24 WS-P1: user quality / frame-rate choices. Defaults: Auto (the
+  // full ladder) + 60fps. Changing either re-acquires the stream.
+  const [qualityChoice, setQualityChoice] = useState<CaptureQualityChoice>('auto');
+  const [fpsChoice, setFpsChoice] = useState<CaptureFpsChoice>(60);
+  // R24 WS-P3: framing guides default ON (the camera opens on the front
+  // camera, where the headroom guide matters most); toggleable any time.
+  const [showGuides, setShowGuides] = useState(true);
+  // R24 WS-P4a: the live track's zoom capability, when the platform
+  // exposes one; null = no zoom control is rendered at all.
+  const [zoomCapability, setZoomCapability] = useState<ZoomCapability | null>(null);
+  const [zoomValue, setZoomValue] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
@@ -90,12 +110,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
     return () => URL.revokeObjectURL(pendingVideo.url);
   }, [pendingVideo]);
 
-  const ideal = useMemo(() => idealRecordingDimensions(canvasWidth, canvasHeight), [canvasWidth, canvasHeight]);
   const previewAspectRatio = canvasWidth > 0 && canvasHeight > 0 ? `${canvasWidth} / ${canvasHeight}` : '9 / 16';
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    setZoomCapability(null);
   }, []);
 
   const startStream = useCallback(async () => {
@@ -106,43 +126,63 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
       setError('Camera capture is not supported in this browser. Use file upload instead.');
       return;
     }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode,
-          // "ideal", not "exact"/"min" — a device that can't hit 1080p-class
-          // or this exact aspect ratio negotiates its own closest match
-          // instead of getUserMedia rejecting the request outright. This is
-          // what replaces the previous no-constraints-at-all call that
-          // silently produced a fixed 640x480 recording regardless of the
-          // project's actual format.
-          width: { ideal: ideal.width },
-          height: { ideal: ideal.height },
-          aspectRatio: { ideal: ideal.ratio },
-          frameRate: { ideal: 30 },
-        },
-        audio: true,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
+    // R24 WS-P1: walk the constraint ladder in order. A rung that the
+    // device rejects as over-constrained / not found falls through to
+    // the next rung; the final rung is the pre-R24 permissive ideal-1080
+    // request, so capture never hard-fails on resolution grounds. Any
+    // other error (permission denied, no device busy, …) aborts at once.
+    const attempts = buildCaptureAttempts({
+      canvasWidth,
+      canvasHeight,
+      facingMode,
+      quality: qualityChoice,
+      frameRate: fpsChoice,
+    });
+    let stream: MediaStream | null = null;
+    let lastError: unknown = null;
+    for (const attempt of attempts) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!isLadderRetryableError(err)) break;
       }
-      setIsReady(true);
-    } catch (err: any) {
+    }
+    if (!stream) {
+      const err: any = lastError;
       setError(
         err?.name === 'NotAllowedError'
           ? 'Camera/microphone access was denied. Allow access in your browser settings, or use file upload instead.'
           : `Could not start the camera: ${err?.message || err}`,
       );
+      return;
     }
-  }, [facingMode, ideal, stopStream]);
+    streamRef.current = stream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play().catch(() => {});
+    }
+    // R24 WS-P4a: surface the track's real zoom capability, if any.
+    // Silent absence elsewhere (notably iOS Safari) — no control renders.
+    try {
+      const track = stream.getVideoTracks()[0];
+      const capability = track?.getCapabilities ? zoomCapabilityFromCapabilities(track.getCapabilities()) : null;
+      setZoomCapability(capability);
+      if (capability) {
+        const settings = track.getSettings?.() as { zoom?: number } | undefined;
+        setZoomValue(typeof settings?.zoom === 'number' ? settings.zoom : capability.min);
+      }
+    } catch {
+      setZoomCapability(null);
+    }
+    setIsReady(true);
+  }, [canvasWidth, canvasHeight, facingMode, qualityChoice, fpsChoice, stopStream]);
 
   useEffect(() => {
     startStream();
     return () => stopStream();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [facingMode, ideal.width, ideal.height]);
+  }, [startStream, stopStream]);
 
   useEffect(() => () => stopStream(), [stopStream]);
 
@@ -168,19 +208,45 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
     );
   }, [isReady, onCapture]);
 
+  /**
+   * R24 WS-P4a: drive the camera's real zoom. A failed applyConstraints
+   * (device busy, value raced a re-acquire, …) must never kill the
+   * stream — the slider simply doesn't take effect.
+   */
+  const applyZoom = useCallback((value: number) => {
+    setZoomValue(value);
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track?.applyConstraints) return;
+    void track
+      .applyConstraints({ advanced: [{ zoom: value } as MediaTrackConstraintSet] })
+      .catch(() => {});
+  }, []);
+
   const startRecording = useCallback(() => {
     const stream = streamRef.current;
     if (!stream || !isReady) return;
     chunksRef.current = [];
+    // R24 WS-P1: bitrate by the tier the device ACTUALLY negotiated
+    // (the video track's reported settings), not the browser default.
+    const trackSettings = stream.getVideoTracks()[0]?.getSettings?.();
     let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9,opus' });
+      recorder = new MediaRecorder(
+        stream,
+        recorderOptionsForTrackSettings(trackSettings, 'video/webm;codecs=vp9,opus'),
+      );
     } catch {
       try {
-        recorder = new MediaRecorder(stream);
-      } catch (err: any) {
-        setError(`This browser cannot record video: ${err?.message || err}`);
-        return;
+        // Same tier bitrates without the preferred mimeType, in case
+        // the codec string (not the options) is what the browser rejects.
+        recorder = new MediaRecorder(stream, recorderOptionsForTrackSettings(trackSettings));
+      } catch {
+        try {
+          recorder = new MediaRecorder(stream);
+        } catch (err: any) {
+          setError(`This browser cannot record video: ${err?.message || err}`);
+          return;
+        }
       }
     }
     recorder.ondataavailable = (e) => {
@@ -248,7 +314,35 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
         className="relative w-full max-w-md bg-black rounded-xl overflow-hidden border border-white/10"
         style={{ aspectRatio: previewAspectRatio }}
       >
-        <video ref={videoRef} muted playsInline className="w-full h-full object-cover" />
+        {/* WS-P2: front-camera preview is mirrored via CSS ONLY — the
+            stream (and therefore every photo/recording from it) stays
+            true-to-life. The review <video> below has NO transform. */}
+        <video
+          ref={videoRef}
+          muted
+          playsInline
+          className="w-full h-full object-cover"
+          style={{ transform: previewMirrorTransform(facingMode) }}
+        />
+        {/* WS-P3: framing guides — pure DOM/SVG overlay, pointer-events
+            none. The recording path captures the media stream, never
+            this DOM, so guides can never appear in a recording. Hidden
+            while a recording is being reviewed. */}
+        {showGuides && !pendingVideo && !error && (
+          <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+            {/* rule of thirds */}
+            <div className="absolute top-0 bottom-0 w-px bg-white/35" style={{ left: '33.333%' }} />
+            <div className="absolute top-0 bottom-0 w-px bg-white/35" style={{ left: '66.666%' }} />
+            <div className="absolute left-0 right-0 h-px bg-white/35" style={{ top: '33.333%' }} />
+            <div className="absolute left-0 right-0 h-px bg-white/35" style={{ top: '66.666%' }} />
+            {/* headroom guide: keep the subject's head below this line */}
+            <div className="absolute left-0 right-0 border-t border-dashed border-gold/80" style={{ top: '12%' }}>
+              <span className="absolute left-1/2 -translate-x-1/2 -top-4 text-[9px] font-bold uppercase tracking-widest text-gold/90">
+                Headroom
+              </span>
+            </div>
+          </div>
+        )}
         {isRecording && (
           <>
             <div
@@ -327,6 +421,77 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
           </div>
         </div>
       ) : (
+      <div className="flex flex-col items-center gap-3">
+        {/* R24 WS-P1: quality + frame-rate chips. Changing a chip
+            re-acquires the stream at the new ladder (disabled while
+            recording — the stream is locked once recording starts). */}
+        <div className="flex items-center gap-2 flex-wrap justify-center">
+          <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Capture quality">
+            {(
+              [
+                { id: 'auto', label: 'Auto' },
+                { id: '4k', label: '4K' },
+                { id: 'hd', label: 'HD' },
+              ] as Array<{ id: CaptureQualityChoice; label: string }>
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                onClick={() => setQualityChoice(chip.id)}
+                disabled={isRecording}
+                aria-pressed={qualityChoice === chip.id}
+                className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                  qualityChoice === chip.id ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Frame rate">
+            {([60, 30] as CaptureFpsChoice[]).map((fps) => (
+              <button
+                key={fps}
+                onClick={() => setFpsChoice(fps)}
+                disabled={isRecording}
+                aria-pressed={fpsChoice === fps}
+                className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                  fpsChoice === fps ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                }`}
+              >
+                {fps} fps
+              </button>
+            ))}
+          </div>
+          {/* R24 WS-P3: guides toggle */}
+          <button
+            onClick={() => setShowGuides((g) => !g)}
+            aria-pressed={showGuides}
+            className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+              showGuides ? 'bg-white/20 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'
+            }`}
+          >
+            Guides
+          </button>
+        </div>
+        {/* R24 WS-P4a: real camera zoom — rendered ONLY when the live
+            track exposes a zoom capability (silent absence otherwise). */}
+        {zoomCapability && (
+          <label className="flex items-center gap-2 w-full max-w-xs text-white/70">
+            <span className="text-[11px] font-bold uppercase tracking-wide">Zoom</span>
+            <input
+              type="range"
+              min={zoomCapability.min}
+              max={zoomCapability.max}
+              step={zoomCapability.step}
+              value={zoomValue}
+              disabled={isRecording}
+              onChange={(e) => applyZoom(Number(e.target.value))}
+              className="flex-1 accent-amber-400 disabled:opacity-40"
+              aria-label="Camera zoom"
+            />
+            <span className="text-[11px] font-bold tabular-nums w-9 text-right">{zoomValue.toFixed(1)}×</span>
+          </label>
+        )}
       <div className="flex items-center gap-3">
         <button
           onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
@@ -367,6 +532,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
         >
           Close
         </button>
+      </div>
       </div>
       )}
     </div>

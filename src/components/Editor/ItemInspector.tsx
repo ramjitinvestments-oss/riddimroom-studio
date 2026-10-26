@@ -292,6 +292,22 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               onChange={(e) => patch({ rotation: Number(e.target.value) })}
             />
           </label>
+          {/* R24 — editor Flip (WS-P2): mirrors the drawn media in both
+              preview and export (shared compositor). Video/image only;
+              the same toggle lives in the PiP panel for PiP items. */}
+          {(item.type === 'video' || item.type === 'image') && (
+            <button
+              onClick={() => patch({ flipX: (item as { flipX?: boolean }).flipX !== true })}
+              aria-pressed={(item as { flipX?: boolean }).flipX === true}
+              className={`min-h-11 px-3 rounded-lg border text-xs font-bold flex items-center justify-center gap-1.5 transition ${
+                (item as { flipX?: boolean }).flipX === true
+                  ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                  : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
+              }`}
+            >
+              Flip horizontally {(item as { flipX?: boolean }).flipX === true ? '· On' : ''}
+            </button>
+          )}
         </div>
       )}
 

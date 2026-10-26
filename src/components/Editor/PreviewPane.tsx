@@ -582,7 +582,14 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       item: TimelineItem,
     ): (ItemBoundsPercent & { type: DraggableVisualType; itemId: string; scale: number; rotation: number }) | null => {
       if (item.type === 'video') {
-        const bounds = getItemBoundsPercent(item, 'video', project.canvasWidth, project.canvasHeight);
+        // R24: pass the source aspect so a source-fit PiP's selection box
+        // matches the box drawFrame actually draws (see pipBoxPx).
+        const vidEl = videoElsRef.current.get(item.mediaAssetId);
+        const videoAspect =
+          vidEl && vidEl.videoWidth > 0 && vidEl.videoHeight > 0 ? vidEl.videoWidth / vidEl.videoHeight : undefined;
+        const bounds = getItemBoundsPercent(item, 'video', project.canvasWidth, project.canvasHeight, {
+          naturalVideoAspect: videoAspect,
+        });
         return { ...bounds, type: 'video', itemId: item.id, scale: item.scale, rotation: item.rotation };
       }
       if (item.type === 'image') {

@@ -393,11 +393,22 @@ export function extractSite(pages: SitePageDoc[]): ExtractedSite {
 
   const html = home.html ?? '';
   const text = visibleText(html);
-  if (text.length < 40) {
-    return { ...base, reason: /<script/i.test(html) ? 'spa' : 'empty' };
-  }
-
+  // R24 (WS-C4): mine the JSON-LD BEFORE judging the body. A small
+  // business page can carry almost no visible text yet publish its
+  // whole identity as structured data — the old thin-body rejection
+  // threw that data away (it labelled a dentist's page "spa") and
+  // the campaign pools came back empty. Structured data rescues a
+  // thin page; a script shell with NO structured data still fails
+  // honestly as an SPA.
   const nodes = jsonLdNodes(html);
+  if (text.length < 40) {
+    const hasStructured = nodes.some(
+      (n) => str(n.name) || str(n.telephone) || str(n.email) || offerNamesFromNode(n).length > 0,
+    );
+    if (!hasStructured) {
+      return { ...base, reason: /<script/i.test(html) ? 'spa' : 'empty' };
+    }
+  }
   const bizNode = nodes.find((n) => /business|organization|store|restaurant|service/i.test(String(n['@type'] ?? ''))) ?? nodes[0];
 
   /* --- name (jsonld > og:site_name > title > h1) --- */

@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { ArrowLeftRight, Volume2, VolumeX } from 'lucide-react';
+import { ArrowLeftRight, FlipHorizontal2, Volume2, VolumeX } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
+import { framingSlackPx, pipBoxPx, resolveCropOffset, resolveCropZoom } from '../../lib/render/compositor';
 import { updateItem } from '../../lib/timeline/utils';
-import type { MediaAsset, TimelineItem, VideoTimelineItem } from '../../types/timeline';
+import type { ImageTimelineItem, MediaAsset, TimelineItem, VideoTimelineItem } from '../../types/timeline';
 
 /**
  * v1 PiP panel — talking-head / explainer overlays.
@@ -36,6 +37,49 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
     if (!selectedPip) return;
     mutate((p) => updateItem(p, selectedPip.id, patch));
   };
+
+  // R24 framing (Flip / crop-zoom / crop-pan): applies to the selected
+  // PiP video AND to a selected image overlay — both carry the same
+  // optional framing fields, and the shared compositor honours them in
+  // preview and export. Pan sliders are enabled per axis exactly when
+  // the cover fit has slack on that axis at the current zoom (computed
+  // from the real source/box geometry, never from trim slack); when the
+  // asset's dimensions are unknown the sliders stay enabled and the
+  // compositor's clamping keeps the window in bounds regardless.
+  const selectedImage: ImageTimelineItem | null = item && item.type === 'image' ? item : null;
+  const framable: VideoTimelineItem | ImageTimelineItem | null = selectedPip ?? selectedImage;
+  const patchFramable = (patch: Partial<VideoTimelineItem> & Partial<ImageTimelineItem>) => {
+    if (!framable) return;
+    mutate((p) => updateItem(p, framable.id, patch));
+  };
+  const framableAsset = framable ? project.mediaAssets[framable.mediaAssetId] : undefined;
+  const srcW = framableAsset?.width ?? 0;
+  const srcH = framableAsset?.height ?? 0;
+  const cropZoom = resolveCropZoom(framable?.cropZoom);
+  let panSlack: { x: number; y: number } | null = null;
+  if (framable && srcW > 0 && srcH > 0) {
+    let destW = 1;
+    let destH = 1;
+    if (selectedPip?.pip?.shape === 'circle') {
+      destW = 1;
+      destH = 1; // the circle's destination is a square
+    } else if (selectedPip) {
+      const box = pipBoxPx(selectedPip.scale, project.canvasWidth, project.canvasHeight, selectedPip.pip, srcW, srcH);
+      destW = box.w;
+      destH = box.h;
+    } else {
+      // Image: the box follows the crop window's (or the image's own)
+      // aspect — only the aspect matters for slack.
+      const c = framable.crop;
+      const aspect = c && c.width > 0 && c.height > 0 ? ((c.height / 100) * srcH) / ((c.width / 100) * srcW) : srcH / srcW;
+      destW = 100;
+      destH = 100 * aspect;
+    }
+    panSlack = framingSlackPx(srcW, srcH, destW, destH, framable.crop, cropZoom);
+  }
+  const canPanX = panSlack ? panSlack.x > 0.5 : true;
+  const canPanY = panSlack ? panSlack.y > 0.5 : true;
+  const framingModified = !!framable && (cropZoom !== 1 || resolveCropOffset(framable.cropOffsetX) !== 0 || resolveCropOffset(framable.cropOffsetY) !== 0);
 
   const handleAdd = (asset: MediaAsset) => {
     setError(null);
@@ -107,6 +151,99 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             <ArrowLeftRight size={13} /> Swap main ↔ overlay
           </button>
           <p className="text-[10px] text-white/30 -mt-1">The overlay becomes the full-screen main video; the main video takes its place in the circle. Timing, trim and each clip's own sound stay with the clip.</p>
+        </div>
+      )}
+
+      {/* R24 Framing — Flip / shape / crop-zoom / crop-pan for the
+          selected PiP video or image overlay. Every control writes the
+          item's own framing fields; the shared compositor applies them
+          identically in preview and export. Zoom is the SOURCE crop
+          window (1× = today's cover fit), separate from Width above,
+          which sizes the on-screen box. */}
+      {framable && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Framing</span>
+          <button
+            onClick={() => patchFramable({ flipX: framable.flipX !== true })}
+            aria-pressed={framable.flipX === true}
+            className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-bold uppercase min-h-10 border ${
+              framable.flipX === true
+                ? 'bg-gold/15 hover:bg-gold/25 border-gold/60 text-gold'
+                : 'bg-white/10 hover:bg-white/20 border-white/10 text-white'
+            }`}
+          >
+            <FlipHorizontal2 size={13} /> Flip horizontally {framable.flipX === true ? '· On' : ''}
+          </button>
+          {selectedPip?.pip && (
+            <>
+              <div className="flex items-center gap-1">
+                <span className="text-[11px] text-white/50 mr-1">Shape</span>
+                {(['circle', 'rounded', 'square'] as const).map((shape) => (
+                  <button
+                    key={shape}
+                    onClick={() => patchSelectedPip({ pip: { ...selectedPip.pip!, shape } })}
+                    aria-pressed={selectedPip.pip!.shape === shape}
+                    className={`px-2 py-1 text-[10px] font-bold uppercase rounded min-h-9 ${
+                      selectedPip.pip!.shape === shape ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
+                    }`}
+                  >
+                    {shape}
+                  </button>
+                ))}
+              </div>
+              {selectedPip.pip.fit === 'source' && selectedPip.pip.shape !== 'circle' && (
+                <p className="text-[10px] text-white/30 -mt-1">Camera framing: the whole recording is shown (head-and-shoulders). The Circle shape crops to a square, as before.</p>
+              )}
+            </>
+          )}
+          <label className="flex flex-col gap-1 text-xs text-white/60">
+            Zoom ({cropZoom.toFixed(2)}×)
+            <input
+              type="range"
+              min={1}
+              max={3}
+              step={0.05}
+              value={cropZoom}
+              onChange={(e) => patchFramable({ cropZoom: Number(e.target.value) })}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-white/60">
+            Pan left / right ({Math.round(resolveCropOffset(framable.cropOffsetX) * 100)}%)
+            <input
+              type="range"
+              min={-100}
+              max={100}
+              step={1}
+              value={Math.round(resolveCropOffset(framable.cropOffsetX) * 100)}
+              disabled={!canPanX}
+              onChange={(e) => patchFramable({ cropOffsetX: Number(e.target.value) / 100 })}
+              className="disabled:opacity-30"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-white/60">
+            Pan up / down ({Math.round(resolveCropOffset(framable.cropOffsetY) * 100)}%)
+            <input
+              type="range"
+              min={-100}
+              max={100}
+              step={1}
+              value={Math.round(resolveCropOffset(framable.cropOffsetY) * 100)}
+              disabled={!canPanY}
+              onChange={(e) => patchFramable({ cropOffsetY: Number(e.target.value) / 100 })}
+              className="disabled:opacity-30"
+            />
+          </label>
+          {!canPanX && !canPanY && cropZoom === 1 && (
+            <p className="text-[10px] text-white/30 -mt-1">The frame fills the box exactly at 1× — zoom in to pan, or the box already shows the whole width/height.</p>
+          )}
+          {framingModified && (
+            <button
+              onClick={() => patchFramable({ cropZoom: 1, cropOffsetX: 0, cropOffsetY: 0 })}
+              className="self-start px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-9"
+            >
+              Reset zoom &amp; pan
+            </button>
+          )}
         </div>
       )}
 

@@ -312,9 +312,52 @@ export interface PipSettings {
   shadow: boolean;
   /** True when this video item is a PiP overlay (drawn on top of the main video). */
   isPip: boolean;
+  /**
+   * R24 framing fit. Absent/'cover' = the legacy framing: the PiP box
+   * follows the CANVAS aspect (width = canvasWidth × scale, height =
+   * canvasHeight × scale) and the source is cover-cropped into it.
+   * 'source' = the box follows the SOURCE aspect (height derived from
+   * the width and the source's own aspect), so at crop-zoom 1 the whole
+   * source frame is visible — nothing is cropped away. Camera
+   * recordings sent to PiP default to 'source' with a rounded shape
+   * (see `addPipOverlay` in `lib/pip.ts`); the circle preset stays
+   * available and still crops to its square, by the user's choice.
+   * Ignored for the 'circle' shape, whose box is a square by design.
+   */
+  fit?: 'cover' | 'source';
 }
 
-export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSettings {
+/**
+ * R24 editor framing fields, shared by video and image items — all
+ * OPTIONAL, and absent values reproduce the pre-R24 rendering exactly
+ * (no flip, cover-fit centred, zoom 1), so existing projects need no
+ * migration. Written by the PiP panel (PiP video items + image
+ * overlays) and the item inspector's Flip toggle; consumed ONCE by the
+ * shared compositor (`lib/render/compositor.ts`), so preview and export
+ * always agree.
+ */
+export interface FramingSettings {
+  /** True = the drawn media is mirrored horizontally (editor Flip toggle). Border/clip/overlays are NOT flipped. */
+  flipX?: boolean;
+  /**
+   * Crop-zoom into the source, 1–3 (clamped by the compositor). 1 =
+   * today's cover fit; higher shrinks the source crop window around the
+   * current pan position. Independent of the item's `crop` window: the
+   * zoom/pan window always stays INSIDE `crop` when one is set (a
+   * preset/poster crop is never violated), and inside the source.
+   */
+  cropZoom?: number;
+  /**
+   * Pan of the crop window, -1..1 per axis (0/absent = centred, the
+   * pre-R24 cover fit). +1 pins the window to the right/bottom edge of
+   * its feasible range, -1 to the left/top. An axis with no slack at
+   * the current zoom (the window already fills it) ignores its offset.
+   */
+  cropOffsetX?: number;
+  cropOffsetY?: number;
+}
+
+export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSettings, FramingSettings {
   type: 'video';
   mediaAssetId: string;
   /** Playback speed multiplier. 1 = normal. */
@@ -335,7 +378,7 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
   endTransform?: EndTransformSettings;
 }
 
-export interface ImageTimelineItem extends TimelineItemBase, Transform {
+export interface ImageTimelineItem extends TimelineItemBase, Transform, FramingSettings {
   type: 'image';
   mediaAssetId: string;
   /**

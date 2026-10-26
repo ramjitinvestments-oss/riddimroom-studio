@@ -26,7 +26,7 @@
  * field stays exactly as editable as the single build's.
  */
 import type { PromoRecipeId, PromoTexts } from './recipes';
-import { bankAlternatesForGenre, splitHeadline } from './suggest';
+import { bankAlternatesForGenre } from './suggest';
 import type { PostGenre } from '../export/socialPosts';
 
 export type CampaignRole = 'master' | 'alt' | 'series' | 'format';
@@ -72,6 +72,17 @@ export interface CampaignInput {
   /** The event's real calendar date, parsed from the artwork's own
       words — schedule labels become actual post dates. */
   eventDate?: Date | null;
+  /** R24 (WS-C4): event evidence beyond a parsed date — an event
+      kind/offer from a confirmed site profile, or the user's own
+      'event' purpose answer. Event-only copy (countdown pieces,
+      ticket CTAs) requires evidence: a parsed date, a date printed
+      in the words, or this flag. `kind === 'flyer'` alone no longer
+      forces a countdown onto a non-event. */
+  eventEvidence?: boolean;
+  /** R24 (WS-C2/C4): the resolved context says this campaign is
+      silent by design (the 'look' purpose — empty sub/CTA). No
+      rotation pool may dress a silent piece in borrowed copy. */
+  silent?: boolean;
   font?: string;
   /** R21: when a website profile is driving the campaign, the caller
       passes a guard that approves lines whose factual tokens all
@@ -174,13 +185,20 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
   const withFont = (t: Required<Omit<PromoTexts, 'font'>>): PromoTexts => ({ ...t, font });
   const masterPair: [string, string] = [base.hook1, base.hook2];
   const headline = [base.hook1, base.hook2].filter(Boolean).join(' ');
-  const event = input.kind === 'flyer' || DATE_HINT.test(base.sub) || DATE_HINT.test(headline);
+  // R24 (WS-C4): a countdown is event-only copy, and events need
+  // evidence — a parsed date, a date printed in the words, or the
+  // caller's event evidence. A flyer-shaped image alone is not an
+  // event (a dental practice's flyer is not a countdown).
+  const event =
+    eventDate != null || input.eventEvidence === true || DATE_HINT.test(base.sub) || DATE_HINT.test(headline);
   const seriesKind: CampaignSeriesKind = event ? 'countdown' : 'spotlight';
 
   // Alternate hook pairs: real alternates only — deduped against the
-  // master pair and each other, empties dropped.
+  // master pair and each other, empties dropped. A silent campaign
+  // ('look') takes no alternates at all — its pieces are re-stages
+  // of the silent master, not new copy.
   const altPairs: Array<[string, string]> = [];
-  for (const pair of input.altHookPairs ?? []) {
+  for (const pair of input.silent ? [] : (input.altHookPairs ?? [])) {
     const p: [string, string] = [(pair[0] ?? '').trim(), (pair[1] ?? '').trim()];
     if (!p[0] && !p[1]) continue;
     if (samePair(p, masterPair)) continue;
@@ -209,18 +227,27 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     const lines = bankAlternatesForGenre(field, input.genre);
     return input.factGuard ? lines.filter(input.factGuard) : lines;
   };
-  const subPool = poolOf(
+  const subPool = input.silent ? [] : poolOf(
     [...(input.altSubs ?? []), ...bankLines('sub')],
     base.sub,
   );
-  const ctaPool = poolOf(
+  const ctaPool = input.silent ? [] : poolOf(
     [...(input.altCtas ?? []), ...bankLines('cta')],
     base.cta,
   );
   let subIdx = 0;
   let ctaIdx = 0;
-  const takeSub = (): string | undefined => subPool[subIdx++];
-  const takeCta = (): string | undefined => ctaPool[ctaIdx++];
+  // Rotation pools ROTATE: when a pool wraps, its lines come round
+  // again (paired with a different line on the other axis, the set
+  // still separates — and the distinctness backstop below gets a
+  // real chance to place every piece). An empty pool stays empty.
+  const takeSub = (): string | undefined => (subPool.length ? subPool[subIdx++ % subPool.length] : undefined);
+  const takeCta = (): string | undefined => (ctaPool.length ? ctaPool[ctaIdx++ % ctaPool.length] : undefined);
+  // Hook pairs are consumed through one cursor, so a pair serves
+  // exactly one piece (WS-C3: one line serves one field per piece,
+  // and one pair serves one piece per set).
+  let pairIdx = 0;
+  const takePair = (): [string, string] | undefined => altPairs[pairIdx++];
 
   const pieces: CampaignPiece[] = [];
   const push = (p: Omit<CampaignPiece, 'texts'> & { texts: Required<Omit<PromoTexts, 'font'>> }) =>
@@ -244,7 +271,7 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
   });
 
   // 2 — alt hook 1 (or a pure rotation cut when no alternate exists).
-  const alt1Pair = altPairs[0];
+  const alt1Pair = takePair();
   push({
     id: 'alt-1',
     role: 'alt',
@@ -303,7 +330,13 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       scheduleLabel: 'Day 3',
       hookChanged: false,
     });
-    const [storyHook1, storyHook2] = base.sub ? splitHeadline(base.sub.toUpperCase()) : [base.hook1, base.hook2];
+    // R24 (WS-C3): series variants draw their hooks from the
+    // alternates pool — a field's line is never PROMOTED into a
+    // different field. The old story cut split the sub into a hook
+    // (and the offer cut ran the CTA as hook AND CTA); both put one
+    // line in two fields of the same piece. With no pool pair left,
+    // the variant keeps the master's hook and rotates sub/CTA.
+    const storyPair = takePair();
     push({
       id: 'series-story',
       role: 'series',
@@ -311,11 +344,16 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       slug: 'story-cut',
       recipe: 'spin-slam',
       formatId: input.masterFormatId,
-      texts: base.sub ? { ...base, hook1: storyHook1, hook2: storyHook2, sub: headline || base.sub } : base,
+      texts: {
+        ...base,
+        ...(storyPair ? { hook1: storyPair[0], hook2: storyPair[1] } : {}),
+        sub: takeSub() ?? base.sub,
+        cta: takeCta() ?? base.cta,
+      },
       scheduleLabel: 'Day 5',
-      hookChanged: !!base.sub,
+      hookChanged: !!storyPair,
     });
-    const [offerHook1, offerHook2] = base.cta ? splitHeadline(base.cta.toUpperCase()) : [base.hook1, base.hook2];
+    const offerPair = takePair();
     push({
       id: 'series-offer',
       role: 'series',
@@ -323,14 +361,21 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
       slug: 'offer-cut',
       recipe: 'slam',
       formatId: input.masterFormatId,
-      texts: base.cta ? { ...base, hook1: offerHook1, hook2: offerHook2, sub: headline || base.sub } : base,
+      texts: {
+        ...base,
+        ...(offerPair ? { hook1: offerPair[0], hook2: offerPair[1] } : {}),
+        sub: takeSub() ?? base.sub,
+        // The offer cut pushes the ask: its CTA rotates to the next
+        // phrasing, while the hook stays a hook.
+        cta: takeCta() ?? base.cta,
+      },
       scheduleLabel: 'Day 7 — push the call to action',
-      hookChanged: !!base.cta,
+      hookChanged: !!offerPair,
     });
   }
 
   // 6 — alt hook/cut 2, on the other rotation.
-  const alt2Pair = altPairs[1];
+  const alt2Pair = takePair();
   push({
     id: 'alt-2',
     role: 'alt',
@@ -369,6 +414,62 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     });
   });
 
+  // R24 (WS-C3) — FIELD INTEGRITY: one line serves one field per
+  // piece. A piece whose hook equals its CTA, whose hook equals its
+  // sub, whose sub equals its CTA, or whose hook is a fragment of
+  // its sub (or vice versa) is re-drawn from the pools — hook pair
+  // first, then CTA, then sub. The master is the user's own words
+  // verbatim and is never re-drawn; format cuts are its re-stage.
+  // When every pool is exhausted the piece stands as built — the
+  // planner never invents text to force a fix.
+  const normLine = (v: string | undefined): string => (v ?? '').trim().toUpperCase();
+  const hookTextOf = (t: PromoTexts): string =>
+    normLine([t.hook1 ?? '', t.hook2 ?? ''].filter(Boolean).join(' '));
+  const violatesIntegrity = (t: PromoTexts): boolean => {
+    const hook = hookTextOf(t);
+    const sub = normLine(t.sub);
+    const cta = normLine(t.cta);
+    if (hook && cta && hook === cta) return true;
+    if (hook && sub && hook === sub) return true;
+    if (sub && cta && sub === cta) return true;
+    if (hook && sub && Math.min(hook.length, sub.length) >= 3 && (sub.includes(hook) || hook.includes(sub))) return true;
+    return false;
+  };
+  for (const piece of pieces) {
+    if (piece.role === 'format' || piece.id === 'master') continue;
+    if (!violatesIntegrity(piece.texts)) continue;
+    const t: Required<Omit<PromoTexts, 'font'>> = {
+      hook1: piece.texts.hook1 ?? '',
+      hook2: piece.texts.hook2 ?? '',
+      sub: piece.texts.sub ?? '',
+      cta: piece.texts.cta ?? '',
+    };
+    const tryFix = (mutate: (x: typeof t) => void): boolean => {
+      const candidate = { ...t };
+      mutate(candidate);
+      if (violatesIntegrity(candidate)) return false;
+      piece.texts = { ...candidate, font };
+      return true;
+    };
+    const hp = altPairs.find((pr) => !samePair(pr, [t.hook1, t.hook2]) && !samePair(pr, masterPair));
+    let fixed = false;
+    if (hp) {
+      fixed = tryFix((x) => {
+        x.hook1 = hp[0];
+        x.hook2 = hp[1];
+      });
+      if (fixed) piece.hookChanged = true;
+    }
+    if (!fixed) {
+      const c2 = takeCta();
+      if (c2) fixed = tryFix((x) => { x.cta = c2; });
+    }
+    if (!fixed) {
+      const s2 = takeSub();
+      if (s2) fixed = tryFix((x) => { x.sub = s2; });
+    }
+  }
+
   // DISTINCTNESS BACKSTOP — the owner's standing rule for the set:
   // no two pieces (format re-stages exempt — they ARE the master on
   // another stage, and they say so) may carry the identical four
@@ -394,6 +495,7 @@ export function planCampaign(input: CampaignInput): CampaignPlan {
     let placed = false;
     const attempt = (): boolean => {
       if (seen.has(keyOf(t))) return false;
+      if (violatesIntegrity(t)) return false; // a rotation may not break field integrity
       piece.texts = { ...t, font };
       seen.add(keyOf(t));
       placed = true;

@@ -28,6 +28,8 @@ import {
   posterSuggestion,
   fieldAlternates,
   mergeIntoUntouched,
+  resolveCampaignContext,
+  type CampaignContext,
   splitHeadline,
   suggestedSkinFor,
   type SuggestionContext,
@@ -43,7 +45,7 @@ import { createExportRenderer, getConfiguredExportEngine } from '../lib/export/m
 import { validateRenderResult } from '../lib/export/validate';
 import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
 import { resolveExportSettings } from '../lib/export/quality';
-import { buildSocialPosts, buildSoundGuide, type PostGenre, type SocialPost } from '../lib/export/socialPosts';
+import { buildSocialPosts, buildSoundGuide, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
 import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { loadArtworkFixes, saveArtworkFixes } from '../lib/promo/fixes';
@@ -1159,6 +1161,23 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
 
   /**
+   * R24 (WS-C2/C5): THE resolved campaign context — resolved once
+   * here, and genre, tag set, rotation pools and social posts all
+   * key from it. Precedence: confirmed site profile → the user's
+   * purpose answer → the artwork's own detected genre → filename.
+   * Nothing in the campaign/results path detects genre on its own.
+   */
+  const resolvedContext = useCallback((): CampaignContext => {
+    const g = lastReadoutRef.current?.genre ?? visionRef.current?.genre ?? '';
+    return resolveCampaignContext({
+      siteProfile,
+      purpose: suggestCtxRef.current?.purpose ?? null,
+      artworkGenre: g,
+      suggestionCtx: suggestCtxRef.current,
+    });
+  }, [siteProfile]);
+
+  /**
    * Alternate hook pairs for the campaign, best first: a strong
    * line the engine read but the fields didn't use, then the genre
    * bank's next pair. The planner dedupes against the master pair —
@@ -1186,23 +1205,15 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     }
     const ctx = suggestCtxRef.current;
     if (ctx) {
-      const h1 = fieldAlternates('hook1', ctx);
-      const h2 = fieldAlternates('hook2', ctx);
+      const genre = resolvedContext().genre;
+      const h1 = fieldAlternates('hook1', ctx, genre);
+      const h2 = fieldAlternates('hook2', ctx, genre);
       for (let i = 0; i < Math.min(h1.length, h2.length); i++) {
         if (h1[i] || h2[i]) pairs.push([h1[i] ?? '', h2[i] ?? '']);
       }
     }
     return pairs;
-  }, [texts.hook1, texts.hook2, texts.sub, texts.cta]);
-
-  /** The genre the artwork's own words detected (readout first,
-      the suggestion pass second) — the campaign planner draws its
-      rotation pools from this genre's bank. */
-  const detectedPostGenre = useCallback((): PostGenre | undefined => {
-    const g = lastReadoutRef.current?.genre ?? visionRef.current?.genre ?? '';
-    const known: PostGenre[] = ['soca', 'dancehall', 'gospel', 'realestate', 'business', 'caribbean'];
-    return (known as string[]).includes(g) ? (g as PostGenre) : undefined;
-  }, []);
+  }, [texts.hook1, texts.hook2, texts.sub, texts.cta, resolvedContext]);
 
   /**
    * Alternate sub lines for the campaign, ART FIRST (R16): the
@@ -1222,9 +1233,11 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         .sort((a, b) => (b.box?.h ?? 0) - (a.box?.h ?? 0));
       for (const l of lines) if (!fromArt.includes(l.text)) fromArt.push(l.text);
     }
-    const bank = suggestCtxRef.current ? fieldAlternates('sub', suggestCtxRef.current) : [];
+    const bank = suggestCtxRef.current
+      ? fieldAlternates('sub', suggestCtxRef.current, resolvedContext().genre)
+      : [];
     return [...fromArt, ...bank.filter((b) => !fromArt.some((a) => a.toUpperCase() === b.toUpperCase()))];
-  }, [texts.hook1, texts.hook2, texts.sub, texts.cta]);
+  }, [texts.hook1, texts.hook2, texts.sub, texts.cta, resolvedContext]);
 
   /** R21: when a website profile drives the campaign, build the
       planner extras once: pools from approved site facts only, a
@@ -1238,8 +1251,47 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     const confirmedTexts = [t.hook1 ?? '', t.hook2 ?? '', t.sub ?? '', t.cta ?? ''];
     const guard = (line: string) => lineFactsApproved(line, facts, confirmedTexts);
     const parsed = offer?.date ? new Date(offer.date) : null;
-    return { facts, offer, pools, guard, offerDate: parsed && !Number.isNaN(parsed.getTime()) ? parsed : null };
+    const offerDate = parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+    // R24 (WS-C4): event evidence for a site campaign is a real
+    // event offer — a selected offer carrying a date from the site.
+    return { facts, offer, pools, guard, offerDate, hasEventOffer: offerDate != null };
   }, [siteProfile, siteOfferId]);
+
+  /**
+   * R24: ONE plan-input builder for the campaign runner AND the
+   * plan preview, so the preview can never diverge from what
+   * actually builds. Everything keys from the resolved context:
+   * site campaigns draw rotation pools from profile-approved lines
+   * only (the planner adds the resolved genre's bank lines behind
+   * the fact guard — never filename-genre party/ticket copy), and
+   * event-only copy requires event evidence.
+   */
+  const campaignPlanInput = (kind: 'logo' | 'portrait' | 'flyer') => {
+    const extras = sitePlanExtras();
+    const rctx = resolvedContext();
+    return {
+      genre: rctx.genre,
+      input: {
+        texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
+        masterRecipe: recipe,
+        masterFormatId: ratioId,
+        kind,
+        altHookPairs: extras ? extras.pools.altHookPairs : currentAltPairs(),
+        altSubs: extras ? extras.pools.altSubs : campaignAltSubs(),
+        altCtas: extras
+          ? extras.pools.altCtas
+          : suggestCtxRef.current
+            ? fieldAlternates('cta', suggestCtxRef.current, rctx.genre)
+            : [],
+        genre: rctx.genre,
+        eventDate: extras?.offerDate ?? parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
+        eventEvidence: extras ? extras.hasEventOffer : suggestCtxRef.current?.purpose === 'event',
+        silent: rctx.silent,
+        font: fontFamily,
+        factGuard: extras?.guard,
+      },
+    };
+  };
 
   /**
    * The Campaign Engine runner: plan the set, upload the artwork
@@ -1253,26 +1305,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     if (!currentUser || picked.length === 0 || !analysis || fileProblem || campaignRunning) return;
     const uid = currentUser.uid;
     const base = cleanName(picked[0].file.name);
-    const extras = sitePlanExtras();
-    const plan = planCampaign({
-      texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
-      masterRecipe: recipe,
-      masterFormatId: ratioId,
-      kind: analysis.suggestedKind,
-      altHookPairs: extras
-        ? [...extras.pools.altHookPairs, ...currentAltPairs().filter((pair) => extras.guard(pair[0]) && extras.guard(pair[1]))]
-        : currentAltPairs(),
-      altSubs: extras ? [...extras.pools.altSubs, ...campaignAltSubs().filter(extras.guard)] : campaignAltSubs(),
-      altCtas: extras
-        ? [...extras.pools.altCtas, ...(suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : []).filter(extras.guard)]
-        : suggestCtxRef.current
-          ? fieldAlternates('cta', suggestCtxRef.current)
-          : [],
-      genre: detectedPostGenre(),
-      eventDate: extras?.offerDate ?? parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
-      font: fontFamily,
-      factGuard: extras?.guard,
-    });
+    const planInput = campaignPlanInput(analysis.suggestedKind);
+    const campaignGenre = planInput.genre;
+    const plan = planCampaign(planInput.input);
     setCampaignRunning(true);
     setCampaignNote(null);
     setCampaignResults([]);
@@ -1390,7 +1425,15 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         const entry: CampaignResult = {
           piece,
           projectId: project.id,
-          posts: buildSocialPosts(project),
+          // R24 (WS-C1/C5): posts are written from the piece's
+          // planner texts + the resolved context — never scraped
+          // from the rendered items (caption conversion deletes
+          // them) and never re-detected in the results path.
+          posts: buildSocialPosts(project, {
+            texts: piece.texts,
+            genre: campaignGenre,
+            formatLabel: piece.label,
+          }),
           fileName: campaignFileName(base, piece),
           status: 'built',
         };
@@ -1459,7 +1502,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       setCampaignStatus('');
       setCampaignPct(0);
     }
-  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, musicStart, detectedPostGenre, captionMode, hookTrim, analyzeTrackFile, captionSize, sitePlanExtras]);
+  }, [currentUser, picked, analysis, fileProblem, campaignRunning, recipe, ratioId, texts, fontFamily, currentAltPairs, campaignAltSubs, duration, fit, skin, tier, musicOn, ownTrack, musicStart, resolvedContext, captionMode, hookTrim, analyzeTrackFile, captionSize, sitePlanExtras]);
 
   const shareCampaignPiece = useCallback(async (r: CampaignResult) => {
     if (!r.blob) return;
@@ -1493,28 +1536,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
   const planPreview: CampaignPlan | null =
     phase !== 'pick' && analysis
-      ? (() => {
-          const extras = sitePlanExtras();
-          return planCampaign({
-            texts: { hook1: texts.hook1, hook2: texts.hook2, cta: texts.cta, sub: texts.sub },
-            masterRecipe: recipe,
-            masterFormatId: ratioId,
-            kind: analysis.suggestedKind,
-            altHookPairs: extras
-              ? [...extras.pools.altHookPairs, ...currentAltPairs().filter((pair) => extras.guard(pair[0]) && extras.guard(pair[1]))]
-              : currentAltPairs(),
-            altSubs: extras ? [...extras.pools.altSubs, ...campaignAltSubs().filter(extras.guard)] : campaignAltSubs(),
-            altCtas: extras
-              ? [...extras.pools.altCtas, ...(suggestCtxRef.current ? fieldAlternates('cta', suggestCtxRef.current) : []).filter(extras.guard)]
-              : suggestCtxRef.current
-                ? fieldAlternates('cta', suggestCtxRef.current)
-                : [],
-            genre: detectedPostGenre(),
-            eventDate: extras?.offerDate ?? parseEventDate({ sub: texts.sub, hook1: texts.hook1, hook2: texts.hook2 }),
-            font: fontFamily,
-            factGuard: extras?.guard,
-          });
-        })()
+      ? planCampaign(campaignPlanInput(analysis.suggestedKind).input)
       : null;
 
   /** R21 factual receipt: every campaign piece + post checked

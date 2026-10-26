@@ -17,6 +17,7 @@
  */
 import type { PromoSkinId, PromoTexts } from './recipes';
 import { detectPostGenre, type PostGenre } from '../export/socialPosts';
+import type { SiteProfile } from './siteProfile';
 
 export type SuggestionField = 'hook1' | 'hook2' | 'sub' | 'cta';
 export const SUGGESTION_FIELDS: SuggestionField[] = ['hook1', 'hook2', 'sub', 'cta'];
@@ -122,6 +123,80 @@ export function genreForContext(ctx: SuggestionContext): PostGenre {
   return detectPostGenre(cleanNameWords(ctx.fileName).join(' '));
 }
 
+/* ------------------------------------------------------------------ */
+/* R24 (WS-C2) — ONE resolved campaign context.                        */
+/*                                                                     */
+/* Genre, tag set and every rotation pool key from this single       */
+/* resolution, in precedence order:                                    */
+/*   1. the confirmed website profile (its category/services)          */
+/*   2. the user's stated purpose (the no-text answer)                 */
+/*   3. the artwork analysis (readout / vision genre)                  */
+/*   4. the filename                                                   */
+/* Before R24 each call site re-derived genre from the filename, so  */
+/* a product photo and a dental practice both collapsed to party     */
+/* copy. Nothing downstream may detect genre on its own again.       */
+/* ------------------------------------------------------------------ */
+
+export interface CampaignContext {
+  genre: PostGenre;
+  source: 'site' | 'purpose' | 'artwork' | 'filename';
+  purpose: NoTextPurpose | null;
+  /** The 'look' purpose: pieces stay silent — empty sub/CTA by design. */
+  silent: boolean;
+}
+
+const KNOWN_GENRES: PostGenre[] = ['soca', 'dancehall', 'gospel', 'realestate', 'business', 'caribbean'];
+
+/** Genre from a confirmed site profile's own words — its name,
+    tagline, services and offers. A profile whose words name no
+    genre is a business (a website campaign is a business campaign)
+    unless one of its offers is a dated event. */
+export function genreFromSiteProfile(profile: SiteProfile): PostGenre {
+  const haystack = [
+    profile.name?.value ?? '',
+    profile.tagline?.value ?? '',
+    ...profile.services,
+    ...profile.offers.flatMap((o) => [o.name, ...(o.services ?? [])]),
+  ].join(' ');
+  const detected = detectPostGenre(haystack);
+  if (detected !== 'caribbean') return detected;
+  return profile.offers.some((o) => o.date) ? 'caribbean' : 'business';
+}
+
+export function resolveCampaignContext(input: {
+  siteProfile?: SiteProfile | null;
+  purpose?: NoTextPurpose | null;
+  artworkGenre?: string | null;
+  suggestionCtx?: SuggestionContext | null;
+}): CampaignContext {
+  const purpose = input.purpose ?? input.suggestionCtx?.purpose ?? null;
+  const silent = purpose === 'look';
+  if (input.siteProfile) {
+    return { genre: genreFromSiteProfile(input.siteProfile), source: 'site', purpose, silent };
+  }
+  if (purpose === 'product' || purpose === 'business') {
+    return { genre: 'business', source: 'purpose', purpose, silent };
+  }
+  if (purpose === 'event' || purpose === 'look') {
+    // The purpose steers the SHAPE (event series / silent pieces);
+    // the genre still comes from the artwork, then the filename.
+    const art = (KNOWN_GENRES as string[]).includes(input.artworkGenre ?? '')
+      ? (input.artworkGenre as PostGenre)
+      : null;
+    if (art) return { genre: art, source: 'artwork', purpose, silent };
+    if (input.suggestionCtx) return { genre: genreForContext(input.suggestionCtx), source: 'filename', purpose, silent };
+    return { genre: 'caribbean', source: 'purpose', purpose, silent };
+  }
+  const art = (KNOWN_GENRES as string[]).includes(input.artworkGenre ?? '')
+    ? (input.artworkGenre as PostGenre)
+    : null;
+  if (art) return { genre: art, source: 'artwork', purpose, silent };
+  if (input.suggestionCtx) {
+    return { genre: genreForContext(input.suggestionCtx), source: 'filename', purpose, silent };
+  }
+  return { genre: 'caribbean', source: 'filename', purpose, silent };
+}
+
 /** Split a headline into two punchy lines, balanced by words. */
 export function splitHeadline(headline: string): [string, string] {
   const words = headline.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
@@ -203,9 +278,19 @@ export function bankAlternatesForGenre(field: SuggestionField, genre: PostGenre)
   }
 }
 
-/** Alternates for one field (the ↻ cycle), bank order. */
-export function fieldAlternates(field: SuggestionField, ctx: SuggestionContext): string[] {
-  const genre = genreForContext(ctx);
+/**
+ * Alternates for one field (the ↻ cycle), bank order.
+ *
+ * R24 (WS-C2): the bank is keyed by the RESOLVED context, never the
+ * filename alone — an explicit genre (from the resolved campaign
+ * context) wins, then the user's stated purpose (a product/business
+ * promo draws the business bank even when the filename sounds like
+ * a party), and only then the filename genre.
+ */
+export function fieldAlternates(field: SuggestionField, ctx: SuggestionContext, genreOverride?: PostGenre): string[] {
+  const genre =
+    genreOverride ??
+    (ctx.purpose === 'product' || ctx.purpose === 'business' ? 'business' : genreForContext(ctx));
   const bank = BANKS[genre];
   switch (field) {
     case 'hook1':
