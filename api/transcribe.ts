@@ -4,8 +4,8 @@ import {
   fsPatchDoc,
   SERVER_TIMESTAMP,
   getLicenseTier,
-  DEFAULT_DAILY_QUOTA,
-  LIFETIME_DAILY_QUOTA,
+  dailyTranscribeQuota,
+  transcribeGateError,
   type ApiRequest,
   type ApiResponse,
 } from './_lib.js';
@@ -61,21 +61,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
     // status (the owner can't lock himself out). Pending is the normal
     // pre-approval state for every new signup — say so plainly.
     const callerIsAdmin = (await fsGetDoc(`admins/${uid}`, idToken)).exists;
-    if (!callerIsAdmin && data.status !== 'approved') {
-      if (data.status === 'pending') {
-        res.status(403).json({
-          success: false,
-          error: "Your access isn't switched on yet — transcription is available once the owner approves your account.",
-        });
-      } else {
-        res.status(403).json({ success: false, error: 'Account access restricted' });
-      }
+    const gateError = transcribeGateError(data.status, callerIsAdmin);
+    if (gateError) {
+      res.status(403).json({ success: false, error: gateError });
       return;
     }
     const dailyCount = data.lastTranscribeDate === todayStr ? data.dailyCount || 0 : 0;
     // v1: quota by license tier (free 2/day, lifetime 10/day).
     const licenseTier = await getLicenseTier(uid, idToken);
-    const maxDaily = licenseTier === 'lifetime' ? LIFETIME_DAILY_QUOTA : DEFAULT_DAILY_QUOTA;
+    const maxDaily = dailyTranscribeQuota(licenseTier);
 
     if (dailyCount >= maxDaily) {
       res.status(429).json({

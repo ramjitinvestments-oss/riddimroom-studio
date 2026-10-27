@@ -4,15 +4,21 @@ import {
   AccessToggleError,
   type ApiRequest,
   type ApiResponse,
+  type AccessState,
 } from '../_lib.js';
 
-// Phase 2 (Plan v5): POST /api/admin/set-access { uid, approved } — the
-// owner's toggle in the Admin screen. Approving writes the same
-// entitlement records a Stripe webhook would write later
-// (licenses/{uid} tier 'lifetime', active), flips users/{uid} status to
-// 'approved', and appends an approvals log entry; revoking deactivates
-// the license and returns the user to 'pending'. Non-admin callers get a
-// 403 and nothing is written (applyAccessToggle checks first).
+// R28: POST /api/admin/set-access { uid, access } — the owner's control
+// in the Admin screen, with THREE access states: 'pending' (users/{uid}
+// status 'pending', license deactivated), 'basic' (status 'approved',
+// licenses/{uid} tier 'free', active) and 'premium' (status 'approved',
+// licenses/{uid} tier 'lifetime', active — the records a Stripe webhook
+// would write later). Every change appends an approvals log entry.
+// Backward-compat: a boolean `approved` body (true → 'premium',
+// false → 'pending') is still accepted when `access` is absent.
+// Non-admin callers get a 403 and nothing is written
+// (applyAccessToggle checks first).
+const ACCESS_STATES: AccessState[] = ['pending', 'basic', 'premium'];
+
 export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (req.method !== 'POST') {
     res.status(405).json({ success: false, error: 'Method not allowed.' });
@@ -21,18 +27,27 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   const decoded = await verifyRequest(req, res);
   if (!decoded) return;
 
-  const body = (req.body || {}) as { uid?: unknown; approved?: unknown };
+  const body = (req.body || {}) as { uid?: unknown; approved?: unknown; access?: unknown };
   if (typeof body.uid !== 'string' || !body.uid) {
     res.status(400).json({ success: false, error: 'uid is required.' });
     return;
   }
-  if (typeof body.approved !== 'boolean') {
-    res.status(400).json({ success: false, error: 'approved is required.' });
+  let state: AccessState;
+  if (body.access !== undefined) {
+    if (typeof body.access !== 'string' || !ACCESS_STATES.includes(body.access as AccessState)) {
+      res.status(400).json({ success: false, error: 'access is required.' });
+      return;
+    }
+    state = body.access as AccessState;
+  } else if (typeof body.approved === 'boolean') {
+    state = body.approved ? 'premium' : 'pending';
+  } else {
+    res.status(400).json({ success: false, error: 'access is required.' });
     return;
   }
 
   try {
-    const user = await applyAccessToggle(decoded.uid, body.uid, body.approved, decoded.idToken);
+    const user = await applyAccessToggle(decoded.uid, body.uid, state, decoded.idToken);
     res.status(200).json({ success: true, user });
   } catch (err: any) {
     if (err instanceof AccessToggleError) {

@@ -287,6 +287,24 @@ export async function fsCreateDoc(
 export const DEFAULT_DAILY_QUOTA = 2;
 export const LIFETIME_DAILY_QUOTA = 10;
 
+/** Daily transcription quota for a license tier (lifetime 10, otherwise 2). */
+export function dailyTranscribeQuota(tier: 'free' | 'lifetime'): number {
+  return tier === 'lifetime' ? LIFETIME_DAILY_QUOTA : DEFAULT_DAILY_QUOTA;
+}
+
+/**
+ * Transcription access gate (pure): null when the caller may transcribe
+ * (admins are never gated by status; approved accounts pass), otherwise
+ * the exact error message the transcribe handler returns with a 403.
+ */
+export function transcribeGateError(status: string, isAdmin: boolean): string | null {
+  if (isAdmin || status === 'approved') return null;
+  if (status === 'pending') {
+    return "Your access isn't switched on yet — transcription is available once the owner approves your account.";
+  }
+  return 'Account access restricted';
+}
+
 export async function getLicenseTier(uid: string, idToken: string): Promise<'free' | 'lifetime'> {
   try {
     const license = await fsGetDoc(`licenses/${uid}`, idToken);
@@ -314,11 +332,14 @@ export async function isGlobalDisabled(idToken: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2 (Plan v5) — owner toggle access. An admin flips a pending signup
-// to approved from the in-app Admin screen; approving writes the SAME
-// entitlement records a Stripe webhook writes later (licenses/{uid} with
-// tier 'lifetime'), plus the users/{uid} status flag and an approvals log
-// entry, so manual access and paid access are indistinguishable to the app.
+// Phase 2 (Plan v5) — owner toggle access, split by R28 into three states:
+// 'pending' (status pending, license inactive), 'basic' (status approved,
+// license tier 'free' active) and 'premium' (status approved, license tier
+// 'lifetime' active — the original Phase 2 approve behaviour, writing the
+// SAME entitlement records a Stripe webhook writes later). Every state
+// change writes licenses/{uid}, the users/{uid} status flag and an
+// approvals log entry, so manual access and paid access are
+// indistinguishable to the app.
 // ---------------------------------------------------------------------------
 
 /** True when admins/{uid} exists for this caller. */
@@ -338,6 +359,19 @@ export class AccessToggleError extends Error {
   }
 }
 
+/** R28: the three access states — access is split from tier. */
+export type AccessState = 'pending' | 'basic' | 'premium';
+
+/**
+ * The ONE canonical derivation of access state: 'pending' unless the
+ * user status is 'approved'; then 'premium' for a lifetime license,
+ * otherwise 'basic' (approved on the free tier).
+ */
+export function accessStateFor(status: string, licenseTier: 'free' | 'lifetime'): AccessState {
+  if (status !== 'approved') return 'pending';
+  return licenseTier === 'lifetime' ? 'premium' : 'basic';
+}
+
 export interface AccessToggleWrites {
   licensePath: string;
   licenseFields: Record<string, unknown>;
@@ -349,38 +383,78 @@ export interface AccessToggleWrites {
 
 /**
  * The exact writes a toggle performs (pure — unit-tested in
- * src/lib/adminAccess.test.ts). Approving grants the lifetime license;
- * revoking only deactivates it (the document and its tier stay, so a
- * later re-approval is a flag flip, and the record of the grant survives).
+ * src/lib/adminAccess.test.ts). 'basic' grants an active free license,
+ * 'premium' grants an active lifetime license (both approve the user);
+ * 'pending' only deactivates the license (the document and its tier
+ * stay, so a later re-grant is a flag flip, and the record of the grant
+ * survives) and returns the user to 'pending'.
  */
 export function buildAccessToggleWrites(
   targetUid: string,
   targetEmail: string,
-  approved: boolean,
+  state: AccessState,
   callerUid: string,
 ): AccessToggleWrites {
+  if (state === 'basic') {
+    return {
+      licensePath: `licenses/${targetUid}`,
+      licenseFields: {
+        tier: 'free',
+        active: true,
+        source: 'tester-basic',
+        grantedBy: callerUid,
+        updatedAt: SERVER_TIMESTAMP,
+      },
+      userPath: `users/${targetUid}`,
+      userFields: { status: 'approved' },
+      logCollection: 'approvals',
+      logFields: {
+        uid: targetUid,
+        email: targetEmail,
+        action: 'basic',
+        source: 'tester-basic',
+        by: callerUid,
+        at: SERVER_TIMESTAMP,
+      },
+    };
+  }
+  if (state === 'premium') {
+    return {
+      licensePath: `licenses/${targetUid}`,
+      licenseFields: {
+        tier: 'lifetime',
+        active: true,
+        source: 'tester-premium',
+        grantedBy: callerUid,
+        updatedAt: SERVER_TIMESTAMP,
+      },
+      userPath: `users/${targetUid}`,
+      userFields: { status: 'approved' },
+      logCollection: 'approvals',
+      logFields: {
+        uid: targetUid,
+        email: targetEmail,
+        action: 'premium',
+        source: 'tester-premium',
+        by: callerUid,
+        at: SERVER_TIMESTAMP,
+      },
+    };
+  }
   return {
     licensePath: `licenses/${targetUid}`,
-    licenseFields: approved
-      ? {
-          tier: 'lifetime',
-          active: true,
-          source: 'manual-toggle',
-          grantedBy: callerUid,
-          updatedAt: SERVER_TIMESTAMP,
-        }
-      : {
-          active: false,
-          source: 'manual-toggle',
-          updatedAt: SERVER_TIMESTAMP,
-        },
+    licenseFields: {
+      active: false,
+      source: 'manual-toggle',
+      updatedAt: SERVER_TIMESTAMP,
+    },
     userPath: `users/${targetUid}`,
-    userFields: { status: approved ? 'approved' : 'pending' },
+    userFields: { status: 'pending' },
     logCollection: 'approvals',
     logFields: {
       uid: targetUid,
       email: targetEmail,
-      action: approved ? 'approved' : 'revoked',
+      action: 'revoked',
       by: callerUid,
       at: SERVER_TIMESTAMP,
     },
@@ -398,6 +472,7 @@ export interface AdminUserSummary {
   subscription: string;
   marketingOptIn: boolean;
   licenseTier: 'free' | 'lifetime';
+  accessState: AccessState;
 }
 
 function toAdminUserSummary(data: Record<string, unknown>, licenseTier: 'free' | 'lifetime'): AdminUserSummary {
@@ -412,6 +487,7 @@ function toAdminUserSummary(data: Record<string, unknown>, licenseTier: 'free' |
     subscription: String(data.subscription || ''),
     marketingOptIn: data.marketingOptIn === true,
     licenseTier,
+    accessState: accessStateFor(String(data.status || ''), licenseTier),
   };
 }
 
@@ -454,7 +530,7 @@ export async function fetchAdminUsers(callerUid: string, idToken: string): Promi
 export async function applyAccessToggle(
   callerUid: string,
   targetUid: string,
-  approved: boolean,
+  state: AccessState,
   idToken: string,
 ): Promise<AdminUserSummary> {
   if (!(await isAdminUser(callerUid, idToken))) {
@@ -464,7 +540,7 @@ export async function applyAccessToggle(
   if (!target.exists) {
     throw new AccessToggleError('USER_NOT_FOUND', 'User not found.');
   }
-  const writes = buildAccessToggleWrites(targetUid, String(target.data.email || ''), approved, callerUid);
+  const writes = buildAccessToggleWrites(targetUid, String(target.data.email || ''), state, callerUid);
   await fsPatchDoc(writes.licensePath, writes.licenseFields, idToken);
   await fsPatchDoc(writes.userPath, writes.userFields, idToken);
   await fsCreateDoc(writes.logCollection, writes.logFields, idToken);

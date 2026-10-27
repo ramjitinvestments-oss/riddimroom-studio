@@ -5,12 +5,13 @@ import BrandLogo from './BrandLogo';
 
 /**
  * Phase 2 (Plan v5) — the owner's Admin screen: every signup by email,
- * newest first, with the ON/OFF access toggle. Toggling calls
- * POST /api/admin/set-access with the owner's Firebase ID token (the same
- * Authorization-header pattern every /api call in this app uses); the
- * server re-verifies admin status and writes the license + status +
- * approvals log. The "Export emails" button builds the marketing list
- * (CSV) from the loaded rows, client-side — no extra endpoint.
+ * newest first, with two access switches per row (R28): "Allow access"
+ * (pending <-> basic) and "Premium" (basic <-> premium). Switching calls
+ * POST /api/admin/set-access with { uid, access } and the owner's Firebase
+ * ID token (the same Authorization-header pattern every /api call in this
+ * app uses); the server re-verifies admin status and writes the license +
+ * status + approvals log. The "Export emails" button builds the marketing
+ * list (CSV) from the loaded rows, client-side — no extra endpoint.
  *
  * Only rendered when userProfile.isAdmin (App.tsx gates the route); the
  * server is the real gate regardless.
@@ -27,6 +28,7 @@ interface AdminUserRow {
   subscription: string;
   marketingOptIn: boolean;
   licenseTier: 'free' | 'lifetime';
+  accessState: 'pending' | 'basic' | 'premium';
 }
 
 interface AdminPanelProps {
@@ -79,11 +81,10 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
     );
   }, [users, query]);
 
-  const handleToggle = useCallback(
-    async (row: AdminUserRow) => {
+  const setAccess = useCallback(
+    async (uid: string, access: AdminUserRow['accessState']) => {
       if (!idToken || busyUid) return;
-      const approved = row.status !== 'approved';
-      setBusyUid(row.uid);
+      setBusyUid(uid);
       setError(null);
       try {
         const res = await fetch('/api/admin/set-access', {
@@ -92,7 +93,7 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
             Authorization: `Bearer ${idToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ uid: row.uid, approved }),
+          body: JSON.stringify({ uid, access }),
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data?.success) {
@@ -113,13 +114,14 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
 
   const handleExportEmails = useCallback(() => {
     if (!users) return;
-    const header = 'email,name,signup date,status,marketing opt-in';
+    const header = 'email,name,signup date,status,access,marketing opt-in';
     const lines = users.map((u) =>
       [
         csvCell(u.email),
         csvCell(u.displayName),
         csvCell(u.createdAt ? new Date(u.createdAt).toISOString() : ''),
         csvCell(u.status),
+        csvCell(u.accessState),
         csvCell(u.marketingOptIn ? 'yes' : 'no'),
       ].join(','),
     );
@@ -168,8 +170,10 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
           </button>
         </div>
         <p className="text-xs text-white/40 mb-6">
-          Toggle a signup on to give them full access (Lifetime). Off returns them to the pending
-          screen — their projects are kept. The export is the marketing list for the Riddim List.
+          Allow access switches a signup on with the free plan (short projects, a few exports a
+          day, watermark on). Premium lifts the limits — unlimited exports, no watermark, longer
+          projects. Switching access off returns them to the pending screen — their projects are
+          kept. The export is the marketing list for the Riddim List.
         </p>
 
         <div className="relative mb-4">
@@ -206,7 +210,9 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
         {visible && visible.length > 0 && (
           <ul className="space-y-3">
             {visible.map((row) => {
-              const isOn = row.status === 'approved';
+              const hasAccess = row.accessState !== 'pending';
+              const isPremium = row.accessState === 'premium';
+              const isBusy = busyUid === row.uid;
               return (
                 <li
                   key={row.uid}
@@ -222,46 +228,80 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                   <div className="min-w-0 flex-1">
                     <p className="font-bold truncate">{row.displayName || row.email}</p>
                     <p className="text-xs text-white/50 truncate">{row.email}</p>
-                    <p className="text-xs text-white/40 mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                    <p className="text-xs text-white/40 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                      {row.accessState === 'pending' ? (
+                        <span className="px-2 py-0.5 rounded-full border bg-gold/15 border-gold/60 text-gold text-[10px] font-bold uppercase">
+                          Pending
+                        </span>
+                      ) : row.accessState === 'premium' ? (
+                        <span className="px-2 py-0.5 rounded-full border bg-emerald-400/15 border-emerald-400/60 text-emerald-400 text-[10px] font-bold uppercase">
+                          Premium
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-full border bg-sky-400/15 border-sky-400/60 text-sky-300 text-[10px] font-bold uppercase">
+                          Basic
+                        </span>
+                      )}
                       <span>
-                        {isOn ? (
-                          <span className="text-emerald-400 font-bold uppercase">Approved</span>
-                        ) : row.status === 'pending' ? (
-                          <span className="text-gold font-bold uppercase">Pending</span>
-                        ) : (
-                          <span className="text-red-400 font-bold uppercase">{row.status}</span>
-                        )}
-                      </span>
-                      <span>· Plan: {row.licenseTier === 'lifetime' ? 'Lifetime' : 'Free'}</span>
-                      <span>
-                        · Signed up {row.createdAt ? new Date(row.createdAt).toLocaleDateString() : '—'}
+                        Signed up {row.createdAt ? new Date(row.createdAt).toLocaleDateString() : '—'}
                       </span>
                       <span>· Marketing: {row.marketingOptIn ? 'opted in' : 'no'}</span>
                     </p>
                   </div>
-                  <button
-                    role="switch"
-                    aria-checked={isOn}
-                    aria-label={`Access for ${row.email}`}
-                    onClick={() => handleToggle(row)}
-                    disabled={busyUid === row.uid}
-                    className={`relative shrink-0 w-14 h-8 rounded-full border transition disabled:opacity-50 ${
-                      isOn ? 'bg-gold border-gold' : 'bg-white/10 border-white/20'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1/2 -translate-y-1/2 h-6 w-6 rounded-full bg-white shadow transition-all ${
-                        isOn ? 'left-[26px]' : 'left-[3px] opacity-70'
-                      }`}
-                    />
-                    <span
-                      className={`absolute inset-y-0 flex items-center text-[10px] font-black uppercase ${
-                        isOn ? 'left-2 text-black' : 'right-2 text-white/60'
-                      }`}
-                    >
-                      {busyUid === row.uid ? '…' : isOn ? 'On' : 'Off'}
-                    </span>
-                  </button>
+                  <div className="flex shrink-0 items-start gap-3">
+                    <div className="flex flex-col items-center gap-1">
+                      <span className="text-[10px] font-bold uppercase text-white/50">Access</span>
+                      <button
+                        role="switch"
+                        aria-checked={hasAccess}
+                        aria-label={`Allow access for ${row.email}`}
+                        onClick={() => setAccess(row.uid, hasAccess ? 'pending' : 'basic')}
+                        disabled={isBusy}
+                        className={`relative shrink-0 w-14 h-8 rounded-full border transition disabled:opacity-50 ${
+                          hasAccess ? 'bg-gold border-gold' : 'bg-white/10 border-white/20'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-1/2 -translate-y-1/2 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                            hasAccess ? 'left-[26px]' : 'left-[3px] opacity-70'
+                          }`}
+                        />
+                        <span
+                          className={`absolute inset-y-0 flex items-center text-[10px] font-black uppercase ${
+                            hasAccess ? 'left-2 text-black' : 'right-2 text-white/60'
+                          }`}
+                        >
+                          {isBusy ? '…' : hasAccess ? 'On' : 'Off'}
+                        </span>
+                      </button>
+                    </div>
+                    <div className="flex flex-col items-center gap-1">
+                      <span className="text-[10px] font-bold uppercase text-white/50">Premium</span>
+                      <button
+                        role="switch"
+                        aria-checked={isPremium}
+                        aria-label={`Premium for ${row.email}`}
+                        onClick={() => setAccess(row.uid, isPremium ? 'basic' : 'premium')}
+                        disabled={isBusy}
+                        className={`relative shrink-0 w-14 h-8 rounded-full border transition disabled:opacity-50 ${
+                          isPremium ? 'bg-gold border-gold' : 'bg-white/10 border-white/20'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-1/2 -translate-y-1/2 h-6 w-6 rounded-full bg-white shadow transition-all ${
+                            isPremium ? 'left-[26px]' : 'left-[3px] opacity-70'
+                          }`}
+                        />
+                        <span
+                          className={`absolute inset-y-0 flex items-center text-[10px] font-black uppercase ${
+                            isPremium ? 'left-2 text-black' : 'right-2 text-white/60'
+                          }`}
+                        >
+                          {isBusy ? '…' : isPremium ? 'On' : 'Off'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
                 </li>
               );
             })}
