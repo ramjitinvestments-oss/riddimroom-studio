@@ -1,13 +1,27 @@
-import React, { useEffect } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './components/LoginPage';
 import { Dashboard } from './components/Dashboard';
 import { PendingScreen } from './components/PendingScreen';
-import { AdminPanel } from './components/AdminPanel';
-import { PromoPage } from './components/PromoPage';
-import { EditorShell } from './components/Editor/EditorShell';
+import BrandLogo from './components/BrandLogo';
 import { useRouter } from './lib/router';
+
+// R27 WS-M7 — route-level code splitting: Promo, Editor and Admin load
+// on navigation instead of up front. Dashboard, LoginPage, PendingScreen
+// and ProtectedRoute stay eager (first paint / gate surfaces).
+const PromoPage = lazy(() => import('./components/PromoPage').then((m) => ({ default: m.PromoPage })));
+const EditorShell = lazy(() => import('./components/Editor/EditorShell').then((m) => ({ default: m.EditorShell })));
+const AdminPanel = lazy(() => import('./components/AdminPanel').then((m) => ({ default: m.AdminPanel })));
+
+function RouteLoading() {
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6 text-center bg-[#070707] text-white">
+      <BrandLogo size="lg" />
+      <p className="text-sm text-white/50">Loading…</p>
+    </div>
+  );
+}
 
 /**
  * Phase 1 Step 14 (UI refinement). Replaces the Step 2 placeholder
@@ -64,7 +78,9 @@ function AppShell() {
     return (
       <ProtectedRoute redirectTo={navigateTo}>
         {userProfile?.isAdmin ? (
-          <AdminPanel onBack={() => navigateTo('/')} />
+          <Suspense fallback={<RouteLoading />}>
+            <AdminPanel onBack={() => navigateTo('/')} />
+          </Suspense>
         ) : (
           <Dashboard
             onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
@@ -81,10 +97,12 @@ function AppShell() {
   if (currentPath === '/promo') {
     return (
       <ProtectedRoute redirectTo={navigateTo}>
-        <PromoPage
-          onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
-          onBack={() => navigateTo('/')}
-        />
+        <Suspense fallback={<RouteLoading />}>
+          <PromoPage
+            onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
+            onBack={() => navigateTo('/')}
+          />
+        </Suspense>
       </ProtectedRoute>
     );
   }
@@ -94,7 +112,9 @@ function AppShell() {
   return (
     <ProtectedRoute redirectTo={navigateTo}>
       {editorMatch ? (
-        <EditorShell projectId={decodeURIComponent(editorMatch[1])} />
+        <Suspense fallback={<RouteLoading />}>
+          <EditorShell projectId={decodeURIComponent(editorMatch[1])} />
+        </Suspense>
       ) : (
         <Dashboard
           onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}

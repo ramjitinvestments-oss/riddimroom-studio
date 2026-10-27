@@ -371,7 +371,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         />
       </div>
 
-      <p className="text-[10px] text-white/30">Videos, songs, and audio are limited to {MAX_MEDIA_SECONDS} seconds per clip.</p>
+      <p className="text-[10px] text-white/30">Videos, songs, and audio are limited to {MAX_MEDIA_SECONDS / 60} minutes per clip.</p>
 
       <div
         onDragOver={(e) => e.preventDefault()}

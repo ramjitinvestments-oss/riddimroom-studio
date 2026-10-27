@@ -48,7 +48,7 @@ export function PendingScreen() {
         <BrandLogo size="sm" />
         <button
           onClick={signOut}
-          className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs font-bold uppercase"
+          className="px-3 py-1.5 min-h-11 inline-flex items-center justify-center bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-xs font-bold uppercase"
         >
           Sign out
         </button>
@@ -64,8 +64,11 @@ export function PendingScreen() {
           </h1>
           <p className="mt-3 text-sm text-white/60 leading-relaxed">
             RiddimRoom Studio access is switched on by the owner for each account. You&rsquo;re on
-            the list — once you&rsquo;re switched on, this screen is replaced by your studio,
-            with captions, exports and no watermark.
+            the list — once the owner switches your account on, this screen lifts automatically
+            and is replaced by your studio, with captions, exports and no watermark. There&rsquo;s
+            nothing else you need to do: you don&rsquo;t need to sign up again, and there&rsquo;s
+            no need to contact anyone — unless it&rsquo;s been a while and you&rsquo;re still
+            waiting here.
           </p>
           {email && (
             <p className="mt-4 text-sm">

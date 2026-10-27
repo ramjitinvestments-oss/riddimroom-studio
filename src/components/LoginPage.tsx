@@ -108,7 +108,7 @@ export function LoginPage() {
         <button
           onClick={handleGoogle}
           disabled={isSubmitting}
-          className="w-full py-3 bg-white text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
+          className="w-full py-3 min-h-11 bg-white text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
         >
           Continue with Google
         </button>
@@ -128,7 +128,8 @@ export function LoginPage() {
                 placeholder="Display name"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                className="flex-1 bg-transparent py-3 text-sm outline-none placeholder-white/30"
+                autoComplete="name"
+                className="flex-1 bg-transparent py-3 text-base outline-none placeholder-white/30"
               />
             </div>
           )}
@@ -139,7 +140,9 @@ export function LoginPage() {
               placeholder="Email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="flex-1 bg-transparent py-3 text-sm outline-none placeholder-white/30"
+              inputMode="email"
+              autoComplete="email"
+              className="flex-1 bg-transparent py-3 text-base outline-none placeholder-white/30"
             />
           </div>
           {mode !== 'forgot' && (
@@ -150,7 +153,8 @@ export function LoginPage() {
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="flex-1 bg-transparent py-3 text-sm outline-none placeholder-white/30"
+                autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
+                className="flex-1 bg-transparent py-3 text-base outline-none placeholder-white/30"
               />
             </div>
           )}
@@ -166,7 +170,7 @@ export function LoginPage() {
                 />
                 Remember me
               </label>
-              <button type="button" onClick={() => setMode('forgot')} className="text-gold hover:underline">
+              <button type="button" onClick={() => setMode('forgot')} className="text-gold hover:underline min-h-11 inline-flex items-center">
                 Forgot password?
               </button>
             </div>
@@ -175,7 +179,7 @@ export function LoginPage() {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full py-3 bg-gold hover:bg-gold-bright text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
+            className="w-full py-3 min-h-11 bg-gold hover:bg-gold-bright text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
           >
             {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset email'}
             {mode === 'forgot' ? <KeyRound className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
@@ -186,7 +190,7 @@ export function LoginPage() {
           {mode === 'login' && (
             <>
               No account?{' '}
-              <button onClick={() => setMode('signup')} className="text-gold hover:underline">
+              <button onClick={() => setMode('signup')} className="text-gold hover:underline min-h-11 inline-flex items-center">
                 Create one
               </button>
             </>
@@ -194,13 +198,13 @@ export function LoginPage() {
           {mode === 'signup' && (
             <>
               Already have an account?{' '}
-              <button onClick={() => setMode('login')} className="text-gold hover:underline">
+              <button onClick={() => setMode('login')} className="text-gold hover:underline min-h-11 inline-flex items-center">
                 Sign in
               </button>
             </>
           )}
           {mode === 'forgot' && (
-            <button onClick={() => setMode('login')} className="text-gold hover:underline">
+            <button onClick={() => setMode('login')} className="text-gold hover:underline min-h-11 inline-flex items-center">
               Back to sign in
             </button>
           )}

@@ -93,13 +93,13 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Video overlay (PiP)</h3>
+      <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Picture in picture (PiP)</h3>
       <p className="text-[11px] text-white/40">Talking-head / explainer: overlay a video on top of your main video. Drag + resize on canvas.</p>
       {pipCount > 0 && <p className="text-[11px] text-emerald-400">{pipCount} overlay{pipCount === 1 ? '' : 's'} on timeline</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
       <label className="flex flex-col gap-1 text-xs text-white/60">
         Layout
-        <select value={layoutId} onChange={(e) => setLayoutId(e.target.value as PipLayoutId)} className="bg-white/10 rounded px-2 py-2 text-white min-h-11">
+        <select value={layoutId} onChange={(e) => setLayoutId(e.target.value as PipLayoutId)} className="bg-white/10 rounded px-2 py-2 text-white text-base min-h-11">
           {PIP_LAYOUTS.map((l) => (<option key={l.id} value={l.id}>{l.label}</option>))}
         </select>
       </label>
@@ -108,7 +108,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
         {videoAssets.map((asset) => (
           <li key={asset.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">
             <span className="flex-1 truncate">{asset.fileName}</span>
-            <button onClick={() => handleAdd(asset)} className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-9">+ Add as PiP</button>
+            <button onClick={() => handleAdd(asset)} className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center">+ Add as PiP</button>
           </li>
         ))}
       </ul>
@@ -138,7 +138,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
                 <button
                   key={label}
                   onClick={() => patchSelectedPip({ scale: pipScaleForWidthPercent(pct) })}
-                  className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-9"
+                  className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
                 >
                   {label}
                 </button>
@@ -147,7 +147,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           </div>
           <button
             onClick={() => mutate((p) => swapMainAndPip(p, selectedPip.id))}
-            className="flex items-center justify-center gap-2 px-3 py-2 bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg text-xs font-bold uppercase min-h-10"
+            className="flex items-center justify-center gap-2 px-3 py-2 bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg text-xs font-bold uppercase min-h-11"
           >
             <ArrowLeftRight size={13} /> Swap main ↔ overlay
           </button>
@@ -167,7 +167,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           <button
             onClick={() => patchFramable({ flipX: framable.flipX !== true })}
             aria-pressed={framable.flipX === true}
-            className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-bold uppercase min-h-10 border ${
+            className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-bold uppercase min-h-11 border ${
               framable.flipX === true
                 ? 'bg-gold/15 hover:bg-gold/25 border-gold/60 text-gold'
                 : 'bg-white/10 hover:bg-white/20 border-white/10 text-white'
@@ -243,7 +243,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           {framingModified && (
             <button
               onClick={() => patchFramable({ cropZoom: 1, cropOffsetX: 0, cropOffsetY: 0 })}
-              className="self-start px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-9"
+              className="self-start px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center"
             >
               Reset zoom &amp; pan
             </button>

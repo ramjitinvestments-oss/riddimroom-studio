@@ -93,6 +93,16 @@ export function ExportPanel() {
   const [postPlatform, setPostPlatform] = useState<SocialPlatform>('tiktok');
   const [postCopied, setPostCopied] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // R27 WS-M8 — the 3-question ease check: shown once, after the first
+  // successful export in this session, only if it has never been
+  // answered/dismissed on this device (localStorage, no network).
+  const [hasExportedThisSession, setHasExportedThisSession] = useState(false);
+  const [easeCheckDone, setEaseCheckDone] = useState<boolean>(() => {
+    try { return localStorage.getItem('rr:ease-check-done') === '1'; } catch { return false; }
+  });
+  const [easeRating, setEaseRating] = useState<string | null>(null);
+  const [easeConfusing, setEaseConfusing] = useState<string[]>([]);
+  const [easeComment, setEaseComment] = useState('');
   const busy = status === 'rendering' || status === 'converting';
   // Effective tier (server profile when the API answered; admin-grant
   // fallback on builds without /api/*) — see hooks/useLicenseTier.
@@ -179,6 +189,7 @@ export function ExportPanel() {
       setDownloadUrl(URL.createObjectURL(mp4Blob));
       setLastBlob(mp4Blob);
       setStatus('done');
+      setHasExportedThisSession(true);
       void measureLoudness(mp4Blob).then(setLoudness);
       if (user) recordExport(user.uid);
     } catch (err: any) {
@@ -259,6 +270,32 @@ export function ExportPanel() {
     }
   };
 
+  // R27 WS-M8 — ease-check handlers (device-local only, no network).
+  const toggleConfusing = (label: string) => {
+    setEaseConfusing((prev) => {
+      if (label === 'Nothing') return prev.includes('Nothing') ? [] : ['Nothing'];
+      const rest = prev.filter((x) => x !== 'Nothing');
+      return rest.includes(label) ? rest.filter((x) => x !== label) : [...rest, label];
+    });
+  };
+  const submitEaseCheck = () => {
+    try {
+      localStorage.setItem('rr:ease-check-answer', JSON.stringify({ ease: easeRating, confusing: easeConfusing, comment: easeComment }));
+      localStorage.setItem('rr:ease-check-done', '1');
+    } catch {
+      // Storage unavailable (private mode etc.) — just hide the card.
+    }
+    setEaseCheckDone(true);
+  };
+  const dismissEaseCheck = () => {
+    try {
+      localStorage.setItem('rr:ease-check-done', '1');
+    } catch {
+      // Same as above — hiding locally is enough.
+    }
+    setEaseCheckDone(true);
+  };
+
   const chipClass = (isActive: boolean) =>
     `min-h-11 px-2 rounded-lg border text-xs font-bold transition ${
       isActive
@@ -282,12 +319,12 @@ export function ExportPanel() {
           value={resolution}
           disabled={busy}
           onChange={(e) => setResolution(e.target.value as ExportResolutionId)}
-          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-base text-white focus:outline-none focus:border-gold/60"
         >
           {EXPORT_RESOLUTIONS.map((opt) => (
             <option key={opt.id} value={opt.id} disabled={isRedundantResolution(opt.id)}>
-              {opt.id === 'native' ? `Native — ${project.canvasWidth}×${project.canvasHeight}` : opt.label}
-              {isRedundantResolution(opt.id) ? ' (same as native)' : ''}
+              {opt.id === 'native' ? `Original size — ${project.canvasWidth}×${project.canvasHeight}` : opt.label}
+              {isRedundantResolution(opt.id) ? ' (same as original size)' : ''}
             </option>
           ))}
         </select>
@@ -300,7 +337,7 @@ export function ExportPanel() {
           value={effectiveFrameRate}
           disabled={busy}
           onChange={(e) => setFrameRateChoice(Number(e.target.value))}
-          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-base text-white focus:outline-none focus:border-gold/60"
         >
           {EXPORT_FRAME_RATES.map((fps) => (
             <option key={fps} value={fps}>
@@ -317,7 +354,7 @@ export function ExportPanel() {
           value={qualityTier}
           disabled={busy}
           onChange={(e) => setQualityTier(e.target.value as ExportQualityTier)}
-          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+          className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-base text-white focus:outline-none focus:border-gold/60"
         >
           {EXPORT_QUALITY_TIERS.map((opt) => (
             <option key={opt.id} value={opt.id}>
@@ -326,14 +363,15 @@ export function ExportPanel() {
           ))}
         </select>
         <span className="text-[10px] text-white/30">
-          Output: {resolved.width}×{resolved.height} · {resolved.frameRate} fps · ~{(resolved.videoBitsPerSecond / 1_000_000).toFixed(1)} Mbps video
+          {resolved.height === 1080 ? 'Full HD' : resolved.height === 720 ? 'HD' : 'Original size'} · {resolved.frameRate} frames per second · smooth for TikTok and Reels{' '}
+          <span className="text-white/25">({resolved.width}×{resolved.height})</span>
         </span>
       </label>
       {!busy && (
         <button
           onClick={handleExport}
           disabled={busy || !canExport}
-          className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black self-start disabled:opacity-50"
+          className="w-full min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black disabled:opacity-50"
         >
           Export video (MP4)
         </button>
@@ -389,6 +427,56 @@ export function ExportPanel() {
               This browser can't share files directly — save the MP4, then post it from your gallery or files.
             </p>
           )}
+        </div>
+      )}
+
+      {hasExportedThisSession && !easeCheckDone && (
+        <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">Quick check — 10 seconds</span>
+            <button onClick={dismissEaseCheck} aria-label="Dismiss" className="min-h-11 min-w-11 flex items-center justify-center text-white/50 hover:text-white shrink-0">
+              <X size={14} strokeWidth={3} />
+            </button>
+          </div>
+          <p className="text-xs font-bold text-white/85">How easy was that?</p>
+          <div className="flex gap-1.5">
+            {(['Easy', 'OK', 'Hard'] as const).map((label) => (
+              <button
+                key={label}
+                onClick={() => setEaseRating(label)}
+                aria-pressed={easeRating === label}
+                className={`flex-1 min-h-11 px-2 rounded-lg border text-xs font-bold transition ${
+                  easeRating === label
+                    ? 'border-gold ring-1 ring-gold/60 bg-gold/10 text-gold'
+                    : 'border-white/10 bg-white/5 hover:bg-white/10 text-white/80'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs font-bold text-white/85">Was anything confusing?</p>
+          <div className="flex flex-wrap gap-1.5">
+            {(['Clips', 'Words', 'Music', 'Saving', 'Nothing'] as const).map((label) => (
+              <label key={label} className="min-h-11 inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 text-xs font-bold text-white/80 cursor-pointer">
+                <input type="checkbox" checked={easeConfusing.includes(label)} onChange={() => toggleConfusing(label)} />
+                {label}
+              </label>
+            ))}
+          </div>
+          <label className="flex flex-col gap-1 text-xs font-bold text-white/85">
+            Tell us in a line (optional)
+            <input
+              type="text"
+              value={easeComment}
+              onChange={(e) => setEaseComment(e.target.value)}
+              placeholder="Anything else?"
+              className="min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-base font-normal text-white focus:outline-none focus:border-gold/60"
+            />
+          </label>
+          <button onClick={submitEaseCheck} className="w-full min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-black uppercase tracking-wide">
+            Submit
+          </button>
         </div>
       )}
 
@@ -450,7 +538,7 @@ export function ExportPanel() {
               setPostPlatform(e.target.value as SocialPlatform);
               setPostCopied(false);
             }}
-            className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
+            className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-base text-white focus:outline-none focus:border-gold/60"
           >
             {socialPosts.map((post) => (
               <option key={post.platform} value={post.platform}>

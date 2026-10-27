@@ -65,7 +65,7 @@ export function BackgroundRemovalButton({
     setError(null);
     try {
       const sourceRes = await fetch(asset.storageUrl);
-      if (!sourceRes.ok) throw new Error(`Could not fetch source image (HTTP ${sourceRes.status}).`);
+      if (!sourceRes.ok) throw new Error('Could not fetch source image.');
       const sourceBlob = await sourceRes.blob();
 
       const provider = getBackgroundRemovalProvider();

@@ -42,6 +42,7 @@ export function BottomSheet({
         className={`absolute inset-0 bg-black/60 transition-opacity duration-200 ${open ? 'opacity-100' : 'opacity-0'}`}
       />
       <div
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
         className={`absolute left-0 right-0 bottom-0 max-h-[80vh] bg-[#111111] rounded-t-2xl border-t border-white/10 flex flex-col transition-transform duration-200 ${
           open ? 'translate-y-0' : 'translate-y-full'
         }`}

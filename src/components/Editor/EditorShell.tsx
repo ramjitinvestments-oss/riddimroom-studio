@@ -98,6 +98,70 @@ function EditorInner({ uid }: { uid: string }) {
   const projectStateRef = useRef(project);
   projectStateRef.current = project;
 
+  // R27 WS-M1 — open where the work is: a project that already has
+  // content when it FIRST loads opens on Step 2 (Edit) instead of the
+  // upload screen. One-shot guard keyed by project id: it fires only on
+  // the first non-null project object for that project, and never if
+  // the user has already changed steps themselves, so it can never
+  // override later navigation or re-fire on later project updates.
+  const stepInitForProjectRef = useRef<string | null>(null);
+  const userChangedStepRef = useRef(false);
+  const goToStep = useCallback((n: 1 | 2 | 3) => {
+    userChangedStepRef.current = true;
+    setStep(n);
+  }, []);
+  useEffect(() => {
+    if (!project) return;
+    if (stepInitForProjectRef.current === project.id) return;
+    stepInitForProjectRef.current = project.id;
+    if (!userChangedStepRef.current && project.items.length > 0) setStep(2);
+  }, [project]);
+
+  // R27 WS-M6 — autosave. (a) Save on step change when there are
+  // unsaved edits. (b) Debounced save ~2s after edits go quiet. The
+  // manual Save button stays. Refs keep the effects from re-firing on
+  // every render and from retry-looping after a failed save (a failure
+  // leaves the project object untouched, so neither effect reschedules).
+  // isDirty starts false on load, so neither fires on first load.
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  const isDirtyRef = useRef(isDirty);
+  isDirtyRef.current = isDirty;
+  const isSavingRef = useRef(isSaving);
+  isSavingRef.current = isSaving;
+  const prevStepRef = useRef(step);
+  useEffect(() => {
+    if (prevStepRef.current === step) return;
+    prevStepRef.current = step;
+    if (isDirtyRef.current && !isSavingRef.current) void saveRef.current();
+  }, [step]);
+  useEffect(() => {
+    if (!project || !isDirty) return;
+    const timer = setTimeout(() => {
+      if (isDirtyRef.current && !isSavingRef.current) void saveRef.current();
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [project, isDirty]);
+
+  // R27 WS-M6 — undo toast: other panels (ItemInspector, TimelinePanel)
+  // dispatch 'rr:undo-toast' after a delete; show the message with a
+  // one-tap Undo here, auto-dismissing after ~6s.
+  const [undoToast, setUndoToast] = useState<string | null>(null);
+  const undoToastTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const message = (e as CustomEvent<{ message?: string }>).detail?.message;
+      setUndoToast(typeof message === 'string' && message ? message : 'Deleted');
+      if (undoToastTimerRef.current !== null) window.clearTimeout(undoToastTimerRef.current);
+      undoToastTimerRef.current = window.setTimeout(() => setUndoToast(null), 6000);
+    };
+    window.addEventListener('rr:undo-toast', handler);
+    return () => {
+      window.removeEventListener('rr:undo-toast', handler);
+      if (undoToastTimerRef.current !== null) window.clearTimeout(undoToastTimerRef.current);
+    };
+  }, []);
+
   // "Final production fix" spec item 3a (mobile-first redesign) — on small
   // viewports the Library and Selected-Item/Add-panel columns (fixed side
   // `<aside>`s on desktop, see the `lg:` breakpoint on the grid below) move
@@ -110,7 +174,13 @@ function EditorInner({ uid }: { uid: string }) {
   // panels. Selecting a timeline item auto-opens its group.
   const [openGroup, setOpenGroup] = useState<string>('add');
   useEffect(() => {
-    if (selectedItemId) setOpenGroup('item');
+    if (!selectedItemId) return;
+    setOpenGroup('item');
+    // R27 WS-M3 — on a small viewport, tapping a clip visibly does
+    // something: its item sheet opens (desktop keeps the side column).
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1023px)').matches) {
+      setMobileSheet('panel');
+    }
   }, [selectedItemId]);
 
   // Re-derive the toggle's highlighted variant from what's actually placed
@@ -237,6 +307,9 @@ function EditorInner({ uid }: { uid: string }) {
           e.preventDefault();
           mutate((p) => removeItem(p, selectedItemId));
           setSelectedItemId(null);
+          // R27 WS-M6 — a keyboard delete is a real delete: surface the
+          // undo toast exactly like the inspector's Delete button does.
+          window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Clip deleted' } }));
         }
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
@@ -372,13 +445,16 @@ function EditorInner({ uid }: { uid: string }) {
         <MusicPanel uid={uid} item={selectedItem} />
       </PanelGroup>
 
-      <PanelGroup title="Overlay (PiP)" {...groupProps('overlay')}>
+      <PanelGroup title="Overlay — picture in picture" {...groupProps('overlay')}>
         <PipPanel item={selectedItem} />
       </PanelGroup>
 
       <PanelGroup title="Captions" {...groupProps('captions')}>
+        <p className="text-[10px] font-bold uppercase tracking-wide text-white/40 -mb-1">Write captions for me</p>
         <TranscribePanel uid={uid} />
+        <p className="text-[10px] font-bold uppercase tracking-wide text-white/40 -mb-1">Add your own</p>
         <AddCaptionPanel currentTime={currentTime} />
+        <p className="text-[10px] font-bold uppercase tracking-wide text-white/40 -mb-1">Caption files</p>
         <CaptionsExportPanel />
       </PanelGroup>
     </>
@@ -416,7 +492,7 @@ function EditorInner({ uid }: { uid: string }) {
           <input
             value={project.name}
             onChange={(e) => mutate((p) => ({ ...p, name: e.target.value, updatedAt: Date.now() }))}
-            className="bg-transparent font-bold text-sm outline-none border-b border-transparent focus:border-white/30 min-w-0 flex-1"
+            className="bg-transparent font-bold text-base outline-none border-b border-transparent focus:border-white/30 min-w-0 flex-1"
           />
         </div>
         <div className="flex items-center gap-1.5 sm:gap-3 text-xs shrink-0">
@@ -427,7 +503,7 @@ function EditorInner({ uid }: { uid: string }) {
               title="Undo (Ctrl/Cmd+Z)"
               className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center gap-1.5"
             >
-              <Undo2 size={16} /> <span className="hidden md:inline">Undo</span>
+              <Undo2 size={16} /> <span>Undo</span>
             </button>
             <button
               onClick={redo}
@@ -435,12 +511,12 @@ function EditorInner({ uid }: { uid: string }) {
               title="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
               className="min-h-11 px-2.5 font-bold rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-30 disabled:cursor-not-allowed text-white flex items-center gap-1.5"
             >
-              <Redo2 size={16} /> <span className="hidden md:inline">Redo</span>
+              <Redo2 size={16} /> <span>Redo</span>
             </button>
           </div>
           {saveError && <span className="text-red-400">{saveError}</span>}
           <span className="text-white/30">
-            {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}
+            {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved · ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}
           </span>
           <button
             onClick={save}
@@ -477,7 +553,7 @@ function EditorInner({ uid }: { uid: string }) {
           <React.Fragment key={s.n}>
             {idx > 0 && <ChevronRight size={14} className="text-white/20 shrink-0" />}
             <button
-              onClick={() => setStep(s.n)}
+              onClick={() => goToStep(s.n)}
               aria-current={step === s.n ? 'step' : undefined}
               className={`min-h-11 px-3 rounded-lg text-xs font-bold ${step === s.n ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'}`}
             >
@@ -501,7 +577,7 @@ function EditorInner({ uid }: { uid: string }) {
               <p>2. Edit + add captions.</p>
               <p>3. Export MP4 (or SRT/VTT).</p>
             </div>
-            <button onClick={() => setStep(2)} className="min-h-11 px-4 font-bold rounded-lg bg-gold hover:bg-gold-bright text-black text-sm flex items-center justify-center gap-1.5">Continue to Edit <ArrowRight size={16} /></button>
+            <button onClick={() => goToStep(2)} className="min-h-11 px-4 font-bold rounded-lg bg-gold hover:bg-gold-bright text-black text-sm flex items-center justify-center gap-1.5">Continue to Edit <ArrowRight size={16} /></button>
           </aside>
         </div>
       )}
@@ -528,8 +604,8 @@ function EditorInner({ uid }: { uid: string }) {
               />
             </div>
             <div className="w-full max-w-3xl flex gap-2">
-              <button onClick={() => setStep(1)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back</button>
-              <button onClick={() => setStep(3)} className="min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5">Continue to Export <ArrowRight size={16} /></button>
+              <button onClick={() => goToStep(1)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back</button>
+              <button onClick={() => goToStep(3)} className="min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5">Continue to Export <ArrowRight size={16} /></button>
             </div>
           </main>
           {/* Hidden below lg: on mobile this panel mounts once, inside the
@@ -542,18 +618,32 @@ function EditorInner({ uid }: { uid: string }) {
       {step === 3 && (
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 pb-24 sm:p-4 overflow-auto min-w-0">
           <main className="flex flex-col gap-4 items-center min-w-0">
-            <PreviewPane
-              project={project}
-              currentTime={currentTime}
-              isPlaying={isPlaying}
-              onTimeChange={setCurrentTime}
-              onPlayingChange={setIsPlaying}
-              selectedItemId={selectedItemId}
-              onSelectItem={setSelectedItemId}
-            />
-            <div className="flex gap-2">
-              <button onClick={() => setStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
-            </div>
+            {project.items.length === 0 ? (
+              <div className="w-full max-w-3xl rounded-xl border border-white/10 bg-white/5 p-5 flex flex-col items-center gap-3 text-center">
+                <p className="text-sm font-bold text-white">Add a video or photo first</p>
+                <p className="text-xs text-white/50">There is nothing to export yet — add a clip in Step 1, then come back here.</p>
+                <button onClick={() => goToStep(1)} className="min-h-11 px-4 rounded-lg bg-gold hover:bg-gold-bright text-black text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Go to Step 1</button>
+              </div>
+            ) : (
+              <>
+                <PreviewPane
+                  project={project}
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  onTimeChange={setCurrentTime}
+                  onPlayingChange={setIsPlaying}
+                  selectedItemId={selectedItemId}
+                  onSelectItem={setSelectedItemId}
+                />
+                <div className="flex gap-2">
+                  <button onClick={() => goToStep(2)} className="min-h-11 px-4 rounded-lg bg-white/10 hover:bg-white/20 text-sm font-bold flex items-center gap-1.5"><ArrowLeft size={16} /> Back to Edit</button>
+                </div>
+                {/* R27 WS-M3 — export controls live in the mobile main
+                    column too (the panel sheet stays as a shortcut);
+                    desktop keeps them in the aside on the right. */}
+                <div className="lg:hidden w-full max-w-3xl flex flex-col gap-4">{exportPanel}</div>
+              </>
+            )}
           </main>
           <aside className="hidden lg:flex flex-col gap-4">{exportPanel}</aside>
         </div>
@@ -563,7 +653,7 @@ function EditorInner({ uid }: { uid: string }) {
           plus a direct Export jump on step 2. Replaces the two header
           icon buttons; desktop keeps the side columns and shows no bar. */}
       {step !== 1 && (
-        <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-[#0b0b0b]/95 backdrop-blur border-t border-white/10 flex" aria-label="Editor tools">
+        <nav style={{ paddingBottom: 'env(safe-area-inset-bottom)' }} className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-[#0b0b0b]/95 backdrop-blur border-t border-white/10 flex" aria-label="Editor tools">
           <button
             onClick={() => setMobileSheet('library')}
             className="flex-1 min-h-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold uppercase tracking-wide text-white/80"
@@ -578,7 +668,7 @@ function EditorInner({ uid }: { uid: string }) {
           </button>
           {step === 2 && (
             <button
-              onClick={() => setStep(3)}
+              onClick={() => goToStep(3)}
               className="flex-1 min-h-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-black uppercase tracking-wide bg-gold text-black"
             >
               <ArrowRight size={18} /> Export
@@ -587,8 +677,23 @@ function EditorInner({ uid }: { uid: string }) {
         </nav>
       )}
 
+      {undoToast && (
+        <div className="fixed bottom-24 lg:bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 rounded-xl bg-[#1c1c1c] border border-white/15 px-4 py-2.5 shadow-2xl" role="status">
+          <span className="text-sm text-white/85 whitespace-nowrap">{undoToast}</span>
+          <button
+            onClick={() => { undo(); setUndoToast(null); }}
+            className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-black uppercase tracking-wide"
+          >
+            Undo
+          </button>
+          <button onClick={() => setUndoToast(null)} aria-label="Dismiss" className="min-h-11 min-w-11 flex items-center justify-center text-white/50 hover:text-white">
+            <X size={14} strokeWidth={3} />
+          </button>
+        </div>
+      )}
+
       <BottomSheet open={mobileSheet === 'library'} onClose={() => setMobileSheet(null)} title="Media Library">
-        {step === 1 ? libraryPanel : sidePanel}
+        {libraryPanel}
       </BottomSheet>
       <BottomSheet open={mobileSheet === 'panel'} onClose={() => setMobileSheet(null)} title={selectedItem ? 'Selected Item' : 'Add / Export'}>
         {step === 3 ? exportPanel : sidePanel}

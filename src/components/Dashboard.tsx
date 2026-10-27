@@ -114,17 +114,17 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
         <div className="flex items-center gap-3 text-xs text-white/50">
           <span className="hidden sm:inline">{userProfile?.email || currentUser?.email}</span>
           <span className="text-gold/90">
-            {userProfile ? `${userProfile.dailyCount}/${userProfile.maxFree} today` : '…'}
+            {userProfile ? `${userProfile.dailyCount} of ${userProfile.maxFree} free exports used today` : '…'}
           </span>
           {userProfile?.isAdmin && onOpenAdmin && (
             <button
               onClick={onOpenAdmin}
-              className="px-3 py-1.5 bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg font-bold uppercase"
+              className="px-3 py-1.5 min-h-11 inline-flex items-center justify-center bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg font-bold uppercase"
             >
               Admin
             </button>
           )}
-          <button onClick={signOut} className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg font-bold uppercase">
+          <button onClick={signOut} className="px-3 py-1.5 min-h-11 inline-flex items-center justify-center bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg font-bold uppercase">
             Sign out
           </button>
         </div>
@@ -141,7 +141,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
           <p className="font-bold text-white text-sm">How it works</p>
           <p><span className="font-bold text-white">1. Capture / Upload</span> — record, upload, or pick a template.</p>
           <p><span className="font-bold text-white">2. Edit + Captions</span> — trim, add captions, PiP overlay, text.</p>
-          <p><span className="font-bold text-white">3. Export</span> — MP4 (H.264 + AAC) or SRT/VTT captions.</p>
+          <p><span className="font-bold text-white">3. Export</span> — an MP4 video ready to post, or a caption file for YouTube/TikTok.</p>
         </div>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-white/60">Your projects</h2>
@@ -192,6 +192,13 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
         {projects !== null && projects.length === 0 && (
           <div className="text-center py-16 border border-dashed border-white/10 rounded-xl">
             <p className="text-sm text-white/40">No projects yet. Create one to start capturing, uploading, and editing.</p>
+            <button
+              onClick={() => setShowRatioPicker(true)}
+              disabled={isCreating}
+              className="mt-6 px-4 py-2 min-h-11 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
+            >
+              {isCreating ? 'Creating…' : 'Create your first project'}
+            </button>
           </div>
         )}
 
@@ -346,6 +353,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
             <p className="text-xs text-white/40 mb-5">
               This sets your project's shape for preview, positioning, and export — pick the one that matches where the video is going.
             </p>
+            <p className="text-sm text-white/70 mb-4">Not sure? Start with Vertical — it's what TikTok/Reels use.</p>
             <div className="grid grid-cols-2 gap-3">
               {ASPECT_RATIO_OPTIONS.map((ratio) => (
                 <button

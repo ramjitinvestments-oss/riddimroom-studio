@@ -89,7 +89,7 @@ export function LicensingPanel() {
             {busy ? 'Starting checkout…' : 'Upgrade to Lifetime — $35 one-time'}
           </button>
           {checkoutError && <p className="text-xs text-amber-400">{checkoutError}</p>}
-          {checkoutUrl && <p className="text-xs text-white/70">Checkout link: <a className="underline break-all" href={checkoutUrl} target="_blank" rel="noreferrer">{checkoutUrl}</a></p>}
+          {checkoutUrl && <p className="text-xs text-white/70"><a className="underline" href={checkoutUrl} target="_blank" rel="noreferrer">Continue to checkout</a></p>}
         </>
       )}
       {isPaid && <p className="text-xs text-emerald-400">Lifetime unlocked — no watermark, full templates, longer videos.</p>}

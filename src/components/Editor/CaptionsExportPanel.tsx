@@ -75,7 +75,7 @@ export function CaptionsExportPanel() {
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Caption files</h3>
       <p className="text-[11px] text-white/40">{hasCues ? `${cues.length} caption cues ready.` : 'No captions yet — transcribe a clip, add one by hand above, or import a caption file.'}</p>
       {hasCues && (
-        <button onClick={handleMakeViral} className="px-3 py-2 rounded bg-gold text-black hover:bg-gold/90 text-xs font-bold min-h-10">
+        <button onClick={handleMakeViral} className="px-3 py-2 rounded bg-gold text-black hover:bg-gold/90 text-xs font-bold min-h-11">
           Make captions viral — word by word
         </button>
       )}
@@ -93,7 +93,7 @@ export function CaptionsExportPanel() {
                   }));
                   setMessage(`All captions set to size ${tier} — sizes scale with the frame and always fit.`);
                 }}
-                className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-gold/25 hover:text-gold text-[11px] font-bold min-h-8"
+                className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-gold/25 hover:text-gold text-[11px] font-bold min-h-11 inline-flex items-center justify-center"
               >
                 {tier}
               </button>
@@ -111,7 +111,7 @@ export function CaptionsExportPanel() {
                   }));
                   setMessage(`All captions placed at the ${label.toLowerCase()} — inside the platform safe zones.`);
                 }}
-                className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-gold/25 hover:text-gold text-[11px] font-bold min-h-8"
+                className="px-2.5 py-1.5 rounded bg-white/10 hover:bg-gold/25 hover:text-gold text-[11px] font-bold min-h-11 inline-flex items-center justify-center"
               >
                 {label}
               </button>
@@ -134,9 +134,15 @@ export function CaptionsExportPanel() {
         </div>
       )}
       <div className="flex gap-2">
-        <button onClick={() => handleExport('srt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-10">Export SRT</button>
-        <button onClick={() => handleExport('vtt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-10">Export VTT</button>
-        <button onClick={() => fileInputRef.current?.click()} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold min-h-10">Import captions</button>
+        <button onClick={() => handleExport('srt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-11 inline-flex flex-col items-start justify-center gap-0.5">
+          <span>Export SRT</span>
+          <span className="text-[10px] font-normal normal-case text-white/50">Caption file — works on YouTube</span>
+        </button>
+        <button onClick={() => handleExport('vtt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-11 inline-flex flex-col items-start justify-center gap-0.5">
+          <span>Export VTT</span>
+          <span className="text-[10px] font-normal normal-case text-white/50">Caption file — works on web players</span>
+        </button>
+        <button onClick={() => fileInputRef.current?.click()} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold min-h-11 inline-flex items-center">Import captions</button>
       </div>
       <input
         ref={fileInputRef}

@@ -73,7 +73,7 @@ export function TranscribePanel({ uid }: { uid: string }) {
       }
       const data = await res.json();
       if (!res.ok || !data.success) {
-        setError(humanizeApiError(data.error) || `Transcription failed (HTTP ${res.status}).`);
+        setError(humanizeApiError(data.error) || 'Transcription failed. Check your connection and try again.');
         return;
       }
       if (!data.words || data.words.length === 0) {

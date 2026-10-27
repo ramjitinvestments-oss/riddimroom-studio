@@ -172,25 +172,33 @@ const ClipRow = React.memo(function ClipRow({
             e.stopPropagation();
             onToggleMute(item);
           }}
-          className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-5 h-5 shrink-0 flex items-center justify-center rounded bg-black/50 hover:bg-black/75 text-white/80"
+          className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-8 h-8 shrink-0 flex items-center justify-center rounded bg-black/50 hover:bg-black/75 text-white/80"
         >
           {clipMuted ? <VolumeX size={12} className="text-gold" /> : <Volume2 size={12} />}
         </button>
       )}
-      {/* Trim handles — narrow hit zones on each edge, layered above the move handler via stopPropagation; 10px wide so they're findable with a fingertip. */}
+      {/* Trim handles — layered above the move handler via stopPropagation.
+          R27 WS-M4: the hit zone is 24px wide (w-6) for touch; the VISUAL
+          bar stays 10px wide (w-2.5, full height) as a centred inner span,
+          so the grip looks unchanged. Drag math uses the clip's geometry
+          (row width / extent in timelinePanelLogic), never the grip width. */}
       <div
         onMouseDown={(e) => onMouseDragStart(e, item, 'trim-start')}
         onTouchStart={(e) => onTouchDragStart(e, item, 'trim-start')}
-        className={`absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize touch-none flex items-center justify-center ${gripClass}`}
+        className="absolute left-0 top-0 bottom-0 w-6 cursor-ew-resize touch-none flex items-center justify-center"
       >
-        <span className={`w-px h-3 pointer-events-none ${gripBarClass}`} />
+        <span className={`w-2.5 h-full flex items-center justify-center pointer-events-none ${gripClass}`}>
+          <span className={`w-px h-3 pointer-events-none ${gripBarClass}`} />
+        </span>
       </div>
       <div
         onMouseDown={(e) => onMouseDragStart(e, item, 'trim-end')}
         onTouchStart={(e) => onTouchDragStart(e, item, 'trim-end')}
-        className={`absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize touch-none flex items-center justify-center ${gripClass}`}
+        className="absolute right-0 top-0 bottom-0 w-6 cursor-ew-resize touch-none flex items-center justify-center"
       >
-        <span className={`w-px h-3 pointer-events-none ${gripBarClass}`} />
+        <span className={`w-2.5 h-full flex items-center justify-center pointer-events-none ${gripClass}`}>
+          <span className={`w-px h-3 pointer-events-none ${gripBarClass}`} />
+        </span>
       </div>
     </div>
   );
@@ -549,7 +557,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
           <div className="flex items-center gap-1">
             <button
               onClick={() => zoomBy(1 / ZOOM_STEP)}
-              className="min-h-11 min-w-9 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white"
+              className="min-h-11 min-w-11 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white"
               title="Zoom out timeline"
             >
               <ZoomOut size={14} />
@@ -557,7 +565,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
             <span className="w-14 text-center">{Math.round(pxPerSec)} px/s</span>
             <button
               onClick={() => zoomBy(ZOOM_STEP)}
-              className="min-h-11 min-w-9 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white"
+              className="min-h-11 min-w-11 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white"
               title="Zoom in timeline"
             >
               <ZoomIn size={14} />
@@ -593,7 +601,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
             {sortedTracks.map((track) => (
               <span
                 key={track.id}
-                className="h-8 sm:h-6 flex items-center text-[10px] text-white/40 uppercase tracking-wide truncate"
+                className="h-11 lg:h-8 flex items-center text-[10px] text-white/40 uppercase tracking-wide truncate"
               >
                 {track.name}
               </span>
@@ -636,7 +644,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
             {sortedTracks.map((track) => {
               const items = getItemsForTrack(project, track.id);
               return (
-                <div key={track.id} data-track-row={track.id} className="relative h-8 sm:h-6 bg-white/5 rounded overflow-hidden">
+                <div key={track.id} data-track-row={track.id} className="relative h-11 lg:h-8 bg-white/5 rounded overflow-hidden">
                   {items.map((item) => {
                     // Clip label: the source asset's filename for media
                     // items, the content itself for text/captions.

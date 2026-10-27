@@ -95,6 +95,11 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
 
   const handleDelete = () => {
     mutate((project) => removeItem(project, item.id));
+    // R27 WS-M6 — surface the undo toast at the moment of loss
+    // (EditorShell listens for 'rr:undo-toast' and offers one-tap Undo).
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Item deleted' } }));
+    }
   };
 
   const duration = getItemDuration(item);
@@ -202,7 +207,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               aria-label="Text font"
               value={item.font}
               onChange={(e) => patch({ font: e.target.value })}
-              className="min-h-11 bg-white/10 rounded px-2 py-1 text-white focus:outline-none focus:border-gold/60"
+              className="min-h-11 bg-white/10 rounded px-2 py-1 text-white text-base focus:outline-none focus:border-gold/60"
             >
               <option value="Arial">Classic (Arial)</option>
               {FONT_OPTIONS.map((f) => (
@@ -217,7 +222,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
             <textarea
               value={item.text}
               onChange={(e) => patch({ text: e.target.value })}
-              className="bg-white/10 rounded px-2 py-1 text-white resize-none"
+              className="bg-white/10 rounded px-2 py-1 text-white text-base resize-none"
               rows={2}
             />
           </label>
@@ -315,7 +320,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
 
       {item.type === 'video' && (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
-          <span className="font-bold uppercase tracking-wide text-white/40">Video overlay (PiP)</span>
+          <span className="font-bold uppercase tracking-wide text-white/40">Picture in picture (PiP)</span>
           <div className="flex gap-2">
             <button
               onClick={() => patch({ pip: { shape: (item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded', borderWidth: (item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4, borderColor: (item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF', shadow: (item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true, isPip: true } })}
@@ -522,7 +527,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
             <select
               value={motion?.type ?? 'none'}
               onChange={(e) => patchMotion({ type: e.target.value as MotionEffectType })}
-              className="bg-white/10 rounded px-2 py-1 text-white"
+              className="bg-white/10 rounded px-2 py-1 text-white text-base"
             >
               <option value="none">None</option>
               {MOTION_EFFECTS.map((effect) => (
@@ -541,7 +546,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
                   <select
                     value={motion?.direction ?? 'right'}
                     onChange={(e) => patchMotion({ direction: e.target.value as MotionDirection })}
-                    className="bg-white/10 rounded px-2 py-1 text-white"
+                    className="bg-white/10 rounded px-2 py-1 text-white text-base"
                   >
                     {MOTION_DIRECTIONS.map((dir) => (
                       <option key={dir.id} value={dir.id}>
@@ -579,7 +584,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               <select
                 value={animation?.entrance ?? 'none'}
                 onChange={(e) => patch({ animation: { ...animation, entrance: e.target.value as AnimationPreset } })}
-                className="bg-white/10 rounded px-2 py-1 text-white"
+                className="bg-white/10 rounded px-2 py-1 text-white text-base"
               >
                 <option value="none">None</option>
                 {TRANSITION_CATEGORIES.map((cat) => (
@@ -607,7 +612,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               <select
                 value={animation?.exit ?? 'none'}
                 onChange={(e) => patch({ animation: { ...animation, exit: e.target.value as AnimationPreset } })}
-                className="bg-white/10 rounded px-2 py-1 text-white"
+                className="bg-white/10 rounded px-2 py-1 text-white text-base"
               >
                 <option value="none">None</option>
                 {TRANSITION_CATEGORIES.map((cat) => (
@@ -653,7 +658,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
                     },
                   })
                 }
-                className="bg-white/10 rounded px-2 py-1 text-white"
+                className="bg-white/10 rounded px-2 py-1 text-white text-base"
               />
             </label>
             <label className="flex flex-col gap-1 flex-1">
@@ -672,7 +677,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
                     },
                   })
                 }
-                className="bg-white/10 rounded px-2 py-1 text-white"
+                className="bg-white/10 rounded px-2 py-1 text-white text-base"
               />
             </label>
           </div>
@@ -697,7 +702,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
                 <select
                   value={transitionPresetForBoundary}
                   onChange={(e) => setTransitionPresetForBoundary(e.target.value as AnimationPreset)}
-                  className="min-h-11 bg-white/10 rounded px-2 py-1 text-white flex-1"
+                  className="min-h-11 bg-white/10 rounded px-2 py-1 text-white text-base flex-1"
                 >
                   {TRANSITION_CATEGORIES.map((cat) => (
                     <optgroup key={cat.id} label={cat.label}>
@@ -736,7 +741,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               step={0.1}
               value={item.startTime}
               onChange={(e) => mutate((project) => trimItemStart(project, item.id, Number(e.target.value)))}
-              className="bg-white/10 rounded px-2 py-1 text-white"
+              className="bg-white/10 rounded px-2 py-1 text-white text-base"
             />
           </label>
           <label className="flex flex-col gap-1 flex-1">
@@ -748,7 +753,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
               max={MAX_MEDIA_SECONDS}
               value={duration}
               onChange={(e) => mutate((project) => setItemDuration(project, item.id, Number(e.target.value)))}
-              className="bg-white/10 rounded px-2 py-1 text-white"
+              className="bg-white/10 rounded px-2 py-1 text-white text-base"
             />
           </label>
           </div>
@@ -839,7 +844,7 @@ function AudioInspector({ item }: { item: AudioTimelineItem }) {
             onChange={(e) =>
               patch({ fade: { fadeInDuration: Math.max(0, Math.min(Number(e.target.value), maxFade)), fadeOutDuration: item.fade.fadeOutDuration } })
             }
-            className="bg-white/10 rounded px-2 py-1 text-white"
+            className="bg-white/10 rounded px-2 py-1 text-white text-base"
           />
         </label>
         <label className="flex flex-col gap-1 flex-1">
@@ -853,7 +858,7 @@ function AudioInspector({ item }: { item: AudioTimelineItem }) {
             onChange={(e) =>
               patch({ fade: { fadeInDuration: item.fade.fadeInDuration, fadeOutDuration: Math.max(0, Math.min(Number(e.target.value), maxFade)) } })
             }
-            className="bg-white/10 rounded px-2 py-1 text-white"
+            className="bg-white/10 rounded px-2 py-1 text-white text-base"
           />
         </label>
       </div>
@@ -956,7 +961,7 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
               type="text"
               value={word.text}
               onChange={(e) => updateWord(index, { text: e.target.value })}
-              className="bg-white/10 rounded px-2 py-1 text-white flex-1 min-w-0"
+              className="bg-white/10 rounded px-2 py-1 text-white text-base flex-1 min-w-0"
             />
             <input
               type="number"
@@ -964,7 +969,7 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
               value={Number(word.start.toFixed(2))}
               onChange={(e) => updateWord(index, { start: Number(e.target.value) })}
               title="Word start (s, relative to caption start)"
-              className="bg-white/10 rounded px-1 py-1 text-white w-14"
+              className="bg-white/10 rounded px-1 py-1 text-white text-base w-14"
             />
             <input
               type="number"
@@ -972,7 +977,7 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
               value={Number(word.end.toFixed(2))}
               onChange={(e) => updateWord(index, { end: Number(e.target.value) })}
               title="Word end (s, relative to caption start)"
-              className="bg-white/10 rounded px-1 py-1 text-white w-14"
+              className="bg-white/10 rounded px-1 py-1 text-white text-base w-14"
             />
             {/* Deliberately NOT bumped to the 44px touch minimum like other buttons in
                 this panel: it lives inside a dense 4-control word row (text + start +

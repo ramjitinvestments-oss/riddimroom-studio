@@ -298,6 +298,17 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     };
   }, [ownTrack]);
   const [fontFamily, setFontFamily] = useState<string>(DEFAULT_PROMO_FONT);
+  /** R27 (WS-M2): the poster builder keeps its OWN font — the two
+      selects no longer share one hidden state. */
+  const [posterFontFamily, setPosterFontFamily] = useState<string>(DEFAULT_PROMO_FONT);
+  /** R27 (WS-M2): "Fine-tune (optional)" disclosure, closed by default. */
+  const [fineTuneOpen, setFineTuneOpen] = useState(false);
+  /** R27 (WS-M2): technical read detail ("Show what was read"), closed by default. */
+  const [showReadDetail, setShowReadDetail] = useState(false);
+  /** R27 (WS-M2): the headline the readout found, for the human summary. */
+  const [readHeadline, setReadHeadline] = useState('');
+  /** R27 (WS-M2): campaign result pieces expanded via their Details toggle. */
+  const [expandedPieces, setExpandedPieces] = useState<Set<string>>(new Set());
   const ownTrackInputRef = useRef<HTMLInputElement | null>(null);
   const [duration, setDuration] = useState(12);
   const [musicOn, setMusicOn] = useState(true);
@@ -449,6 +460,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     };
     lastReadoutRef.current = result;
     setReadLines(result.lines);
+    setReadHeadline(result.headline);
     setCorrections(result.corrections);
     setTexts((t) => mergeReadoutFields(t, touchedRef.current, result));
     // R18 correction memory: words the user already fixed FOR THIS
@@ -487,7 +499,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     setAutoNote(
       result.headline
         ? 'Words read from your artwork itself — tap any line to make it yours.'
-        : 'The engine read your artwork — tap a line below to place it where it belongs.',
+        : 'Studio read your artwork — tap a line below to place it where it belongs.',
     );
   }, []);
 
@@ -562,13 +574,14 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         });
       } catch {
         if (suggestRunRef.current === runId) {
-          setAutoNote('The artwork engine could not load — check your connection. Suggested words are in; tap "Analyze artwork" to try again.');
+          setAutoNote('Studio could not load the artwork reader — check your connection. Suggested words are in; tap "Analyze artwork" to try again.');
         }
         return;
       }
       if (suggestRunRef.current !== runId) return;
       if (lines.length === 0) {
         setReadLines([]);
+        setReadHeadline('');
         setArtNoWords(true);
         // No words, no genre — the palette picks the stage dressing.
         if (!skinTouchedRef.current) setSkin(suggestedSkinFor('', suggestCtxRef.current?.kind, paletteRef.current));
@@ -806,7 +819,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         {
           headline: posterTexts.headline.trim(),
           sub: posterTexts.sub.trim() || undefined,
-          headlineFont: fontFamily,
+          headlineFont: posterFontFamily,
         },
         { layout },
         createCanvasMeasurer(),
@@ -831,7 +844,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     } finally {
       setPosterStatus('');
     }
-  }, [currentUser, posterPicked, posterAnalysis, resolvedPosterLayout, posterTexts, fontFamily, tier, loadPosterFrameAssets]);
+  }, [currentUser, posterPicked, posterAnalysis, resolvedPosterLayout, posterTexts, posterFontFamily, tier, loadPosterFrameAssets]);
 
   /** R23: download the 9:16 master still, or a 4:5 / 1:1 derivative —
       a FRESH build at that format's canvas (the builder re-lays the
@@ -870,7 +883,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           {
             headline: posterTexts.headline.trim(),
             sub: posterTexts.sub.trim() || undefined,
-            headlineFont: fontFamily,
+            headlineFont: posterFontFamily,
           },
           { layout: built.layout },
           createCanvasMeasurer(),
@@ -884,7 +897,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         setPosterStatus('');
       }
     },
-    [currentUser, posterProject, posterTexts, fontFamily, tier, loadPosterFrameAssets, downloadPosterBlob],
+    [currentUser, posterProject, posterTexts, posterFontFamily, tier, loadPosterFrameAssets, downloadPosterBlob],
   );
 
   /** R23 WS4: flatten the built poster to a PNG and hand it to the
@@ -1617,9 +1630,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   }, []);
 
   const inputCls =
-    'w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:border-gold/60';
+    'w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-base text-white placeholder-white/30 focus:outline-none focus:border-gold/60';
   const chipCls = (active: boolean) =>
-    `px-3 py-1.5 rounded-lg border text-xs font-bold ${active ? 'bg-gold text-black border-gold' : 'bg-white/5 border-white/10 text-white/70'}`;
+    `inline-flex items-center justify-center min-h-11 px-3 py-1.5 rounded-lg border text-xs font-bold ${active ? 'bg-gold text-black border-gold' : 'bg-white/5 border-white/10 text-white/70'}`;
 
   const planPreview: CampaignPlan | null =
     phase !== 'pick' && analysis
@@ -1643,6 +1656,29 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         )
       : null;
 
+  /** R27 (WS-M2): ONE disabled state + label for both build buttons
+      (the in-flow desktop button and the mobile sticky bar). When the
+      blocker is missing artwork or a file problem, the reason rides
+      ON the button instead of living screens away in the Build card. */
+  const buildDisabled =
+    phase === 'building' || !!fileProblem || campaignRunning || picked.length === 0 || !analysis;
+  const buildLabel =
+    phase === 'building'
+      ? status || 'Building…'
+      : picked.length === 0 || !analysis || !!fileProblem
+        ? 'Add artwork to build'
+        : 'Build my promo';
+
+  /** R27 (WS-M2): the readout in human words — no bands, no
+      percentages on the surface (the detail lives behind the
+      "Show what was read" disclosure in the readout panel). */
+  const readSummary =
+    readLines.length === 0
+      ? null
+      : readHeadline
+        ? `We found your headline and ${readLines.length} line${readLines.length === 1 ? '' : 's'} — tap any line to fix it`
+        : `We read ${readLines.length} line${readLines.length === 1 ? '' : 's'} — tap any line to fix it`;
+
   return (
     <div className="min-h-screen bg-[#070707] text-white">
       <header className="flex items-center justify-between px-6 py-4 border-b border-white/10">
@@ -1655,7 +1691,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         </button>
       </header>
 
-      <main className="max-w-3xl mx-auto px-6 py-8">
+      <main className="max-w-3xl mx-auto px-6 pt-8 pb-28 lg:pb-8">
         <h1 className="text-2xl font-black uppercase tracking-wide">
           Viral <span className="text-gold">Promo</span>
         </h1>
@@ -1700,10 +1736,16 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   <p>
                     Detected: <span className="text-white font-bold">{KIND_LABELS[analysis.suggestedKind]}</span>
                   </p>
-                  <p>
-                    {analysis.width} × {analysis.height}px · {analysis.bands.length} element band
-                    {analysis.bands.length === 1 ? '' : 's'} found · {picked.length} file{picked.length === 1 ? '' : 's'}
-                  </p>
+                  {readSummary ? (
+                    <p>{readSummary}</p>
+                  ) : suggesting ? (
+                    <p>Reading your artwork…</p>
+                  ) : (
+                    <p>
+                      {picked.length} file{picked.length === 1 ? '' : 's'} ready — your words appear below as
+                      Studio reads them.
+                    </p>
+                  )}
                   <p className="text-white/40">Wrong call? Pick a different recipe below — the art is never altered either way.</p>
                 </div>
               )}
@@ -1711,9 +1753,13 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           )}
         </div>
 
-        <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4">
+        <p className="mt-8 text-[11px] font-bold uppercase tracking-wider text-white/40">
+          Other ways to start
+        </p>
+
+        <div className="mt-3 bg-white/5 border border-white/10 rounded-xl p-4">
           <label className="block text-xs font-bold uppercase tracking-wide text-white/60 mb-2">
-            Or · Build from your website
+            Build from your website
           </label>
           <p className="text-xs text-white/50">
             Paste your business website and we read it — your name, services, prices and contact details,
@@ -1725,6 +1771,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 value={siteUrl}
                 onChange={(e) => setSiteUrl(e.target.value)}
                 placeholder="yourbusiness.com"
+                inputMode="url"
+                autoComplete="url"
                 className={inputCls}
               />
               <button
@@ -1872,12 +1920,12 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
         <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4">
           <label className="block text-xs font-bold uppercase tracking-wide text-white/60 mb-2">
-            Or · Headline Poster
+            Headline Poster
           </label>
           <p className="text-xs text-white/50">
             Turn your own photo into the poster format — one heavy headline, one sub-line, locked premium
-            type over your picture. Download it as a still, open it in the editor, or animate it with the
-            promo engine. The photo is yours — the app adds no photography of its own.
+            type over your picture. Download it as a still, open it in the editor, or turn it into an
+            animated promo. The photo is yours — the app adds no photography of its own.
           </p>
           <button
             onClick={() => setPosterOpen((v) => !v)}
@@ -1980,10 +2028,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Headline type style</span>
                 <select
                   aria-label="Poster headline font"
-                  value={fontFamily}
-                  onChange={(e) => setFontFamily(e.target.value)}
+                  value={posterFontFamily}
+                  onChange={(e) => setPosterFontFamily(e.target.value)}
                   className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-gold/60"
-                  style={{ fontFamily }}
+                  style={{ fontFamily: posterFontFamily }}
                 >
                   {FONT_OPTIONS.map((f) => (
                     <option key={f.family} value={f.family}>
@@ -2052,9 +2100,230 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
         {phase !== 'pick' && (
           <>
+            <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
+              <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
+                2 · Your words — auto-filled from your artwork, edit anything
+              </label>
+              {artNoWords && (
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-2.5 py-2">
+                  <span className="text-[11px] font-bold text-white/70">No words in this image — what's it for?</span>
+                  {(
+                    [
+                      ['event', 'Party / Event'],
+                      ['product', 'Product'],
+                      ['business', 'Business'],
+                      ['look', 'Just the look'],
+                    ] as Array<[NoTextPurpose, string]>
+                  ).map(([id, label]) => (
+                    <button key={id} type="button" onClick={() => applyPurpose(id)} className={chipCls(artPurpose === id)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {needsHeadlineAsk && !texts.hook1 && (
+                <div className="rounded-lg border border-gold/40 bg-gold/10 p-3 space-y-2">
+                  <p className="text-xs text-gold font-bold">Studio couldn't read this artwork's headline.</p>
+                  <p className="text-[11px] text-white/60">Type it exactly as printed — everything else still builds from the read.</p>
+                  <div className="flex gap-2">
+                    <input
+                      className={inputCls}
+                      placeholder="The headline, as printed"
+                      value={askValue}
+                      onChange={(e) => setAskValue(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      disabled={!askValue.trim()}
+                      onClick={() => {
+                        assignReadLine('hook', askValue.trim().toUpperCase());
+                        setFieldSources((prev) => ({ ...prev, hook1: 'yours', hook2: 'yours' }));
+                        setNeedsHeadlineAsk(false);
+                        persistFixesSoon();
+                      }}
+                      className="shrink-0 px-3 rounded-lg bg-gold text-black text-xs font-bold disabled:opacity-50"
+                    >
+                      Use it
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {(
+                  [
+                    ['hook1', 'Hook line 1 — e.g. ONE NIGHT.'],
+                    ['hook2', 'Hook line 2 — e.g. TWO SOUNDS.'],
+                    ['cta', 'Call to action — e.g. TICKETS: LINK IN BIO'],
+                    ['sub', 'Sub line — date • venue • city'],
+                  ] as Array<[SuggestionField, string]>
+                ).map(([field, placeholder]) => (
+                  <div key={field}>
+                    <div className="relative">
+                    <input id={`promo-field-${field}`} className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
+                      onChange={(e) => {
+                        touchedRef.current.add(field);
+                        setFieldSources((prev) => ({ ...prev, [field]: 'yours' as const }));
+                        setTexts((t) => ({ ...t, [field]: e.target.value }));
+                        persistFixesSoon();
+                      }} />
+                    <button
+                      type="button"
+                      aria-label={`Another suggestion for ${field}`}
+                      title="Another suggestion"
+                      onClick={() => cycleField(field)}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
+                    >
+                      <RefreshCw size={14} />
+                    </button>
+                    </div>
+                    {(texts[field] ?? '').trim() && fieldSources[field] && (
+                      <p className={`mt-1 text-[10px] font-bold uppercase tracking-wider ${(fieldSources[field] === 'art' || fieldSources[field] === 'site') ? 'text-gold/80' : 'text-white/35'}`}>
+                        {fieldSources[field] === 'art'
+                          ? 'From your artwork'
+                          : fieldSources[field] === 'site'
+                            ? 'From your website'
+                            : fieldSources[field] === 'yours'
+                              ? 'Your words'
+                              : 'Suggested — tap ↻ for another'}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {(suggesting || autoNote) && (
+                <p className="text-[11px] text-white/40">
+                  {suggesting ? `Analyzing your artwork on this device${analyzePct !== null ? ` — ${analyzePct}%` : '…'}` : autoNote}
+                </p>
+              )}
+              <label className="flex flex-col gap-1">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Your name / brand, exactly as printed on your art</span>
+                <input
+                  className={inputCls}
+                  placeholder="e.g. Rutenberg Realty — Studio fixes near-miss spellings to match this"
+                  value={brandName}
+                  onChange={(e) => {
+                    setBrandName(e.target.value);
+                    brandNameRef.current = e.target.value;
+                  }}
+                />
+              </label>
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  onClick={handleSaveKit}
+                  className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
+                >
+                  Save CTA + sub + skin + brand name as my defaults
+                </button>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={suggesting || !analysis}
+                  className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold disabled:opacity-50"
+                >
+                  {suggesting ? 'Analyzing…' : 'Analyze artwork'}
+                </button>
+                {kitNote && <span className="text-[11px] text-white/40">{kitNote}</span>}
+              </div>
+              {readLines.length > 0 && (
+                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-1.5">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/50">What Studio read</p>
+                  {readLines.map((line, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="flex-1 min-w-0 truncate text-xs text-white/85" title={line.text}>{line.text}</span>
+                      {(['hook', 'sub', 'cta'] as const).map((target) => (
+                        <button
+                          key={target}
+                          onClick={() => assignReadLine(target, line.text)}
+                          className="shrink-0 min-h-11 px-2 rounded-md border border-white/15 bg-white/5 hover:bg-gold/20 hover:text-gold text-[10px] font-bold uppercase text-white/60"
+                        >
+                          {target}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                  <p className="text-[10px] text-white/35 pt-0.5">Tap Hook, Sub or CTA to place a line exactly where it belongs.</p>
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowReadDetail((v) => !v)}
+                      aria-expanded={showReadDetail}
+                      className="min-h-11 inline-flex items-center gap-1.5 text-[11px] font-bold text-white/50 hover:text-gold"
+                    >
+                      Show what was read
+                      <span aria-hidden="true">{showReadDetail ? '▾' : '▸'}</span>
+                    </button>
+                    {showReadDetail && (
+                      <div className="mt-1 space-y-1 text-[11px] text-white/40">
+                        {analysis && (
+                          <p>
+                            {analysis.width} × {analysis.height}px · {analysis.bands.length} element band
+                            {analysis.bands.length === 1 ? '' : 's'} found
+                          </p>
+                        )}
+                        {readLines.map((line, i) => (
+                          <p key={i}>
+                            <span className="text-white/60">{line.text}</span> — {line.confidence}% sure
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              {corrections.length > 0 && (
+                <div className="rounded-lg border border-gold/30 bg-gold/5 p-3 space-y-1">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-gold/90">Corrected to the true spelling</p>
+                  {corrections.map((c, i) => (
+                    <p key={i} className="text-[11px] text-white/60">
+                      <span className="line-through decoration-white/30">{c.from}</span> → <span className="text-white font-bold">{c.to}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              {fixNote && <p className="text-[11px] text-gold/80">{fixNote}</p>}
+              {picked[0] && ((texts.hook1 ?? '').trim() || (texts.sub ?? '').trim() || (texts.cta ?? '').trim()) && (
+                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/50">Proof — your words over your art</p>
+                  <div className="relative mx-auto max-w-[240px]">
+                    <img src={picked[0].previewUrl} alt="Artwork proof" className="w-full rounded-md border border-white/10" />
+                    {(texts.hook1 ?? '').trim() && (
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById('promo-field-hook1')?.focus()}
+                        className="absolute inset-x-1 top-[5%] text-center font-black uppercase leading-tight text-white text-sm px-1"
+                        style={{ textShadow: '0 2px 10px rgba(0,0,0,.9), 0 0 3px rgba(0,0,0,.9)' }}
+                      >
+                        {texts.hook1}
+                        {(texts.hook2 ?? '').trim() && <span className="block">{texts.hook2}</span>}
+                      </button>
+                    )}
+                    {(texts.sub ?? '').trim() && (
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById('promo-field-sub')?.focus()}
+                        className="absolute inset-x-1 top-[60%] text-center font-bold uppercase text-white/90 text-[10px] px-1"
+                        style={{ textShadow: '0 1px 8px rgba(0,0,0,.95), 0 0 3px rgba(0,0,0,.9)' }}
+                      >
+                        {texts.sub}
+                      </button>
+                    )}
+                    {(texts.cta ?? '').trim() && (
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById('promo-field-cta')?.focus()}
+                        className="absolute inset-x-0 bottom-[4%] mx-auto w-fit max-w-[92%] rounded-full border border-gold/70 bg-black/60 px-2.5 py-1 text-center font-bold uppercase text-gold text-[10px]"
+                      >
+                        {texts.cta}
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-white/35">One glance before you build — tap any line to edit it.</p>
+                </div>
+              )}
+            </div>
+
             <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4">
               <label className="block text-xs font-bold uppercase tracking-wide text-white/60 mb-2">
-                2 · Recipe
+                3 · Build
               </label>
               {/* v9 mobile-first: one dropdown + the chosen recipe's
                   blurb, instead of nine stacked cards on a phone. */}
@@ -2086,24 +2355,6 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 {[10, 12, 15].map((d) => (
                   <button key={d} onClick={() => setDuration(d)} className={chipCls(duration === d)}>
                     {d}s
-                  </button>
-                ))}
-              </div>
-              <div className="flex flex-wrap items-center gap-2 mt-3">
-                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Stage fit</span>
-                <button onClick={() => setFit('fit')} className={chipCls(fit === 'fit')}>Fit whole art</button>
-                <button onClick={() => setFit('fill')} className={chipCls(fit === 'fill')}>Fill screen</button>
-              </div>
-              {fit === 'fill' && analysis?.suggestedKind === 'flyer' && (
-                <p className="text-xs text-amber-300 mt-2">
-                  Fill screen crops the edges — flyer text near the edge may clip. Fit whole art never crops anything.
-                </p>
-              )}
-              <div className="flex flex-wrap items-center gap-2 mt-3">
-                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Skin</span>
-                {(Object.keys(PROMO_SKINS) as PromoSkinId[]).map((id) => (
-                  <button key={id} onClick={() => { skinTouchedRef.current = true; setSkin(id); }} className={chipCls(skin === id)}>
-                    {PROMO_SKINS[id].label}
                   </button>
                 ))}
               </div>
@@ -2178,29 +2429,36 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   />
                 </div>
               )}
-            </div>
-
-            <div className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
-              <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
-                3 · Your words — auto-filled from your artwork, edit anything
-              </label>
-              {artNoWords && (
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-2.5 py-2">
-                  <span className="text-[11px] font-bold text-white/70">No words in this image — what's it for?</span>
-                  {(
-                    [
-                      ['event', 'Party / Event'],
-                      ['product', 'Product'],
-                      ['business', 'Business'],
-                      ['look', 'Just the look'],
-                    ] as Array<[NoTextPurpose, string]>
-                  ).map(([id, label]) => (
-                    <button key={id} type="button" onClick={() => applyPurpose(id)} className={chipCls(artPurpose === id)}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
+              <div className="mt-4 border-t border-white/10 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setFineTuneOpen((v) => !v)}
+                  aria-expanded={fineTuneOpen}
+                  className="flex w-full min-h-11 items-center justify-between text-left"
+                >
+                  <span className="text-xs font-bold uppercase tracking-wide text-white/60">Fine-tune (optional)</span>
+                  <span aria-hidden="true" className="text-white/40">{fineTuneOpen ? '▾' : '▸'}</span>
+                </button>
+                {fineTuneOpen && (
+                  <div className="space-y-3 pt-2">
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Stage fit</span>
+                <button onClick={() => setFit('fit')} className={chipCls(fit === 'fit')}>Fit whole art</button>
+                <button onClick={() => setFit('fill')} className={chipCls(fit === 'fill')}>Fill screen</button>
+              </div>
+              {fit === 'fill' && analysis?.suggestedKind === 'flyer' && (
+                <p className="text-xs text-amber-300 mt-2">
+                  Fill screen crops the edges — flyer text near the edge may clip. Fit whole art never crops anything.
+                </p>
               )}
+              <div className="flex flex-wrap items-center gap-2 mt-3">
+                <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Skin</span>
+                {(Object.keys(PROMO_SKINS) as PromoSkinId[]).map((id) => (
+                  <button key={id} onClick={() => { skinTouchedRef.current = true; setSkin(id); }} className={chipCls(skin === id)}>
+                    {PROMO_SKINS[id].label}
+                  </button>
+                ))}
+              </div>
               <label className="flex flex-col gap-1">
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Type style — premium fonts</span>
                 <select
@@ -2217,80 +2475,6 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   ))}
                 </select>
               </label>
-              {needsHeadlineAsk && !texts.hook1 && (
-                <div className="rounded-lg border border-gold/40 bg-gold/10 p-3 space-y-2">
-                  <p className="text-xs text-gold font-bold">The engine couldn't read this artwork's headline.</p>
-                  <p className="text-[11px] text-white/60">Type it exactly as printed — everything else still builds from the read.</p>
-                  <div className="flex gap-2">
-                    <input
-                      className={inputCls}
-                      placeholder="The headline, as printed"
-                      value={askValue}
-                      onChange={(e) => setAskValue(e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      disabled={!askValue.trim()}
-                      onClick={() => {
-                        assignReadLine('hook', askValue.trim().toUpperCase());
-                        setFieldSources((prev) => ({ ...prev, hook1: 'yours', hook2: 'yours' }));
-                        setNeedsHeadlineAsk(false);
-                        persistFixesSoon();
-                      }}
-                      className="shrink-0 px-3 rounded-lg bg-gold text-black text-xs font-bold disabled:opacity-50"
-                    >
-                      Use it
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {(
-                  [
-                    ['hook1', 'Hook line 1 — e.g. ONE NIGHT.'],
-                    ['hook2', 'Hook line 2 — e.g. TWO SOUNDS.'],
-                    ['cta', 'Call to action — e.g. TICKETS: LINK IN BIO'],
-                    ['sub', 'Sub line — date • venue • city'],
-                  ] as Array<[SuggestionField, string]>
-                ).map(([field, placeholder]) => (
-                  <div key={field}>
-                    <div className="relative">
-                    <input id={`promo-field-${field}`} className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
-                      onChange={(e) => {
-                        touchedRef.current.add(field);
-                        setFieldSources((prev) => ({ ...prev, [field]: 'yours' as const }));
-                        setTexts((t) => ({ ...t, [field]: e.target.value }));
-                        persistFixesSoon();
-                      }} />
-                    <button
-                      type="button"
-                      aria-label={`Another suggestion for ${field}`}
-                      title="Another suggestion"
-                      onClick={() => cycleField(field)}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
-                    >
-                      <RefreshCw size={14} />
-                    </button>
-                    </div>
-                    {(texts[field] ?? '').trim() && fieldSources[field] && (
-                      <p className={`mt-1 text-[10px] font-bold uppercase tracking-wider ${(fieldSources[field] === 'art' || fieldSources[field] === 'site') ? 'text-gold/80' : 'text-white/35'}`}>
-                        {fieldSources[field] === 'art'
-                          ? 'From your artwork'
-                          : fieldSources[field] === 'site'
-                            ? 'From your website'
-                            : fieldSources[field] === 'yours'
-                              ? 'Your words'
-                              : 'Suggested — tap ↻ for another'}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
-              {(suggesting || autoNote) && (
-                <p className="text-[11px] text-white/40">
-                  {suggesting ? `Analyzing your artwork on this device${analyzePct !== null ? ` — ${analyzePct}%` : '…'}` : autoNote}
-                </p>
-              )}
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Caption animation</span>
                 <button type="button" onClick={() => setCaptionMode('words')} className={chipCls(captionMode === 'words')}>
@@ -2310,111 +2494,27 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   ))}
                 </div>
               )}
-              <label className="flex flex-col gap-1">
-                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">Your name / brand, exactly as printed on your art</span>
-                <input
-                  className={inputCls}
-                  placeholder="e.g. Rutenberg Realty — the engine repairs near-miss reads to this spelling"
-                  value={brandName}
-                  onChange={(e) => {
-                    setBrandName(e.target.value);
-                    brandNameRef.current = e.target.value;
-                  }}
-                />
-              </label>
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                <button
-                  onClick={handleSaveKit}
-                  className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
-                >
-                  Save CTA + sub + skin + brand name as my defaults
-                </button>
-                <button
-                  onClick={handleAnalyze}
-                  disabled={suggesting || !analysis}
-                  className="min-h-[40px] px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold disabled:opacity-50"
-                >
-                  {suggesting ? 'Analyzing…' : 'Analyze artwork'}
-                </button>
-                {kitNote && <span className="text-[11px] text-white/40">{kitNote}</span>}
-              </div>
-              {readLines.length > 0 && (
-                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-1.5">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/50">What the engine read</p>
-                  {readLines.map((line, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <span className="flex-1 min-w-0 truncate text-xs text-white/85" title={line.text}>{line.text}</span>
-                      <span className="text-[10px] text-white/30 shrink-0">{line.confidence}%</span>
-                      {(['hook', 'sub', 'cta'] as const).map((target) => (
-                        <button
-                          key={target}
-                          onClick={() => assignReadLine(target, line.text)}
-                          className="shrink-0 min-h-[28px] px-2 rounded-md border border-white/15 bg-white/5 hover:bg-gold/20 hover:text-gold text-[10px] font-bold uppercase text-white/60"
-                        >
-                          {target}
-                        </button>
-                      ))}
-                    </div>
-                  ))}
-                  <p className="text-[10px] text-white/35 pt-0.5">Tap Hook, Sub or CTA to place a line exactly where it belongs.</p>
-                </div>
-              )}
-              {corrections.length > 0 && (
-                <div className="rounded-lg border border-gold/30 bg-gold/5 p-3 space-y-1">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-gold/90">Corrected to the true spelling</p>
-                  {corrections.map((c, i) => (
-                    <p key={i} className="text-[11px] text-white/60">
-                      <span className="line-through decoration-white/30">{c.from}</span> → <span className="text-white font-bold">{c.to}</span>
-                    </p>
-                  ))}
-                </div>
-              )}
-              {fixNote && <p className="text-[11px] text-gold/80">{fixNote}</p>}
-              {picked[0] && ((texts.hook1 ?? '').trim() || (texts.sub ?? '').trim() || (texts.cta ?? '').trim()) && (
-                <div className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-white/50">Proof — your words over your art</p>
-                  <div className="relative mx-auto max-w-[240px]">
-                    <img src={picked[0].previewUrl} alt="Artwork proof" className="w-full rounded-md border border-white/10" />
-                    {(texts.hook1 ?? '').trim() && (
-                      <button
-                        type="button"
-                        onClick={() => document.getElementById('promo-field-hook1')?.focus()}
-                        className="absolute inset-x-1 top-[5%] text-center font-black uppercase leading-tight text-white text-sm px-1"
-                        style={{ textShadow: '0 2px 10px rgba(0,0,0,.9), 0 0 3px rgba(0,0,0,.9)' }}
-                      >
-                        {texts.hook1}
-                        {(texts.hook2 ?? '').trim() && <span className="block">{texts.hook2}</span>}
-                      </button>
-                    )}
-                    {(texts.sub ?? '').trim() && (
-                      <button
-                        type="button"
-                        onClick={() => document.getElementById('promo-field-sub')?.focus()}
-                        className="absolute inset-x-1 top-[60%] text-center font-bold uppercase text-white/90 text-[10px] px-1"
-                        style={{ textShadow: '0 1px 8px rgba(0,0,0,.95), 0 0 3px rgba(0,0,0,.9)' }}
-                      >
-                        {texts.sub}
-                      </button>
-                    )}
-                    {(texts.cta ?? '').trim() && (
-                      <button
-                        type="button"
-                        onClick={() => document.getElementById('promo-field-cta')?.focus()}
-                        className="absolute inset-x-0 bottom-[4%] mx-auto w-fit max-w-[92%] rounded-full border border-gold/70 bg-black/60 px-2.5 py-1 text-center font-bold uppercase text-gold text-[10px]"
-                      >
-                        {texts.cta}
-                      </button>
-                    )}
                   </div>
-                  <p className="text-[10px] text-white/35">One glance before you build — tap any line to edit it.</p>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
+            <div className="hidden lg:flex mt-6">
+              <button
+                onClick={() => void handleBuild()}
+                disabled={buildDisabled}
+                className="w-full py-3 min-h-[48px] bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black text-sm font-black uppercase tracking-wide"
+              >
+                {buildLabel}
+              </button>
+            </div>
+            <p className="text-xs text-white/40 mt-3 text-center">
+              Opens in the editor with the beat already on — fine-tune, then export. Free accounts carry the RiddimRoom mark.
+            </p>
             {planPreview && (
               <div className="mt-4 bg-white/5 border border-gold/30 rounded-xl p-4 space-y-3">
                 <label className="block text-xs font-bold uppercase tracking-wide text-white/60">
-                  4 · Campaign — the whole set in one go
+                  Want the full set? Build the campaign
                 </label>
                 <p className="text-xs text-white/55">
                   One upload, <span className="text-white font-bold">{planPreview.pieces.length} finished promos</span> —{' '}
@@ -2500,14 +2600,17 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                           <ul className="mt-1 space-y-0.5">
                             {campaignReceipt.flags.slice(0, 6).map((f, i) => (
                               <li key={i} className="text-[11px] text-amber-100/80">
-                                {f.label}: “{f.token}” in “{f.context}” is not on your confirmed website profile.
+                                {f.label}: one line couldn't be checked word-for-word against your confirmed
+                                website profile — please check it before posting.
                               </li>
                             ))}
                           </ul>
                         )}
                       </div>
                     )}
-                    {campaignResults.map((r) => (
+                    {campaignResults.map((r) => {
+                      const expanded = expandedPieces.has(r.piece.id);
+                      return (
                       <div key={r.piece.id} className="rounded-lg border border-white/10 bg-black/30 p-3 space-y-2">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-xs font-black uppercase tracking-wide text-white">{r.piece.label}</span>
@@ -2541,72 +2644,101 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                             </>
                           )}
                           <button
-                            onClick={() => void copyCampaignPost(r)}
+                            type="button"
+                            aria-expanded={expanded}
+                            onClick={() =>
+                              setExpandedPieces((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(r.piece.id)) next.delete(r.piece.id);
+                                else next.add(r.piece.id);
+                                return next;
+                              })
+                            }
                             className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
                           >
-                            {copiedPieceId === r.piece.id ? 'Post copied ✓' : 'Copy its post'}
-                          </button>
-                          <button
-                            onClick={() => onOpenProject(r.projectId)}
-                            className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
-                          >
-                            Open in editor
+                            Details <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
                           </button>
                         </div>
-                        {r.musicItemId && r.musicFittedSeconds !== undefined && (
-                          <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 space-y-1.5">
-                            <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">
-                              Music fade — saved to this piece's project
-                            </p>
-                            {(
-                              [
-                                ['fadeIn', 'Fade in', r.fadeIn ?? 0],
-                                ['fadeOut', 'Fade out', r.fadeOut ?? 0],
-                              ] as Array<['fadeIn' | 'fadeOut', string, number]>
-                            ).map(([field, label, val]) => (
-                              <label key={field} className="flex items-center gap-2 text-[11px] text-white/60">
-                                <span className="w-14 shrink-0">{label}</span>
-                                <input
-                                  type="range"
-                                  min={0}
-                                  max={Math.min(MAX_FADE_SECONDS, r.musicFittedSeconds ?? 0)}
-                                  step={0.1}
-                                  value={val}
-                                  onChange={(e) => handleResultFade(r, field, Number(e.target.value))}
-                                  className="flex-1 accent-[#FFD100]"
-                                  aria-label={`${r.piece.label} music ${label.toLowerCase()}, seconds`}
-                                />
-                                <span className="w-9 shrink-0 text-right text-white/80">{val.toFixed(1)}s</span>
-                              </label>
-                            ))}
-                            {r.status === 'done' && (
-                              <p className="text-[10px] text-white/35">
-                                This piece's MP4 above is already rendered — the new fades apply when you open its project and export again.
-                              </p>
+                        {expanded && (
+                          <div className="space-y-2">
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={() => void copyCampaignPost(r)}
+                                className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                              >
+                                {copiedPieceId === r.piece.id ? 'Post copied ✓' : 'Copy its post'}
+                              </button>
+                              <button
+                                onClick={() => onOpenProject(r.projectId)}
+                                className="min-h-[36px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                              >
+                                Open in editor
+                              </button>
+                            </div>
+                            {r.musicItemId && r.musicFittedSeconds !== undefined && (
+                              <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 space-y-1.5">
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-white/40">
+                                  Music fade — saved to this piece's project
+                                </p>
+                                {(
+                                  [
+                                    ['fadeIn', 'Fade in', r.fadeIn ?? 0],
+                                    ['fadeOut', 'Fade out', r.fadeOut ?? 0],
+                                  ] as Array<['fadeIn' | 'fadeOut', string, number]>
+                                ).map(([field, label, val]) => (
+                                  <label key={field} className="flex items-center gap-2 text-[11px] text-white/60">
+                                    <span className="w-14 shrink-0">{label}</span>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={Math.min(MAX_FADE_SECONDS, r.musicFittedSeconds ?? 0)}
+                                      step={0.1}
+                                      value={val}
+                                      onChange={(e) => handleResultFade(r, field, Number(e.target.value))}
+                                      className="flex-1 accent-[#FFD100]"
+                                      aria-label={`${r.piece.label} music ${label.toLowerCase()}, seconds`}
+                                    />
+                                    <span className="w-9 shrink-0 text-right text-white/80">{val.toFixed(1)}s</span>
+                                  </label>
+                                ))}
+                                {r.status === 'done' && (
+                                  <p className="text-[10px] text-white/35">
+                                    This piece's MP4 above is already rendered — the new fades apply when you open its project and export again.
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                            {r.posts[0] && (
+                              <p className="text-[11px] text-white/45 whitespace-pre-line leading-relaxed">{r.posts[0].text}</p>
                             )}
                           </div>
                         )}
-                        {r.posts[0] && (
-                          <p className="text-[11px] text-white/45 whitespace-pre-line leading-relaxed">{r.posts[0].text}</p>
-                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
             )}
 
-            <button
-              onClick={() => void handleBuild()}
-              disabled={phase === 'building' || !!fileProblem || campaignRunning}
-              className="mt-6 w-full py-3 min-h-[48px] bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black text-sm font-black uppercase tracking-wide"
-            >
-              {phase === 'building' ? status || 'Building…' : 'Build my promo'}
-            </button>
-            <p className="text-xs text-white/40 mt-3 text-center">
-              Opens in the editor with the beat already on — fine-tune, then export. Free accounts carry the RiddimRoom mark.
-            </p>
           </>
+        )}
+        {phase !== 'pick' && (
+          <div
+            className="lg:hidden fixed bottom-0 inset-x-0 z-40 border-t border-white/10 bg-[#0a0a0a]/90 backdrop-blur"
+            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+          >
+            <div className="px-4 py-3">
+              {fileProblem && <p className="text-[11px] text-amber-300 pb-2">{fileProblem}</p>}
+              <button
+                onClick={() => void handleBuild()}
+                disabled={buildDisabled}
+                className="w-full min-h-[48px] py-3 rounded-lg bg-gold hover:bg-gold-bright disabled:opacity-50 text-black text-sm font-black uppercase tracking-wide"
+              >
+                {buildLabel}
+              </button>
+            </div>
+          </div>
         )}
       </main>
     </div>
