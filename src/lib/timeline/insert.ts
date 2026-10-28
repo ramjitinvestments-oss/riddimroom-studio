@@ -27,6 +27,8 @@ import type {
 import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracksByType, updateItem } from './utils';
 import { resolveProjectCaptionOverlaps } from '../captions/timing';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
+import { addPipOverlay } from '../pip';
+import { dualAlignmentTrims } from '../camera/dualCapture';
 
 const DEFAULT_IMAGE_DURATION_SECONDS = 5;
 
@@ -413,4 +415,50 @@ export function addManualCaptionCue(project: Project, options: AddManualCaptionC
     editable: true,
   };
   return addItem(project, item);
+}
+
+export interface AppendDualCaptureOptions {
+  /** Measured start delta between the two recorders (front start − rear start), from the dual-capture probe recording. */
+  startDeltaMs: number;
+  /** Timeline position for the main clip; defaults to right after the last video item, like appendMediaToTimeline. */
+  atTime?: number;
+}
+
+/**
+ * R29 — place a dual-capture pair on the timeline in one call: one tap
+ * in the camera review ("Add both") becomes the rear clip as the main
+ * video PLUS its own front-camera clip as a PiP overlay at the SAME
+ * timeline start, with the two files' heads aligned by the measured
+ * recorder start delta (`dualAlignmentTrims` — the earlier-started
+ * file's extra head is trimmed, the later one keeps its head). The
+ * overlay is placed via `addPipOverlay` with `fromCamera: true`, so it
+ * gets the R24 camera framing defaults (rounded, source-aspect) and
+ * starts audible (`muted: false` — the front clip is a view of the
+ * same moment, and its audio state stays user-changeable like any
+ * PiP's). If the main clip somehow isn't placed, the project is
+ * returned with just that step done rather than an orphan overlay.
+ */
+export function appendDualCaptureToTimeline(
+  project: Project,
+  mainAsset: MediaAsset,
+  overlayAsset: MediaAsset,
+  options: AppendDualCaptureOptions,
+): Project {
+  const { rearTrimStartSeconds, frontTrimStartSeconds } = dualAlignmentTrims(options.startDeltaMs);
+  const existingIds = new Set(project.items.map((i) => i.id));
+  const next = appendMediaToTimeline(project, mainAsset, {
+    atTime: options.atTime,
+    trimStart: rearTrimStartSeconds > 0 ? rearTrimStartSeconds : undefined,
+  });
+  const mainItem = next.items.find(
+    (i): i is VideoTimelineItem => !existingIds.has(i.id) && i.type === 'video',
+  );
+  if (!mainItem) return next;
+  return addPipOverlay(next, overlayAsset, {
+    layoutId: 'bottom-right',
+    atTime: mainItem.startTime,
+    trimStart: frontTrimStartSeconds > 0 ? frontTrimStartSeconds : undefined,
+    fromCamera: true,
+    muted: false,
+  });
 }

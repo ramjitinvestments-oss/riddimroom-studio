@@ -573,3 +573,54 @@ export function swapMainAndPip(project: Project, pipItemId: string): Project {
   });
   return next;
 }
+
+// ---------------------------------------------------------------------------
+// R29 — "Line up the sound" sync nudge
+// ---------------------------------------------------------------------------
+
+/**
+ * The most a PiP overlay's start may be nudged in either direction, in
+ * project frames. Fifteen frames is half a second at 30fps — plenty to
+ * line up a clap or a first word between the two dual-capture files,
+ * and small enough that a user tapping repeatedly can never shove an
+ * overlay seconds away from the moment it belongs to.
+ */
+export const PIP_SYNC_NUDGE_MAX_FRAMES = 15;
+
+/**
+ * Compute the patch that nudges a PiP overlay's start by `deltaFrames`
+ * project frames: a pure translation of the overlay's start — the SAME
+ * source window plays (trim/speed untouched), shifted in time — so the
+ * user is lining the overlay up against the main clip, not re-editing
+ * it. Preview and export agree because both read `startTime`/`endTime`;
+ * nothing here is a render-time offset. `pip.syncNudgeFrames` is only
+ * the bookkeeping that clamps the CUMULATIVE nudge to
+ * ±PIP_SYNC_NUDGE_MAX_FRAMES (repeated taps can't drift past the cap),
+ * and the shift is further clamped so the overlay never starts before
+ * time 0 — in that case only the frames that actually fit are applied
+ * and counted. Returns a `Partial` for `updateItem`; the caller owns
+ * applying it (one call = one undo step).
+ */
+export function pipSyncNudgePatch(
+  item: VideoTimelineItem,
+  deltaFrames: number,
+  frameRate: number,
+): Partial<VideoTimelineItem> {
+  const fps = Number.isFinite(frameRate) && frameRate > 0 ? frameRate : 30;
+  const frameSeconds = 1 / fps;
+  const current = item.pip?.syncNudgeFrames ?? 0;
+  const wanted = Math.max(
+    -PIP_SYNC_NUDGE_MAX_FRAMES,
+    Math.min(PIP_SYNC_NUDGE_MAX_FRAMES, current + Math.trunc(deltaFrames)),
+  );
+  let shiftSeconds = (wanted - current) * frameSeconds;
+  if (item.startTime + shiftSeconds < 0) {
+    shiftSeconds = -item.startTime;
+  }
+  const appliedFrames = Math.round(shiftSeconds / frameSeconds);
+  return {
+    startTime: item.startTime + shiftSeconds,
+    endTime: item.endTime + shiftSeconds,
+    pip: item.pip ? { ...item.pip, syncNudgeFrames: current + appliedFrames } : item.pip,
+  };
+}

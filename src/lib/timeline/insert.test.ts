@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createEmptyProject, createTrack, addTrack, getItemsAtTime, removeItem } from './utils';
-import { appendMediaToTimeline, addCaptionItems, addManualCaptionCue, addTextItem, addWatermarkItem } from './insert';
+import { appendMediaToTimeline, appendDualCaptureToTimeline, addCaptionItems, addManualCaptionCue, addTextItem, addWatermarkItem } from './insert';
 import { createDefaultProject } from '../projects/persistence';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
 import type { MediaAsset } from '../../types/timeline';
@@ -238,5 +238,66 @@ describe('normalizeVisualZOrder (main-clip swap keeps overlays visible)', () => 
     p = appendMediaToTimeline(p, videoAsset('v2'));
     const vids = p.items.filter((i) => i.type === 'video').sort((a, b) => a.zIndex - b.zIndex);
     expect(vids.map((v) => v.mediaAssetId)).toEqual(['v1', 'v2']);
+  });
+});
+
+describe('appendDualCaptureToTimeline (R29 — dual capture "Add both")', () => {
+  function dualAsset(id: string): MediaAsset {
+    return {
+      id,
+      kind: 'video',
+      storageUrl: `https://example.com/${id}.mp4`,
+      fileName: `${id}.mp4`,
+      sizeBytes: 1_000_000,
+      mimeType: 'video/mp4',
+      durationSeconds: 12,
+      width: 1920,
+      height: 1080,
+      createdAt: 0,
+    };
+  }
+
+  it('front started 200ms second: the rear (main) head is trimmed and the front PiP starts aligned with it', () => {
+    const project = projectWithVideoAndAudioTracks();
+    const next = appendDualCaptureToTimeline(project, dualAsset('asset-main'), dualAsset('asset-front'), {
+      startDeltaMs: 200,
+    });
+    const main = next.items.find((i) => i.type === 'video' && i.mediaAssetId === 'asset-main');
+    if (!main || main.type !== 'video') throw new Error('expected a main video item');
+    expect(main.trimStart).toBeCloseTo(0.2, 5);
+    expect(main.endTime - main.startTime).toBeCloseTo(11.8, 5);
+
+    const pip = next.items.find((i) => i.type === 'video' && i.mediaAssetId === 'asset-front');
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.startTime).toBe(main.startTime);
+    expect(pip.trimStart).toBe(0);
+    expect(pip.pip?.isPip).toBe(true);
+    expect(pip.pip?.shape).toBe('rounded');
+    expect(pip.pip?.fit).toBe('source');
+  });
+
+  it('zero delta trims nothing off the main clip', () => {
+    const project = projectWithVideoAndAudioTracks();
+    const next = appendDualCaptureToTimeline(project, dualAsset('asset-main'), dualAsset('asset-front'), {
+      startDeltaMs: 0,
+    });
+    const main = next.items.find((i) => i.type === 'video' && i.mediaAssetId === 'asset-main');
+    if (!main || main.type !== 'video') throw new Error('expected a main video item');
+    expect(main.trimStart).toBe(0);
+  });
+
+  it('rear started 150ms second: the front (PiP) head is trimmed instead, main keeps its head', () => {
+    const project = projectWithVideoAndAudioTracks();
+    const next = appendDualCaptureToTimeline(project, dualAsset('asset-main'), dualAsset('asset-front'), {
+      startDeltaMs: -150,
+    });
+    const main = next.items.find((i) => i.type === 'video' && i.mediaAssetId === 'asset-main');
+    if (!main || main.type !== 'video') throw new Error('expected a main video item');
+    expect(main.trimStart).toBe(0);
+
+    const pip = next.items.find((i) => i.type === 'video' && i.mediaAssetId === 'asset-front');
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    expect(pip.trimStart).toBeCloseTo(0.15, 5);
+    expect(pip.startTime).toBe(main.startTime);
   });
 });

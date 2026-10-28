@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowLeftRight, FlipHorizontal2, Volume2, VolumeX } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
-import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipShapeRefitZoom, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, type PipLayoutId } from '../../lib/pip';
+import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipShapeRefitZoom, pipSyncNudgePatch, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, PIP_SYNC_NUDGE_MAX_FRAMES, type PipLayoutId } from '../../lib/pip';
 import { PipRingControls, PipShapeStrip } from './PipShapeControls';
 import { framingSlackPx, pipBoxPx, resolveCropOffset, resolveCropZoom } from '../../lib/render/compositor';
 import { updateItem } from '../../lib/timeline/utils';
@@ -38,6 +38,8 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
     if (!selectedPip) return;
     mutate((p) => updateItem(p, selectedPip.id, patch));
   };
+  // R29 — the selected PiP's dual-camera sync nudge, in frames.
+  const syncNudgeFrames = selectedPip?.pip?.syncNudgeFrames ?? 0;
 
   // R24 framing (Flip / crop-zoom / crop-pan): applies to the selected
   // PiP video AND to a selected image overlay — both carry the same
@@ -152,6 +154,29 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             <ArrowLeftRight size={13} /> Swap main ↔ overlay
           </button>
           <p className="text-[10px] text-white/30 -mt-1">The overlay becomes the full-screen main video; the main video takes its place in the circle. Timing, trim and each clip's own sound stay with the clip.</p>
+          {/* R29 — dual-camera sync nudge: shift the overlay a frame at
+              a time against the main clip until lips and sound line up. */}
+          <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Line up the sound</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => patchSelectedPip(pipSyncNudgePatch(selectedPip, -1, project.frameRate))}
+              className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
+            >
+              − 1 frame
+            </button>
+            <button
+              onClick={() => patchSelectedPip(pipSyncNudgePatch(selectedPip, 1, project.frameRate))}
+              className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
+            >
+              + 1 frame
+            </button>
+            <span className="text-xs text-white/60">
+              {syncNudgeFrames === 0
+                ? 'In sync'
+                : `${syncNudgeFrames > 0 ? '+' : ''}${syncNudgeFrames} frame${Math.abs(syncNudgeFrames) === 1 ? '' : 's'}`}
+            </span>
+          </div>
+          <p className="text-[10px] text-white/30 -mt-1">Dual-camera recordings can land a few frames off. If the overlay's lips move before you hear the words, tap +; after the words, tap −. Up to {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
         </div>
       )}
 

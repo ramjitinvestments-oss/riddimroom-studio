@@ -7,7 +7,7 @@ import { createImportQueue, MAX_CONCURRENT_UPLOADS, type ImportQueue } from '../
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import { generateTimelineId } from '../../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
-import { CameraCapture, type CaptureResult } from './CameraCapture';
+import { CameraCapture, type CaptureDualResult, type CaptureResult } from './CameraCapture';
 import { TrimSelectModal } from './TrimSelectModal';
 
 /**
@@ -78,6 +78,10 @@ interface UploadMeta {
   trimEnd?: number;
   isCameraCapture?: boolean;
   purpose?: UploadPurpose;
+  /** R29 — dual-camera pair routing: both files of a pair share a group id; see `dualGroupsRef`. */
+  dualGroupId?: string;
+  dualRole?: 'main' | 'front';
+  startDeltaMs?: number;
 }
 
 interface PendingTrimSelection {
@@ -95,9 +99,11 @@ interface MediaImportPanelProps {
   onAssetUploaded: (asset: MediaAsset, options?: AssetUploadedOptions) => void;
   /** "Add Overlay" uploads route here instead (PiP video / corner image overlay). Falls back to `onAssetUploaded` when not provided. */
   onOverlayAssetUploaded?: (asset: MediaAsset, options?: AssetUploadedOptions) => void;
+  /** R29 — a finished dual-camera pair (rear main + front overlay) routes here once BOTH files have uploaded. */
+  onDualAssetUploaded?: (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number }) => void;
 }
 
-export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUploaded, onOverlayAssetUploaded }: MediaImportPanelProps) {
+export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded }: MediaImportPanelProps) {
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [showCamera, setShowCamera] = useState(false);
   const [pendingTrim, setPendingTrim] = useState<PendingTrimSelection | null>(null);
@@ -111,6 +117,12 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   const audioInputRef = useRef<HTMLInputElement>(null);
   const assetIdByUploadId = useRef<Map<string, string>>(new Map());
   const uploadMetaByUploadId = useRef<Map<string, UploadMeta>>(new Map());
+  // R29 — dual-camera pairs upload as two independent files (either can
+  // finish first); each pair is held here until BOTH assets exist, then
+  // handed to `onDualAssetUploaded` exactly once.
+  const dualGroupsRef = useRef<
+    Map<string, { main?: MediaAsset; front?: MediaAsset; startDeltaMs: number; fired: boolean }>
+  >(new Map());
   // WS-S1 — uploads run through a bounded queue (at most
   // MAX_CONCURRENT_UPLOADS resumable uploads in flight at once) instead
   // of every picked file starting its upload immediately. Per-file
@@ -149,6 +161,28 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
             trimStart = 0;
             trimEnd = MAX_MEDIA_SECONDS;
           }
+          // R29 — dual-camera pair: hold each finished asset in its
+          // group until the other half lands, then hand the pair to the
+          // dual insert path exactly once and skip normal routing.
+          if (meta?.dualGroupId && meta.dualRole && onDualAssetUploaded) {
+            let group = dualGroupsRef.current.get(meta.dualGroupId);
+            if (!group) {
+              group = { startDeltaMs: meta.startDeltaMs ?? 0, fired: false };
+              dualGroupsRef.current.set(meta.dualGroupId, group);
+            }
+            if (meta.dualRole === 'main') group.main = asset;
+            else group.front = asset;
+            if (group.main && group.front && !group.fired) {
+              group.fired = true;
+              const mainAsset = group.main;
+              const frontAsset = group.front;
+              const groupStartDeltaMs = group.startDeltaMs;
+              dualGroupsRef.current.delete(meta.dualGroupId);
+              onDualAssetUploaded(mainAsset, frontAsset, { startDeltaMs: groupStartDeltaMs });
+            }
+            uploadMetaByUploadId.current.delete(uploadId);
+            return;
+          }
           // Route by the purpose the upload started with (tweaks round):
           // overlay uploads land as PiP/corner overlays, device audio
           // lands on the music track, everything else on the main
@@ -180,7 +214,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           );
         });
     },
-    [uid, onAssetUploaded, onOverlayAssetUploaded],
+    [uid, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded],
   );
 
   const startUpload = useCallback(
@@ -298,6 +332,32 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
       startCaptureUpload(result, 'overlay');
     },
     [startCaptureUpload, onOverlayAssetUploaded],
+  );
+
+  const handleCaptureDual = useCallback(
+    (result: CaptureDualResult) => {
+      setShowCamera(false);
+      const groupId = generateTimelineId('dual');
+      const makeFile = (blob: Blob, tag: string) =>
+        new File([blob], `capture-dual-${tag}-${Date.now()}.webm`, { type: blob.type || 'video/webm' });
+      // purpose 'main' is inert here — the dual branch in runUpload
+      // intercepts routing for both files before purpose is consulted.
+      startUpload(makeFile(result.main.blob, 'main'), {
+        isCameraCapture: true,
+        purpose: 'main',
+        dualGroupId: groupId,
+        dualRole: 'main',
+        startDeltaMs: result.startDeltaMs,
+      });
+      startUpload(makeFile(result.overlay.blob, 'front'), {
+        isCameraCapture: true,
+        purpose: 'main',
+        dualGroupId: groupId,
+        dualRole: 'front',
+        startDeltaMs: result.startDeltaMs,
+      });
+    },
+    [startUpload],
   );
 
   return (
@@ -419,6 +479,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         <CameraCapture
           onCapture={handleCapture}
           onCaptureAsOverlay={onOverlayAssetUploaded ? handleCaptureAsOverlay : undefined}
+          onCaptureDual={onDualAssetUploaded ? handleCaptureDual : undefined}
           onClose={() => setShowCamera(false)}
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}

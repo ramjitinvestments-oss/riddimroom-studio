@@ -11,6 +11,12 @@ import {
   type CaptureQualityChoice,
   type ZoomCapability,
 } from '../../lib/camera/captureQuality';
+import {
+  DUAL_UNAVAILABLE_MESSAGE,
+  buildDualFrontAttempts,
+  buildDualRearAttempts,
+  probeDualCamera,
+} from '../../lib/camera/dualCapture';
 
 /**
  * Live camera capture (photo + short video), front/back toggle.
@@ -48,9 +54,33 @@ import {
  * track exposes a `zoom` capability, a slider drives the real camera
  * zoom via `applyConstraints`; where it doesn't (iOS Safari), no zoom
  * control is rendered at all.
+ *
+ * R29 (dual-camera recording): when the caller provides `onCaptureDual`,
+ * the camera offers a "Record both cameras" mode — rear camera as the
+ * main video, front camera as a PiP overlay, recorded at the same time.
+ * The mode is probe-first: both cameras are actually opened (via
+ * `probeDualCamera` in `lib/camera/dualCapture`) before dual mode is
+ * entered, and on any phone/browser that cannot run both at once the
+ * component falls back honestly to today's single-camera mode with
+ * `DUAL_UNAVAILABLE_MESSAGE` explaining why — it never pretends dual
+ * worked. The microphone lives on the rear stream only (the rear ladder
+ * carries audio; the front attempts are video-only), so there is exactly
+ * one audio source to line up. Both recorders are started back-to-back
+ * on one `performance.now()` anchor and the measured start delta is
+ * carried with the result, so the timeline insert can line the overlay
+ * up with the main clip. Stopping holds BOTH recordings for review; the
+ * "Add both" choice hands the pair to the caller together, while Retake
+ * re-probes back into dual mode.
  */
 
 export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blob: Blob };
+
+export interface CaptureDualResult {
+  main: CaptureResult;
+  overlay: CaptureResult;
+  /** Measured start delta between the two recorders (front start − rear start) in ms, on one performance.now() anchor. */
+  startDeltaMs: number;
+}
 
 interface CameraCaptureProps {
   onCapture: (result: CaptureResult) => void;
@@ -63,6 +93,14 @@ interface CameraCaptureProps {
    * `addPipOverlay`). Omitted = the choice is never shown.
    */
   onCaptureAsOverlay?: (result: CaptureResult) => void;
+  /**
+   * R29 — dual-camera recording. When provided, the camera offers
+   * "Record both cameras" (rear = main video, front = PiP overlay) and a
+   * finished dual recording's review state hands BOTH recordings to the
+   * caller through this callback via its "Add both" choice. Omitted =
+   * dual mode is never offered.
+   */
+  onCaptureDual?: (result: CaptureDualResult) => void;
   onClose: () => void;
   /** The project's own canvas dimensions — used to negotiate a matching, non-distorted recording aspect ratio (16:9 / 9:16 / 1:1 / 4:5, whatever the project actually is), and to size the live preview box to match. */
   canvasWidth: number;
@@ -76,7 +114,7 @@ function formatClock(totalSeconds: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
-export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
+export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -110,11 +148,42 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
     return () => URL.revokeObjectURL(pendingVideo.url);
   }, [pendingVideo]);
 
+  // R29 — dual-camera state. All of it stays null/false/0 in single
+  // mode, so the single-camera behaviour is unchanged.
+  const frontStreamRef = useRef<MediaStream | null>(null);
+  const frontVideoRef = useRef<HTMLVideoElement>(null);
+  const frontRecorderRef = useRef<MediaRecorder | null>(null);
+  const dualChunksRef = useRef<{ rear: Blob[]; front: Blob[] }>({ rear: [], front: [] });
+  const dualStartRef = useRef<{ anchorMs: number; rearStartMs: number; frontStartMs: number } | null>(null);
+  const dualStoppedRef = useRef(0);
+  const [dualMode, setDualMode] = useState(false);
+  const [dualNotice, setDualNotice] = useState<string | null>(null);
+  const [dualCamCount, setDualCamCount] = useState(0);
+  const [pendingDual, setPendingDual] = useState<{
+    mainBlob: Blob;
+    mainUrl: string;
+    frontBlob: Blob;
+    frontUrl: string;
+    startDeltaMs: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!pendingDual) return;
+    return () => {
+      URL.revokeObjectURL(pendingDual.mainUrl);
+      URL.revokeObjectURL(pendingDual.frontUrl);
+    };
+  }, [pendingDual]);
+
   const previewAspectRatio = canvasWidth > 0 && canvasHeight > 0 ? `${canvasWidth} / ${canvasHeight}` : '9 / 16';
 
   const stopStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    // R29 — the front stream only ever exists in dual mode; stopping it
+    // here too keeps every exit path (close, review, retake) leak-free.
+    frontStreamRef.current?.getTracks().forEach((track) => track.stop());
+    frontStreamRef.current = null;
     setZoomCapability(null);
   }, []);
 
@@ -179,6 +248,91 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
     setIsReady(true);
   }, [canvasWidth, canvasHeight, facingMode, qualityChoice, fpsChoice, stopStream]);
 
+  // R29 — how many cameras does this device expose? The "Record both
+  // cameras" button only renders at 2+. Best-effort: enumerated on
+  // mount, on 'devicechange', and once the stream is ready (labels /
+  // counts can settle only after permission is granted); any failure
+  // leaves the last count alone.
+  useEffect(() => {
+    let cancelled = false;
+    const updateCount = async () => {
+      try {
+        const devices = await navigator.mediaDevices?.enumerateDevices();
+        if (!devices || cancelled) return;
+        setDualCamCount(devices.filter((d) => d.kind === 'videoinput').length);
+      } catch {
+        // Best-effort only — leave the count as it is.
+      }
+    };
+    const handleDeviceChange = () => {
+      void updateCount();
+    };
+    void updateCount();
+    navigator.mediaDevices?.addEventListener?.('devicechange', handleDeviceChange);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices?.removeEventListener?.('devicechange', handleDeviceChange);
+    };
+  }, [isReady]);
+
+  /**
+   * R29 — probe-first entry into dual mode: both cameras are actually
+   * opened before dual mode is entered. If the phone/browser can't run
+   * both at once, today's single-camera mode resumes and the notice
+   * explains why — dual is never faked.
+   */
+  const enterDualMode = useCallback(async () => {
+    if (!onCaptureDual) return;
+    setDualNotice(null);
+    stopStream();
+    const rearAttempts = buildDualRearAttempts({
+      canvasWidth,
+      canvasHeight,
+      quality: qualityChoice,
+      frameRate: fpsChoice,
+    });
+    const frontAttempts = buildDualFrontAttempts({ canvasWidth, canvasHeight });
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setDualNotice(DUAL_UNAVAILABLE_MESSAGE);
+      void startStream();
+      return;
+    }
+    const result = await probeDualCamera(
+      { getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c) },
+      rearAttempts,
+      frontAttempts,
+    );
+    if (!result.available) {
+      setDualNotice(DUAL_UNAVAILABLE_MESSAGE);
+      void startStream();
+      return;
+    }
+    streamRef.current = result.rearStream;
+    frontStreamRef.current = result.frontStream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = result.rearStream;
+      await videoRef.current.play().catch(() => {});
+    }
+    setDualMode(true);
+    setIsReady(true);
+  }, [onCaptureDual, stopStream, canvasWidth, canvasHeight, qualityChoice, fpsChoice, startStream]);
+
+  // R29 — attach the front stream to its corner preview once dual mode
+  // renders it.
+  useEffect(() => {
+    if (dualMode && frontVideoRef.current && frontStreamRef.current) {
+      frontVideoRef.current.srcObject = frontStreamRef.current;
+      void frontVideoRef.current.play().catch(() => {});
+    }
+  }, [dualMode]);
+
+  /** R29 — leave dual mode and resume today's single-camera stream. */
+  const exitDualMode = useCallback(() => {
+    stopStream();
+    setDualMode(false);
+    void startStream();
+  }, [stopStream, startStream]);
+
   useEffect(() => {
     startStream();
     return () => stopStream();
@@ -222,16 +376,18 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
       .catch(() => {});
   }, []);
 
-  const startRecording = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream || !isReady) return;
-    chunksRef.current = [];
+  /**
+   * The MediaRecorder creation fallback chain, shared by single and
+   * dual recording: tier options with the preferred codec → tier
+   * options without mimeType → bare. On total failure it sets the same
+   * error message the single path always used and returns null.
+   */
+  const createRecorder = useCallback((stream: MediaStream): MediaRecorder | null => {
     // R24 WS-P1: bitrate by the tier the device ACTUALLY negotiated
     // (the video track's reported settings), not the browser default.
     const trackSettings = stream.getVideoTracks()[0]?.getSettings?.();
-    let recorder: MediaRecorder;
     try {
-      recorder = new MediaRecorder(
+      return new MediaRecorder(
         stream,
         recorderOptionsForTrackSettings(trackSettings, 'video/webm;codecs=vp9,opus'),
       );
@@ -239,16 +395,81 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
       try {
         // Same tier bitrates without the preferred mimeType, in case
         // the codec string (not the options) is what the browser rejects.
-        recorder = new MediaRecorder(stream, recorderOptionsForTrackSettings(trackSettings));
+        return new MediaRecorder(stream, recorderOptionsForTrackSettings(trackSettings));
       } catch {
         try {
-          recorder = new MediaRecorder(stream);
+          return new MediaRecorder(stream);
         } catch (err: any) {
           setError(`This browser cannot record video: ${err?.message || err}`);
-          return;
+          return null;
         }
       }
     }
+  }, []);
+
+  /**
+   * R29 — record BOTH cameras at once. The mic is on the rear stream
+   * only because the rear ladder carries audio:true and the front
+   * attempts are video-only — there is exactly one audio source.
+   * The two recorders start back-to-back on one performance.now()
+   * anchor; the measured delta travels with the result so the pair can
+   * be lined up on the timeline.
+   */
+  const startDualRecording = useCallback(() => {
+    if (!dualMode || !isReady || !streamRef.current || !frontStreamRef.current) return;
+    const rearRecorder = createRecorder(streamRef.current);
+    if (!rearRecorder) return;
+    const frontRecorder = createRecorder(frontStreamRef.current);
+    if (!frontRecorder) return;
+    dualChunksRef.current = { rear: [], front: [] };
+    dualStoppedRef.current = 0;
+    rearRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) dualChunksRef.current.rear.push(e.data);
+    };
+    frontRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) dualChunksRef.current.front.push(e.data);
+    };
+    const handleDualStop = () => {
+      dualStoppedRef.current += 1;
+      if (dualStoppedRef.current < 2) return;
+      const mainBlob = new Blob(dualChunksRef.current.rear, { type: rearRecorder.mimeType || 'video/webm' });
+      const frontBlob = new Blob(dualChunksRef.current.front, { type: frontRecorder.mimeType || 'video/webm' });
+      stopStream();
+      setPendingDual({
+        mainBlob,
+        mainUrl: URL.createObjectURL(mainBlob),
+        frontBlob,
+        frontUrl: URL.createObjectURL(frontBlob),
+        startDeltaMs: dualStartRef.current ? dualStartRef.current.frontStartMs - dualStartRef.current.rearStartMs : 0,
+      });
+      dualStartRef.current = null;
+      frontRecorderRef.current = null;
+      recorderRef.current = null;
+    };
+    rearRecorder.onstop = handleDualStop;
+    frontRecorder.onstop = handleDualStop;
+    const anchorMs = performance.now();
+    rearRecorder.start();
+    const rearStartMs = performance.now();
+    frontRecorder.start();
+    const frontStartMs = performance.now();
+    dualStartRef.current = { anchorMs, rearStartMs, frontStartMs };
+    recorderRef.current = rearRecorder;
+    frontRecorderRef.current = frontRecorder;
+    setIsRecording(true);
+    setRecordSeconds(0);
+  }, [dualMode, isReady, createRecorder, stopStream]);
+
+  const startRecording = useCallback(() => {
+    const stream = streamRef.current;
+    if (!stream || !isReady) return;
+    if (dualMode) {
+      startDualRecording();
+      return;
+    }
+    chunksRef.current = [];
+    const recorder = createRecorder(stream);
+    if (!recorder) return;
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
@@ -265,11 +486,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
     recorderRef.current = recorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, stopStream]);
+  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
     recorderRef.current = null;
+    // R29 — in dual mode the front recorder stops too; in single mode
+    // this ref is always null, so this is a no-op there.
+    frontRecorderRef.current?.stop();
+    frontRecorderRef.current = null;
     setIsRecording(false);
   }, []);
 
@@ -290,6 +515,24 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
     setPendingVideo(null);
     void startStream();
   }, [startStream]);
+
+  /** R29 dual review confirm: hand BOTH recordings to the caller together. */
+  const confirmDual = useCallback(() => {
+    if (!pendingDual || !onCaptureDual) return;
+    const payload: CaptureDualResult = {
+      main: { kind: 'video', blob: pendingDual.mainBlob },
+      overlay: { kind: 'video', blob: pendingDual.frontBlob },
+      startDeltaMs: pendingDual.startDeltaMs,
+    };
+    setPendingDual(null);
+    onCaptureDual(payload);
+  }, [pendingDual, onCaptureDual]);
+
+  /** R29 dual review discard: drop both recordings and re-probe back into dual mode. */
+  const discardDual = useCallback(() => {
+    setPendingDual(null);
+    void enterDualMode();
+  }, [enterDualMode]);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -322,7 +565,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
           muted
           playsInline
           className="w-full h-full object-cover"
-          style={{ transform: previewMirrorTransform(facingMode) }}
+          style={{ transform: dualMode ? 'none' : previewMirrorTransform(facingMode) }}
         />
         {/* WS-P3: framing guides — pure DOM/SVG overlay, pointer-events
             none. The recording path captures the media stream, never
@@ -376,6 +619,44 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
             aria-label="Review your recording"
           />
         )}
+        {/* R29 — front camera live corner preview in dual mode. The
+            front preview IS mirrored (R24 rule); the rear main preview
+            above is never mirrored in dual mode. */}
+        {dualMode && !pendingDual && !pendingVideo && !error && (
+          <video
+            ref={frontVideoRef}
+            muted
+            playsInline
+            aria-label="Front camera preview"
+            className="absolute bottom-3 right-3 w-24 rounded-lg border border-white/30 object-cover bg-black pointer-events-none"
+            style={{ aspectRatio: previewAspectRatio, transform: previewMirrorTransform('user') }}
+          />
+        )}
+        {/* R29 — dual review: main recording full-frame, front recording
+            in the corner. Review shows the files as-is (no transform). */}
+        {pendingDual && (
+          <>
+            <video
+              src={pendingDual.mainUrl}
+              controls
+              autoPlay
+              loop
+              playsInline
+              className="absolute inset-0 w-full h-full object-cover bg-black"
+              aria-label="Review your main camera recording"
+            />
+            <video
+              src={pendingDual.frontUrl}
+              autoPlay
+              loop
+              muted
+              playsInline
+              aria-label="Front camera recording"
+              className="absolute bottom-3 right-3 w-24 rounded-lg border border-white/30 object-cover bg-black pointer-events-none"
+              style={{ aspectRatio: previewAspectRatio }}
+            />
+          </>
+        )}
         {error && (
           <div className="absolute inset-0 flex items-center justify-center p-6 bg-black/80 text-center text-sm text-red-300">
             {error}
@@ -383,7 +664,36 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
         )}
       </div>
 
-      {pendingVideo ? (
+      {pendingDual ? (
+        <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
+          <p className="text-xs text-white/60 text-center">
+            Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay — already lined up.
+          </p>
+          <div className="flex items-center gap-2.5 flex-wrap justify-center">
+            <button
+              onClick={confirmDual}
+              className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+            >
+              <Clapperboard size={15} /> Add both
+            </button>
+            <button
+              onClick={discardDual}
+              className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+            >
+              Retake
+            </button>
+            <button
+              onClick={() => {
+                stopStream();
+                onClose();
+              }}
+              className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      ) : pendingVideo ? (
         <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
           <p className="text-xs text-white/60 text-center">
             Your recording is ready. Add it as your main clip — or as a talking-head overlay on top of your main video.
@@ -422,6 +732,18 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
         </div>
       ) : (
       <div className="flex flex-col items-center gap-3">
+        {dualNotice && (
+          <div className="flex items-center gap-2 max-w-md w-full rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-200">
+            <span className="flex-1">{dualNotice}</span>
+            <button
+              onClick={() => setDualNotice(null)}
+              aria-label="Dismiss"
+              className="shrink-0 min-h-8 min-w-8 flex items-center justify-center text-amber-200/70 hover:text-amber-100"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {/* R24 WS-P1: quality + frame-rate chips. Changing a chip
             re-acquires the stream at the new ladder (disabled while
             recording — the stream is locked once recording starts). */}
@@ -437,7 +759,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
               <button
                 key={chip.id}
                 onClick={() => setQualityChoice(chip.id)}
-                disabled={isRecording}
+                disabled={isRecording || dualMode}
                 aria-pressed={qualityChoice === chip.id}
                 className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
                   qualityChoice === chip.id ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
@@ -452,7 +774,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
               <button
                 key={fps}
                 onClick={() => setFpsChoice(fps)}
-                disabled={isRecording}
+                disabled={isRecording || dualMode}
                 aria-pressed={fpsChoice === fps}
                 className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
                   fpsChoice === fps ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
@@ -493,16 +815,34 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onClose, canvasWi
           </label>
         )}
       <div className="flex items-center gap-3">
-        <button
-          onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
-          disabled={isRecording}
-          className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
-        >
-          Flip camera
-        </button>
+        {dualMode ? (
+          <button
+            onClick={exitDualMode}
+            disabled={isRecording}
+            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+          >
+            One camera
+          </button>
+        ) : (
+          <button
+            onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
+            disabled={isRecording}
+            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+          >
+            Flip camera
+          </button>
+        )}
+        {!dualMode && !isRecording && onCaptureDual && dualCamCount >= 2 && (
+          <button
+            onClick={() => void enterDualMode()}
+            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+          >
+            Record both cameras
+          </button>
+        )}
         <button
           onClick={takePhoto}
-          disabled={!isReady || isRecording}
+          disabled={!isReady || isRecording || dualMode}
           className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
         >
           Photo

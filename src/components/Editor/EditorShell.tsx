@@ -21,7 +21,7 @@ import { EffectsPanel } from './EffectsPanel';
 import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
-import { appendMediaToTimeline } from '../../lib/timeline/insert';
+import { appendDualCaptureToTimeline, appendMediaToTimeline } from '../../lib/timeline/insert';
 import { addPipOverlay } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
@@ -224,6 +224,19 @@ function EditorInner({ uid }: { uid: string }) {
     [mutate],
   );
 
+  // R29 — a finished dual-camera pair (MediaImportPanel dual routing):
+  // the rear recording lands as the main video and the front recording
+  // as its PiP overlay in one mutate (one undo step), already lined up
+  // by the measured recorder start delta.
+  const handleDualAssetUploaded = useCallback(
+    (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number }) => {
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      mutate((p) => appendDualCaptureToTimeline(p, main, overlay, { startDeltaMs: options.startDeltaMs }));
+      if (wasEmpty) setStep(2);
+    },
+    [mutate],
+  );
+
   // Tweaks round — "Add Overlay" uploads (MediaImportPanel purpose
   // 'overlay'). Videos go through the SAME PiP insert path as PipPanel
   // (bottom-right layout preset, muted by default for uploaded files —
@@ -363,6 +376,7 @@ function EditorInner({ uid }: { uid: string }) {
           canvasHeight={project.canvasHeight}
           onAssetUploaded={handleAssetUploaded}
           onOverlayAssetUploaded={handleOverlayAssetUploaded}
+          onDualAssetUploaded={handleDualAssetUploaded}
         />
       </section>
 
@@ -422,6 +436,7 @@ function EditorInner({ uid }: { uid: string }) {
           canvasHeight={project.canvasHeight}
           onAssetUploaded={handleAssetUploaded}
           onOverlayAssetUploaded={handleOverlayAssetUploaded}
+          onDualAssetUploaded={handleDualAssetUploaded}
         />
       </PanelGroup>
 

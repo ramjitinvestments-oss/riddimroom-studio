@@ -333,6 +333,14 @@ export interface PipSettings {
   glow?: boolean;
   /** Glow colour (hex). Absent = brand gold (#FFD100). */
   glowColor?: string;
+  /**
+   * R29 — "Line up the sound" sync nudge: how many frames the user has
+   * shifted this overlay's start by (the shift itself is applied to
+   * startTime/endTime, which is what preview and export read — this
+   * field is only the bookkeeping that clamps the total to
+   * ±PIP_SYNC_NUDGE_MAX_FRAMES project frames). Absent = 0.
+   */
+  syncNudgeFrames?: number;
   /** True when this video item is a PiP overlay (drawn on top of the main video). */
   isPip: boolean;
   /**

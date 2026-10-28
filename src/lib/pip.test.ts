@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { addPipOverlay, getPipLayout, isPipItem, pipScaleForWidthPercent, pipWidthPercentForScale, PIP_LAYOUTS, swapMainAndPip } from '../lib/pip';
+import { addPipOverlay, getPipLayout, isPipItem, pipScaleForWidthPercent, pipSyncNudgePatch, pipWidthPercentForScale, PIP_LAYOUTS, PIP_SYNC_NUDGE_MAX_FRAMES, swapMainAndPip } from '../lib/pip';
 import { validateProject } from '../lib/timeline/validation';
 import { createDefaultProject } from '../lib/projects/persistence';
 import type { MediaAsset } from '../types/timeline';
@@ -194,5 +194,76 @@ describe('addPipOverlay camera framing (R24 WS-P3)', () => {
     expect(pip.pip?.shape).toBe('circle');
     expect(pip.pip?.fit).toBeUndefined();
     expect(pip.muted).toBe(true);
+  });
+});
+
+describe('pipSyncNudgePatch (R29 — "Line up the sound")', () => {
+  const findPip = (items: ReturnType<typeof createDefaultProject>['items']) =>
+    items.find((i) => i.type === 'video' && (i as { pip?: { isPip?: boolean } }).pip?.isPip);
+
+  function makePipItem(overrides: { startTime?: number; syncNudgeFrames?: number } = {}) {
+    const project = createDefaultProject('uid-1');
+    const next = addPipOverlay(project, makeAsset(), { layoutId: 'bottom-right', fromCamera: true });
+    const pip = findPip(next.items);
+    if (!pip || pip.type !== 'video') throw new Error('expected a PiP video item');
+    const startTime = overrides.startTime ?? pip.startTime;
+    return {
+      ...pip,
+      startTime,
+      endTime: startTime + (pip.endTime - pip.startTime),
+      pip: pip.pip ? { ...pip.pip, syncNudgeFrames: overrides.syncNudgeFrames ?? 0 } : pip.pip,
+    };
+  }
+
+  it('exports the ±15 frame cap', () => {
+    expect(PIP_SYNC_NUDGE_MAX_FRAMES).toBe(15);
+  });
+
+  it('+1 frame at 30fps shifts start/end by 1/30 and sets syncNudgeFrames to 1', () => {
+    const item = makePipItem({ startTime: 2 });
+    const patch = pipSyncNudgePatch(item, 1, 30);
+    expect(patch.startTime).toBeCloseTo(2 + 1 / 30, 5);
+    expect(patch.endTime).toBeCloseTo(item.endTime + 1 / 30, 5);
+    expect(patch.pip?.syncNudgeFrames).toBe(1);
+  });
+
+  it('−1 frame returns the overlay to its original start', () => {
+    const item = makePipItem({ startTime: 2 });
+    const patch1 = pipSyncNudgePatch(item, 1, 30);
+    const shifted = { ...item, ...patch1, pip: patch1.pip };
+    const patch2 = pipSyncNudgePatch(shifted, -1, 30);
+    expect(patch2.startTime).toBeCloseTo(item.startTime, 5);
+    expect(patch2.endTime).toBeCloseTo(item.endTime, 5);
+    expect(patch2.pip?.syncNudgeFrames).toBe(0);
+  });
+
+  it('clamps the cumulative nudge at +15 frames', () => {
+    const item = makePipItem({ startTime: 2, syncNudgeFrames: 14 });
+    const patch = pipSyncNudgePatch(item, 5, 30);
+    expect(patch.startTime).toBeCloseTo(item.startTime + 1 / 30, 5);
+    expect(patch.endTime).toBeCloseTo(item.endTime + 1 / 30, 5);
+    expect(patch.pip?.syncNudgeFrames).toBe(15);
+  });
+
+  it('clamps the cumulative nudge at −15 frames', () => {
+    const item = makePipItem({ startTime: 5, syncNudgeFrames: -14 });
+    const patch = pipSyncNudgePatch(item, -5, 30);
+    expect(patch.startTime).toBeCloseTo(item.startTime - 1 / 30, 5);
+    expect(patch.endTime).toBeCloseTo(item.endTime - 1 / 30, 5);
+    expect(patch.pip?.syncNudgeFrames).toBe(-15);
+  });
+
+  it('never pushes the overlay before time 0 — only the frames that fit are applied and counted', () => {
+    const item = makePipItem({ startTime: 0.02, syncNudgeFrames: 0 });
+    const patch = pipSyncNudgePatch(item, -5, 30);
+    expect(patch.startTime).toBeCloseTo(0, 5);
+    expect(patch.pip?.syncNudgeFrames).toBe(-1);
+  });
+
+  it('falls back to 30fps steps when frameRate is 0', () => {
+    const item = makePipItem({ startTime: 2 });
+    const patch = pipSyncNudgePatch(item, 1, 0);
+    expect(patch.startTime).toBeCloseTo(2 + 1 / 30, 5);
+    expect(patch.pip?.syncNudgeFrames).toBe(1);
   });
 });
