@@ -18,6 +18,18 @@ import {
   probeDualCamera,
   tryRaiseRearResolution,
 } from '../../lib/camera/dualCapture';
+import {
+  TWO_PASS_BUTTON_LABEL,
+  TWO_PASS_STEP1_HEADING,
+  TWO_PASS_STEP2_HEADING,
+  TWO_PASS_STEP2_TIP,
+  TWO_PASS_WHY_LINE,
+  initialTwoPassState,
+  transitionTwoPass,
+  twoPassStartDeltaMs,
+  type TwoPassEvent,
+  type TwoPassPhase,
+} from '../../lib/camera/twoPass';
 
 /**
  * Live camera capture (photo + short video), front/back toggle.
@@ -88,6 +100,19 @@ import {
  * to raise the rear toward 1440p; failure is ignored. A failed probe
  * surfaces the probe's plain-words details line under the banner and
  * in the console, so the next field report names the exact failure.
+ *
+ * R31 (guided two-pass recording): for phones where the dual probe
+ * fails, the camera offers "Record in two steps" — record the main
+ * video first (step 1, the existing single-camera path), then record
+ * yourself with the FRONT camera while the kept main video plays
+ * back full-frame WITH SOUND (step 2). A two-pass pair is
+ * structurally identical to a dual pair, so the finished pair hands
+ * off through the SAME `onCaptureDual` callback and nothing
+ * downstream changes. The pure phase machine, delta maths and copy
+ * live in `lib/camera/twoPass`. Step 2 starts its recorder FIRST and
+ * drives playback second, anchoring the delta on the playback
+ * element's 'playing' event, so the (normally negative) delta trims
+ * the front take's head downstream exactly like dual's does.
  */
 
 export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blob: Blob };
@@ -255,6 +280,56 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     };
   }, [pendingDual]);
 
+  // R31 — guided two-pass state. All of it stays in its initial state
+  // while the flow is off, so single/dual behaviour is unchanged. The
+  // phase machine is the pure one in `lib/camera/twoPass`; this
+  // component owns everything the machine deliberately does not:
+  // streams, recorders and object URLs.
+  const [twoPass, setTwoPass] = useState(initialTwoPassState);
+  const twoPassPhase = twoPass.phase;
+  const isStep2Phase = twoPassPhase === 'step2-live' || twoPassPhase === 'step2-review';
+  // Ref mirror of the phase for use inside recorder `onstop`
+  // closures, which are created while a phase is live but fire after
+  // state has moved on — they must read the phase as it IS at stop
+  // time, not as it was when the closure was created.
+  const twoPassPhaseRef = useRef<TwoPassPhase>('off');
+  useEffect(() => {
+    twoPassPhaseRef.current = twoPassPhase;
+  }, [twoPassPhase]);
+  // The retained step-1 take's object URL while the flow owns it
+  // (step1-review → step2-live). Ownership transfers INTO
+  // `pendingDual.mainUrl` at step2-review — the ref is cleared at the
+  // transfer, and the pendingDual effect above owns revocation from
+  // there. NOTE it is a SEPARATE object URL from `pendingVideo.url`
+  // for the same blob: the pendingVideo effect revokes its URL when
+  // the review clears, and the retained copy must survive that.
+  const step1UrlRef = useRef<string | null>(null);
+  const step2PlaybackRef = useRef<HTMLVideoElement>(null);
+  const step2ChunksRef = useRef<Blob[]>([]);
+  const step2AnchorsRef = useRef<{
+    recorderStartMs: number;
+    playbackAnchorMs: number | null;
+    fallbackAnchorMs: number;
+  } | null>(null);
+
+  const dispatchTwoPass = useCallback((event: TwoPassEvent) => {
+    setTwoPass((prev) => transitionTwoPass(prev, event));
+  }, []);
+
+  /** Drop the retained step-1 URL (take retaken / replaced / flow exited). */
+  const dropStep1Url = useCallback(() => {
+    if (step1UrlRef.current) {
+      URL.revokeObjectURL(step1UrlRef.current);
+      step1UrlRef.current = null;
+    }
+  }, []);
+
+  /** Leave the two-pass flow entirely: machine to 'off' + retained URL dropped. */
+  const exitTwoPass = useCallback(() => {
+    dropStep1Url();
+    dispatchTwoPass({ type: 'exit' });
+  }, [dropStep1Url, dispatchTwoPass]);
+
   const previewAspectRatio = canvasWidth > 0 && canvasHeight > 0 ? `${canvasWidth} / ${canvasHeight}` : '9 / 16';
 
   const stopStream = useCallback(() => {
@@ -356,6 +431,32 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   }, [isReady]);
 
   /**
+   * R31 — enter the guided two-pass flow. Two routes, both gated on
+   * `onCaptureDual` (the finished pair hands off through it): the
+   * live-controls "Record in two steps" button (`viaDualFallback`
+   * false) and the dual-failure banner's "Record in two steps
+   * instead" button (true — entering from the banner also dismisses
+   * it). Step 1 records the main video, so entry aims the camera at
+   * the rear: switching `facingMode` re-acquires via the startStream
+   * effect; if it is already the rear camera, start directly.
+   */
+  const enterTwoPass = useCallback(
+    (viaDualFallback: boolean) => {
+      if (!onCaptureDual) return;
+      setDualNotice(null);
+      setDualDetails(null);
+      dropStep1Url();
+      dispatchTwoPass({ type: 'enter', viaDualFallback });
+      if (facingMode !== 'environment') {
+        setFacingMode('environment');
+      } else {
+        void startStream();
+      }
+    },
+    [onCaptureDual, dropStep1Url, dispatchTwoPass, facingMode, startStream],
+  );
+
+  /**
    * R29 — probe-first entry into dual mode: both cameras are actually
    * opened before dual mode is entered. If the phone/browser can't run
    * both at once, today's single-camera mode resumes and the notice
@@ -423,6 +524,18 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       void frontVideoRef.current.play().catch(() => {});
     }
   }, [dualMode]);
+
+  // R31 — in two-pass step 2 the corner preview shows the SAME single
+  // stream the step-2 recorder records (the front camera, held in
+  // `streamRef` — there is no second stream in this flow). Runs when
+  // the phase enters step2-live and again when the re-acquired front
+  // stream reports ready.
+  useEffect(() => {
+    if (twoPassPhase === 'step2-live' && frontVideoRef.current && streamRef.current) {
+      frontVideoRef.current.srcObject = streamRef.current;
+      void frontVideoRef.current.play().catch(() => {});
+    }
+  }, [twoPassPhase, isReady]);
 
   /** R29 — leave dual mode and resume today's single-camera stream. */
   const exitDualMode = useCallback(() => {
@@ -581,6 +694,16 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     };
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'video/webm' });
+      // R31 — in two-pass step 1 this same stop also feeds the flow:
+      // the blob becomes the machine's main take, and the flow retains
+      // its OWN object URL for it in `step1UrlRef` (separate from the
+      // review URL `pendingVideo` gets below — that one is revoked
+      // when the review clears, this one must live into step 2).
+      if (twoPassPhaseRef.current === 'step1-live') {
+        dropStep1Url();
+        step1UrlRef.current = URL.createObjectURL(blob);
+        dispatchTwoPass({ type: 'step1-recorded', blob });
+      }
       // Hold for the review state (see `pendingVideo`) instead of handing
       // off immediately, and stop the live stream while reviewing — the
       // camera doesn't need to stay hot for a decision, and the review
@@ -592,7 +715,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     recorderRef.current = recorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder]);
+  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
@@ -603,6 +726,93 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     frontRecorderRef.current = null;
     setIsRecording(false);
   }, []);
+
+  /**
+   * R31 — step-1 review "Use this — next step": keep the main take
+   * and move to step 2. Clearing `pendingVideo` revokes ONLY the
+   * review's own URL (its effect) — the retained step-1 URL in
+   * `step1UrlRef` is a separate URL for the same blob and survives.
+   * Step 2 records on the FRONT camera: switching `facingMode`
+   * re-acquires via the startStream effect; if step 1 was itself
+   * flipped to the front camera, start the (stopped) stream directly.
+   */
+  const keepStep1 = useCallback(() => {
+    dispatchTwoPass({ type: 'keep-step1' });
+    setPendingVideo(null);
+    if (facingMode !== 'user') {
+      setFacingMode('user');
+    } else {
+      void startStream();
+    }
+  }, [dispatchTwoPass, facingMode, startStream]);
+
+  /**
+   * R31 — record step 2: the front camera over the kept main take's
+   * playback. Deliberately NOT the single path (`startRecording`'s
+   * onstop routes to `pendingVideo`); this dedicated recorder routes
+   * its stop to `pendingDual` with the pair + measured delta.
+   *
+   * Start order is the alignment: the recorder starts FIRST, then
+   * playback is driven from frame 0. `recorderStartMs` is taken just
+   * after `recorder.start()`; the playback anchor is the playback
+   * element's one-time 'playing' event (first frames actually
+   * presented), with the moment playback was driven as the fallback
+   * anchor when 'playing' never fires. The playback element is NOT
+   * muted — the main video plays with sound while the front stream
+   * (whose microphone is live) records, which is exactly what
+   * `TWO_PASS_STEP2_TIP` warns about. Playback 'ended' auto-stops
+   * the recording (see the element's `onEnded` in the JSX).
+   * The recorder lives in `recorderRef`, so the existing Stop
+   * button, REC timer and 10-minute cap all work unchanged.
+   */
+  const startStep2Recording = useCallback(() => {
+    const stream = streamRef.current;
+    const mainBlob = twoPass.mainBlob;
+    const mainUrl = step1UrlRef.current;
+    if (!stream || !isReady || !mainBlob || !mainUrl) return;
+    const recorder = createRecorder(stream);
+    if (!recorder) return;
+    step2ChunksRef.current = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) step2ChunksRef.current.push(e.data);
+    };
+    recorder.onstop = () => {
+      const frontBlob = new Blob(step2ChunksRef.current, { type: recorder.mimeType || 'video/webm' });
+      const anchors = step2AnchorsRef.current;
+      const recorderStartMs = anchors?.recorderStartMs ?? performance.now();
+      const playbackStartMs = anchors?.playbackAnchorMs ?? anchors?.fallbackAnchorMs ?? recorderStartMs;
+      const startDeltaMs = twoPassStartDeltaMs(playbackStartMs, recorderStartMs);
+      step2AnchorsRef.current = null;
+      // Transfer the retained step-1 URL into pendingDual: clearing
+      // the ref hands ownership to the pendingDual effect, which
+      // revokes it when the review clears.
+      step1UrlRef.current = null;
+      dispatchTwoPass({ type: 'step2-recorded', blob: frontBlob, startDeltaMs });
+      stopStream();
+      setPendingDual({ mainBlob, mainUrl, frontBlob, frontUrl: URL.createObjectURL(frontBlob), startDeltaMs });
+    };
+    recorder.start();
+    const recorderStartMs = performance.now();
+    recorderRef.current = recorder;
+    const anchors: { recorderStartMs: number; playbackAnchorMs: number | null; fallbackAnchorMs: number } = {
+      recorderStartMs,
+      playbackAnchorMs: null,
+      fallbackAnchorMs: recorderStartMs,
+    };
+    step2AnchorsRef.current = anchors;
+    const playback = step2PlaybackRef.current;
+    if (playback) {
+      playback.currentTime = 0;
+      anchors.fallbackAnchorMs = performance.now();
+      const onPlaying = () => {
+        anchors.playbackAnchorMs = performance.now();
+      };
+      playback.addEventListener('playing', onPlaying, { once: true });
+      void playback.play().catch(() => {});
+    }
+    setIsRecording(true);
+    setRecordSeconds(0);
+  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob]);
 
   /** Review-state confirm: hand the SAME CaptureResult to the normal path or the overlay path, per the user's pick. */
   const confirmPendingVideo = useCallback(
@@ -640,6 +850,57 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     void enterDualMode();
   }, [enterDualMode]);
 
+  /**
+   * R31 — two-pass "Add both": the existing dual confirm (the pair is
+   * structurally a dual pair), plus flow cleanup — the machine exits
+   * after the handoff. The retained step-1 URL was already
+   * transferred into `pendingDual`, so `exitTwoPass`'s URL drop is a
+   * no-op here; the pendingDual effect revokes the review URLs.
+   */
+  const confirmDualTwoPass = useCallback(() => {
+    confirmDual();
+    exitTwoPass();
+  }, [confirmDual, exitTwoPass]);
+
+  /**
+   * R31 — retake step 2 from the two-pass review: KEEP the step-1
+   * take. Its blob survives in the machine, but its URL is the one
+   * transferred into `pendingDual` — which the pendingDual cleanup
+   * revokes when the review clears. So BEFORE clearing, mint a FRESH
+   * object URL for the main blob into `step1UrlRef`; the stale one
+   * is then revoked harmlessly. The front stream is re-acquired
+   * directly (facingMode is already 'user').
+   */
+  const retakeStep2 = useCallback(() => {
+    const mainBlob = twoPass.mainBlob ?? pendingDual?.mainBlob;
+    if (mainBlob) {
+      dropStep1Url();
+      step1UrlRef.current = URL.createObjectURL(mainBlob);
+    }
+    dispatchTwoPass({ type: 'retake-step2' });
+    setPendingDual(null);
+    void startStream();
+  }, [twoPass.mainBlob, pendingDual, dropStep1Url, dispatchTwoPass, startStream]);
+
+  /**
+   * R31 — start over from the two-pass review: drop the pair and go
+   * back to step 1. No fresh URL is minted — the step-1 take is
+   * being dropped too; clearing `pendingDual` revokes the
+   * transferred URL, and the camera aims back at the rear for a new
+   * step 1 (switching `facingMode` re-acquires; if it is somehow
+   * already the rear camera, start directly).
+   */
+  const startOverTwoPass = useCallback(() => {
+    dropStep1Url();
+    dispatchTwoPass({ type: 'start-over' });
+    setPendingDual(null);
+    if (facingMode !== 'environment') {
+      setFacingMode('environment');
+    } else {
+      void startStream();
+    }
+  }, [dropStep1Url, dispatchTwoPass, facingMode, startStream]);
+
   useEffect(() => {
     if (!isRecording) return;
     const interval = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
@@ -671,13 +932,35 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           muted
           playsInline
           className="w-full h-full object-cover"
-          style={{ transform: dualMode ? 'none' : previewMirrorTransform(facingMode) }}
+          style={{
+            transform: dualMode ? 'none' : previewMirrorTransform(facingMode),
+            // R31 — during two-pass step 2 this element holds the same
+            // FRONT stream as the corner preview; the step-1 playback
+            // is what fills the frame, so this element is hidden.
+            display: isStep2Phase ? 'none' : undefined,
+          }}
         />
+        {/* R31 — step 2: the kept main video plays back full-frame,
+            NOT muted (its sound plays while you record — see
+            TWO_PASS_STEP2_TIP), no controls, paused at frame 0 until
+            step-2 recording drives it. 'ended' auto-stops recording. */}
+        {twoPassPhase === 'step2-live' && step1UrlRef.current && (
+          <video
+            ref={step2PlaybackRef}
+            src={step1UrlRef.current}
+            playsInline
+            onEnded={() => stopRecording()}
+            className="absolute inset-0 w-full h-full object-cover bg-black"
+            aria-label="Your main video — plays while you record step 2"
+          />
+        )}
         {/* WS-P3: framing guides — pure DOM/SVG overlay, pointer-events
             none. The recording path captures the media stream, never
             this DOM, so guides can never appear in a recording. Hidden
-            while a recording is being reviewed. */}
-        {showGuides && !pendingVideo && !error && (
+            while a recording is being reviewed, and during two-pass
+            step 2 (the frame is the step-1 playback, not a live shot
+            to frame). */}
+        {showGuides && !pendingVideo && !error && !isStep2Phase && (
           <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
             {/* rule of thirds */}
             <div className="absolute top-0 bottom-0 w-px bg-white/35" style={{ left: '33.333%' }} />
@@ -727,8 +1010,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         )}
         {/* R29 — front camera live corner preview in dual mode. The
             front preview IS mirrored (R24 rule); the rear main preview
-            above is never mirrored in dual mode. */}
-        {dualMode && !pendingDual && !pendingVideo && !error && (
+            above is never mirrored in dual mode. R31 — the same
+            element/preview serves two-pass step 2 (front stream in
+            `streamRef`, attached by the step-2 effect above). */}
+        {(dualMode || twoPassPhase === 'step2-live') && !pendingDual && !pendingVideo && !error && (
           <video
             ref={frontVideoRef}
             muted
@@ -770,26 +1055,52 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         )}
       </div>
 
+      {/* R31 — two-pass step headings, above whichever controls the
+          current phase shows (live controls or a review block). */}
+      {(twoPassPhase === 'step1-live' || twoPassPhase === 'step1-review') && (
+        <div className="flex flex-col items-center gap-1 max-w-md w-full text-center">
+          <p className="text-xs font-bold uppercase tracking-wide text-gold">{TWO_PASS_STEP1_HEADING}</p>
+          {twoPass.viaDualFallback && <p className="text-[11px] text-white/60">{TWO_PASS_WHY_LINE}</p>}
+        </div>
+      )}
+      {(twoPassPhase === 'step2-live' || twoPassPhase === 'step2-review') && (
+        <div className="flex flex-col items-center gap-1 max-w-md w-full text-center">
+          <p className="text-xs font-bold uppercase tracking-wide text-gold">{TWO_PASS_STEP2_HEADING}</p>
+          {twoPassPhase === 'step2-live' && <p className="text-[11px] text-white/60">{TWO_PASS_STEP2_TIP}</p>}
+        </div>
+      )}
+
       {pendingDual ? (
         <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
           <p className="text-xs text-white/60 text-center">
-            Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay — already lined up.
+            {twoPassPhase === 'step2-review'
+              ? 'Recorded in two steps — your main video with you over it, already lined up.'
+              : 'Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay — already lined up.'}
           </p>
           <div className="flex items-center gap-2.5 flex-wrap justify-center">
             <button
-              onClick={confirmDual}
+              onClick={twoPassPhase === 'step2-review' ? confirmDualTwoPass : confirmDual}
               className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
             >
               <Clapperboard size={15} /> Add both
             </button>
             <button
-              onClick={discardDual}
+              onClick={twoPassPhase === 'step2-review' ? retakeStep2 : discardDual}
               className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
             >
               Retake
             </button>
+            {twoPassPhase === 'step2-review' && (
+              <button
+                onClick={startOverTwoPass}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Start over
+              </button>
+            )}
             <button
               onClick={() => {
+                if (twoPassPhase === 'step2-review') exitTwoPass();
                 stopStream();
                 onClose();
               }}
@@ -800,42 +1111,78 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           </div>
         </div>
       ) : pendingVideo ? (
-        <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
-          <p className="text-xs text-white/60 text-center">
-            Your recording is ready. Add it as your main clip — or as a talking-head overlay on top of your main video.
-          </p>
-          <div className="flex items-center gap-2.5 flex-wrap justify-center">
-            <button
-              onClick={() => confirmPendingVideo(false)}
-              className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
-            >
-              <Clapperboard size={15} /> Add to timeline
-            </button>
-            {onCaptureAsOverlay && (
+        twoPassPhase === 'step1-review' ? (
+          <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
+            <p className="text-xs text-white/60 text-center">
+              That&apos;s your main video. Next, you&apos;ll record yourself over it.
+            </p>
+            <div className="flex items-center gap-2.5 flex-wrap justify-center">
               <button
-                onClick={() => confirmPendingVideo(true)}
-                className="min-h-11 px-4 rounded-xl border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+                onClick={keepStep1}
+                className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
               >
-                <PictureInPicture2 size={15} /> Use as Overlay (PiP)
+                <Clapperboard size={15} /> Use this — next step
               </button>
-            )}
-            <button
-              onClick={discardPendingVideo}
-              className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
-            >
-              Retake
-            </button>
-            <button
-              onClick={() => {
-                stopStream();
-                onClose();
-              }}
-              className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
-            >
-              Close
-            </button>
+              <button
+                onClick={() => {
+                  dropStep1Url();
+                  dispatchTwoPass({ type: 'retake-step1' });
+                  discardPendingVideo();
+                }}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Retake
+              </button>
+              <button
+                onClick={() => {
+                  exitTwoPass();
+                  stopStream();
+                  onClose();
+                }}
+                className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
+              >
+                Close
+              </button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
+            <p className="text-xs text-white/60 text-center">
+              Your recording is ready. Add it as your main clip — or as a talking-head overlay on top of your main video.
+            </p>
+            <div className="flex items-center gap-2.5 flex-wrap justify-center">
+              <button
+                onClick={() => confirmPendingVideo(false)}
+                className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+              >
+                <Clapperboard size={15} /> Add to timeline
+              </button>
+              {onCaptureAsOverlay && (
+                <button
+                  onClick={() => confirmPendingVideo(true)}
+                  className="min-h-11 px-4 rounded-xl border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+                >
+                  <PictureInPicture2 size={15} /> Use as Overlay (PiP)
+                </button>
+              )}
+              <button
+                onClick={discardPendingVideo}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Retake
+              </button>
+              <button
+                onClick={() => {
+                  stopStream();
+                  onClose();
+                }}
+                className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )
       ) : (
       <div className="flex flex-col items-center gap-3">
         {dualMode && dualMicMissing && (
@@ -849,6 +1196,14 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               {dualNotice}
               {dualDetails && <span className="block mt-0.5 text-amber-200/70">Details: {dualDetails}</span>}
             </span>
+            {onCaptureDual && twoPassPhase === 'off' && (
+              <button
+                onClick={() => enterTwoPass(true)}
+                className="shrink-0 min-h-8 px-2.5 flex items-center justify-center rounded-md bg-amber-400/20 hover:bg-amber-400/30 text-amber-100 text-[11px] font-bold"
+              >
+                Record in two steps instead
+              </button>
+            )}
             <button
               onClick={() => {
                 setDualNotice(null);
@@ -931,7 +1286,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             <span className="text-[11px] font-bold tabular-nums w-9 text-right">{zoomValue.toFixed(1)}×</span>
           </label>
         )}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap justify-center">
         {dualMode ? (
           <button
             onClick={exitDualMode}
@@ -940,7 +1295,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           >
             One camera
           </button>
-        ) : (
+        ) : isStep2Phase ? null : (
           <button
             onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
             disabled={isRecording}
@@ -958,16 +1313,26 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             {dualBusy ? 'Checking cameras…' : 'Record both cameras'}
           </button>
         )}
+        {/* R31 — two-pass entry: NO camera-count gate (the flow needs
+            only one camera at a time — that is its whole point). */}
+        {!dualMode && !isRecording && onCaptureDual && twoPassPhase === 'off' && (
+          <button
+            onClick={() => enterTwoPass(false)}
+            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white"
+          >
+            {TWO_PASS_BUTTON_LABEL}
+          </button>
+        )}
         <button
           onClick={takePhoto}
-          disabled={!isReady || isRecording || dualMode}
+          disabled={!isReady || isRecording || dualMode || twoPassPhase !== 'off'}
           className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
         >
           Photo
         </button>
         {!isRecording ? (
           <button
-            onClick={startRecording}
+            onClick={twoPassPhase === 'step2-live' ? startStep2Recording : startRecording}
             disabled={!isReady}
             className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >
@@ -983,6 +1348,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         )}
         <button
           onClick={() => {
+            if (twoPassPhase !== 'off') exitTwoPass();
             stopStream();
             onClose();
           }}

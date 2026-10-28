@@ -45,6 +45,30 @@
  * failed probe reports a plain-words `details` line (reason + error
  * name + pairing last tried) so the next field report is precise.
  *
+ * THE R31 DEEP PROBE: R30 still failed on the owner's Android —
+ * every pairing's SECOND camera open was refused with
+ * `NotReadableError`, rear-first, at every size. R31 does not change
+ * WHAT is asked (same pairings, video-only, 30fps); it changes the
+ * ORDER and TIMING of the asks, because a sequential second-open
+ * refusal does not prove the pair cannot run — it may only prove
+ * the phone's camera service dislikes being opened one-at-a-time in
+ * that order, or had not yet released the preview stream the
+ * component stopped a moment earlier. So the probe now: (1) waits
+ * out a short cool-down before the first open, letting the
+ * just-stopped preview actually release; (2) if the whole R30 flow
+ * (ladder + refinement + desktop fallback — strategy "back camera
+ * first") fails without a permission denial, opens BOTH cameras in
+ * the same tick ("both cameras together"), smallest pairing first;
+ * and (3) if that fails too, runs the sequential ladder SWAPPED
+ * ("front camera first"), also smallest first. A permission denial
+ * from ANY strategy stops the probe at once — no ordering fixes a
+ * denial. The final failure carries every strategy's attempt, and
+ * the details line names them ("Tried: …") so the next field report
+ * shows exactly which orders were exhausted. Total work stays
+ * bounded: at most four 3-pairing walks (the R30 ladder, its
+ * desktop rerun, and the two new strategies), and the settle window
+ * only ever runs after both opens of a pairing succeeded.
+ *
  * $0 rule: no dependencies, only the platform `getUserMedia` API the
  * capture component already used.
  */
@@ -229,13 +253,29 @@ export function isDualRetryableError(err: unknown): boolean {
   );
 }
 
-export type DualProbeFailureReason = 'unsupported' | 'rear-failed' | 'front-failed' | 'rear-ended';
+export type DualProbeFailureReason =
+  | 'unsupported'
+  | 'rear-failed'
+  | 'front-failed'
+  | 'rear-ended'
+  | 'front-open-failed';
+
+/** One strategy's outcome, recorded on the final failure (R31). */
+export interface DualProbeAttempt {
+  /** Display name of the strategy that ran, e.g. "both cameras together". */
+  strategy: string;
+  reason: DualProbeFailureReason;
+  errorName?: string;
+  pairingLabel?: string;
+}
 
 export interface DualProbeFailure {
   reason: DualProbeFailureReason;
   error?: unknown;
   /** Label of the pairing being tried when the failure settled, e.g. "rear 720p + front 480p". */
   pairingLabel?: string;
+  /** Every strategy that ran, in order — present on the probe's final failure. */
+  attempts?: DualProbeAttempt[];
 }
 
 /**
@@ -249,16 +289,31 @@ export function dualFailureDetails(failure: DualProbeFailure): string {
   const errName = (failure.error as { name?: string } | null | undefined)?.name;
   const errPart = errName ? ` (${errName})` : '';
   const atPart = failure.pairingLabel ? ` at ${failure.pairingLabel}` : '';
+  let base: string;
   switch (failure.reason) {
     case 'unsupported':
-      return 'this browser does not provide camera access';
+      base = 'this browser does not provide camera access';
+      break;
     case 'rear-failed':
-      return `the main camera could not be opened${errPart}${atPart}`;
+      base = `the main camera could not be opened${errPart}${atPart}`;
+      break;
     case 'front-failed':
-      return `the second camera was refused by the phone${errPart}${atPart}`;
+      base = `the second camera was refused by the phone${errPart}${atPart}`;
+      break;
     case 'rear-ended':
-      return `the main camera stopped when the second camera opened${atPart}`;
+      base = `the main camera stopped when the second camera opened${atPart}`;
+      break;
+    case 'front-open-failed':
+      base = `the front camera could not be opened${errPart}${atPart}`;
+      break;
   }
+  // R31: when more than one strategy ran, name them all — a bare
+  // base sentence would hide that the other open orders were tried.
+  // A single-strategy failure keeps the exact R30 wording.
+  if (failure.attempts && failure.attempts.length > 1) {
+    return `${base} Tried: ${failure.attempts.map((a) => a.strategy).join(', ')}.`;
+  }
+  return base;
 }
 
 /* ------------------------------------------------------------------ */
@@ -266,7 +321,14 @@ export function dualFailureDetails(failure: DualProbeFailure): string {
 /* ------------------------------------------------------------------ */
 
 export type DualProbeResult =
-  | { available: true; rearStream: MediaStream; frontStream: MediaStream; pairingLabel: string }
+  | {
+      available: true;
+      rearStream: MediaStream;
+      frontStream: MediaStream;
+      pairingLabel: string;
+      /** Display name of the strategy that won (R31), e.g. "front camera first". */
+      strategy?: string;
+    }
   | {
       available: false;
       reason: DualProbeFailureReason;
@@ -274,6 +336,8 @@ export type DualProbeResult =
       pairingLabel?: string;
       /** Plain-words diagnosis — see `dualFailureDetails`. */
       details: string;
+      /** Every strategy that ran, in order (R31). */
+      attempts?: DualProbeAttempt[];
     };
 
 export interface DualProbeDeps {
@@ -295,6 +359,15 @@ export interface DualProbeDeps {
   settleMs?: number;
   /** Pause between pairing rungs after a retryable rejection. Default 300ms. */
   backoffMs?: number;
+  /**
+   * Cool-down awaited ONCE before the first camera open (R31). The
+   * component stops its preview stream immediately before calling
+   * the probe, and the phone's camera service needs a beat to
+   * actually release that stream — opening into a half-released
+   * camera service is a plausible source of the R30 second-open
+   * refusals. Default 600ms; 0 = no wait.
+   */
+  cooldownMs?: number;
 }
 
 function stopStream(stream: MediaStream): void {
@@ -313,8 +386,27 @@ function failureResult(failure: DualProbeFailure): DualProbeResult {
     error: failure.error,
     pairingLabel: failure.pairingLabel,
     details: dualFailureDetails(failure),
+    ...(failure.attempts ? { attempts: failure.attempts } : {}),
   };
 }
+
+function errorNameOf(err: unknown): string | undefined {
+  return (err as { name?: string } | null | undefined)?.name;
+}
+
+/** Strategy display names — used in `strategy`, `attempts` and the details line. */
+const STRATEGY_BACK_FIRST = 'back camera first';
+const STRATEGY_TOGETHER = 'both cameras together';
+const STRATEGY_FRONT_FIRST = 'front camera first';
+
+/**
+ * Internal outcome of one ladder/strategy walk: the success half of
+ * `DualProbeResult` (minus the strategy name, which the orchestrator
+ * stamps), or the raw failure the orchestrator records as an attempt.
+ */
+type ProbeOutcome =
+  | { available: true; rearStream: MediaStream; frontStream: MediaStream; pairingLabel: string }
+  | { available: false; failure: DualProbeFailure };
 
 /**
  * Probe whether this device/browser can really run both cameras at
@@ -331,9 +423,14 @@ function failureResult(failure: DualProbeFailure): DualProbeResult {
  * flow: ended or zero-frames fails; live-with-frames passes even if
  * the track still flags muted. If the whole facingMode ladder fails
  * without a permission denial and 2+ cameras exist, retry the ladder
- * once with first-two deviceId pairing (the desktop route). On
- * success the streams are NOT stopped — ownership passes to the
- * caller. On failure every opened track is stopped.
+ * once with first-two deviceId pairing (the desktop route). That
+ * whole flow is R31 strategy "back camera first"; if it fails
+ * without a permission denial, the deep probe continues with "both
+ * cameras together" (same-tick opens, ascending pairings) and then
+ * "front camera first" (swapped sequential ladder, ascending
+ * pairings) — see the header. On success the streams are NOT
+ * stopped — ownership passes to the caller. On failure every opened
+ * track is stopped.
  */
 export async function probeDualCamera(
   deps: DualProbeDeps,
@@ -347,6 +444,12 @@ export async function probeDualCamera(
   const settleMs = deps.settleMs ?? 1000;
   const backoffMs = deps.backoffMs ?? 300;
   const framesFlowing = deps.framesFlowing ?? null;
+
+  // R31 cool-down: let the camera service actually release the
+  // preview stream the component stopped just before this call,
+  // before the first open of any strategy. Once, up front.
+  const cooldownMs = deps.cooldownMs ?? 600;
+  if (cooldownMs > 0) await delay(cooldownMs);
 
   const tryEnumerate = async (): Promise<MediaDeviceInfo[] | null> => {
     if (!deps.enumerateDevices) return null;
@@ -379,7 +482,7 @@ export async function probeDualCamera(
   const runPairingLadder = async (
     initialPair: DualDevicePair | null,
     allowRefine: boolean,
-  ): Promise<DualProbeResult> => {
+  ): Promise<ProbeOutcome> => {
     let pair = initialPair;
     let pairings = buildDualPairings(opts, pair);
     let refined = !allowRefine;
@@ -392,7 +495,7 @@ export async function probeDualCamera(
         rearStream = await getUserMedia(pairings[idx].rearConstraints);
       } catch (err) {
         lastFailure = { reason: 'rear-failed', error: err, pairingLabel: pairings[idx].label };
-        if (!isDualRetryableError(err)) return failureResult(lastFailure);
+        if (!isDualRetryableError(err)) return { available: false, failure: lastFailure };
         idx += 1;
         if (idx < pairings.length) await delay(backoffMs);
         continue;
@@ -427,7 +530,7 @@ export async function probeDualCamera(
       } catch (err) {
         stopStream(rearStream);
         lastFailure = { reason: 'front-failed', error: err, pairingLabel: pairings[idx].label };
-        if (!isDualRetryableError(err)) return failureResult(lastFailure);
+        if (!isDualRetryableError(err)) return { available: false, failure: lastFailure };
         idx += 1;
         if (idx < pairings.length) await delay(backoffMs);
         continue;
@@ -457,31 +560,229 @@ export async function probeDualCamera(
 
       return { available: true, rearStream, frontStream, pairingLabel: pairings[idx].label };
     }
-    return failureResult(lastFailure);
+    return { available: false, failure: lastFailure };
   };
 
   const initialDevices = await tryEnumerate();
   const labelPair = initialDevices ? pairFromLabels(initialDevices) : null;
-  const first = await runPairingLadder(labelPair, !labelPair);
-  if (first.available) return first;
 
-  // Desktop fallback: the facingMode ladder failed (but NOT on a
-  // permission denial — retrying cannot fix that) and the device has
-  // 2+ cameras: pair the first two by exact deviceId and run the
-  // ladder once more.
-  if (!labelPair && deps.enumerateDevices) {
-    const errName = (first.error as { name?: string } | null | undefined)?.name;
-    if (errName !== 'NotAllowedError') {
-      const devices = await tryEnumerate();
-      const pair = devices ? selectDualDevicePair(devices) : null;
-      if (pair) {
-        const second = await runPairingLadder(pair, false);
-        if (second.available) return second;
-        return second;
+  const attemptOf = (strategy: string, failure: DualProbeFailure): DualProbeAttempt => {
+    const attempt: DualProbeAttempt = { strategy, reason: failure.reason };
+    const errName = errorNameOf(failure.error);
+    if (errName) attempt.errorName = errName;
+    if (failure.pairingLabel) attempt.pairingLabel = failure.pairingLabel;
+    return attempt;
+  };
+
+  const isPermissionDenial = (failure: DualProbeFailure): boolean =>
+    errorNameOf(failure.error) === 'NotAllowedError';
+
+  /**
+   * Strategy "back camera first" — the whole R30 flow: the rear-first
+   * ladder (with its label deviceId refinement), plus the desktop
+   * fallback rerun with first-two deviceId pairing when the
+   * facingMode ladder fails without a permission denial.
+   */
+  const runBackFirstStrategy = async (): Promise<ProbeOutcome> => {
+    const first = await runPairingLadder(labelPair, !labelPair);
+    if (first.available) return first;
+
+    // Desktop fallback: the facingMode ladder failed (but NOT on a
+    // permission denial — retrying cannot fix that) and the device
+    // has 2+ cameras: pair the first two by exact deviceId and run
+    // the ladder once more.
+    if (!labelPair && deps.enumerateDevices) {
+      if (!isPermissionDenial(first.failure)) {
+        const devices = await tryEnumerate();
+        const pair = devices ? selectDualDevicePair(devices) : null;
+        if (pair) {
+          return await runPairingLadder(pair, false);
+        }
       }
     }
+    return first;
+  };
+
+  /**
+   * The deviceId pair for the R31 strategies: the label pair from the
+   * initial enumeration when there is one, else `selectDualDevicePair`
+   * over the enumerated devices (a fresh enumeration gets a chance
+   * when the initial one yielded nothing), else null — facingMode.
+   */
+  const resolveStrategyPair = async (): Promise<DualDevicePair | null> => {
+    if (labelPair) return labelPair;
+    if (initialDevices) {
+      const pair = selectDualDevicePair(initialDevices);
+      if (pair) return pair;
+    }
+    if (deps.enumerateDevices) {
+      const fresh = await tryEnumerate();
+      if (fresh) return selectDualDevicePair(fresh);
+    }
+    return null;
+  };
+
+  /** Invoke one open, converting a synchronous throw into a rejection. */
+  const invokeOpen = (constraints: MediaStreamConstraints): Promise<MediaStream> => {
+    try {
+      return getUserMedia(constraints);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  };
+
+  /**
+   * Strategy "both cameras together": invoke BOTH opens synchronously
+   * back-to-back and settle them together — the camera service sees
+   * one concurrent request instead of a second open landing on a
+   * camera it is still configuring. Pairings ASCENDING (smallest
+   * first): the R30 ladder already proved the big asks fail in
+   * sequence, so this strategy starts from the most likely fit.
+   * A single rejection is reported by ROLE (rear → 'rear-failed',
+   * front → 'front-open-failed'); when both reject, the rear's is
+   * reported unless it is retryable and the front's is not.
+   */
+  const runTogetherStrategy = async (pair: DualDevicePair | null): Promise<ProbeOutcome> => {
+    const pairings = [...buildDualPairings(opts, pair)].reverse();
+    let lastFailure: DualProbeFailure = { reason: 'front-open-failed' };
+    for (let idx = 0; idx < pairings.length; idx += 1) {
+      const pairing = pairings[idx];
+      const rearPromise = invokeOpen(pairing.rearConstraints);
+      const frontPromise = invokeOpen(pairing.frontConstraints);
+      const [rearResult, frontResult] = await Promise.allSettled([rearPromise, frontPromise]);
+
+      if (rearResult.status === 'fulfilled' && frontResult.status === 'fulfilled') {
+        const rearStream = rearResult.value;
+        const frontStream = frontResult.value;
+        // SETTLE, then judge by frame flow — same as the ladder.
+        await delay(settleMs);
+        if (!(await trackAlive(rearStream))) {
+          stopStream(rearStream);
+          stopStream(frontStream);
+          lastFailure = { reason: 'rear-ended', pairingLabel: pairing.label };
+          if (idx + 1 < pairings.length) await delay(backoffMs);
+          continue;
+        }
+        if (!(await trackAlive(frontStream))) {
+          stopStream(rearStream);
+          stopStream(frontStream);
+          lastFailure = { reason: 'front-failed', pairingLabel: pairing.label };
+          if (idx + 1 < pairings.length) await delay(backoffMs);
+          continue;
+        }
+        return { available: true, rearStream, frontStream, pairingLabel: pairing.label };
+      }
+
+      // Any rejection: stop whichever stream DID open.
+      if (rearResult.status === 'fulfilled') stopStream(rearResult.value);
+      if (frontResult.status === 'fulfilled') stopStream(frontResult.value);
+
+      let chosen: { reason: DualProbeFailureReason; error: unknown };
+      if (rearResult.status === 'rejected' && frontResult.status === 'rejected') {
+        chosen =
+          isDualRetryableError(rearResult.reason) && !isDualRetryableError(frontResult.reason)
+            ? { reason: 'front-open-failed', error: frontResult.reason }
+            : { reason: 'rear-failed', error: rearResult.reason };
+      } else if (rearResult.status === 'rejected') {
+        chosen = { reason: 'rear-failed', error: rearResult.reason };
+      } else {
+        chosen = { reason: 'front-open-failed', error: (frontResult as PromiseRejectedResult).reason };
+      }
+      lastFailure = { reason: chosen.reason, error: chosen.error, pairingLabel: pairing.label };
+      if (!isDualRetryableError(chosen.error)) return { available: false, failure: lastFailure };
+      if (idx + 1 < pairings.length) await delay(backoffMs);
+    }
+    return { available: false, failure: lastFailure };
+  };
+
+  /**
+   * Strategy "front camera first": the sequential ladder SWAPPED —
+   * FRONT opens first, then REAR, pairings ascending. Some camera
+   * services grant concurrency only when the smaller/front sensor
+   * configures first. No label refinement inside this strategy: the
+   * pair, when known, is already exact, and when it is not known the
+   * variable being tested is the open ORDER, not selector precision.
+   * Reason mapping: first-open (front) failure → 'front-open-failed';
+   * second-open (rear) failure → 'front-failed' (the refused-second-
+   * camera wording is order-agnostic); liveness as in the ladder.
+   */
+  const runFrontFirstStrategy = async (pair: DualDevicePair | null): Promise<ProbeOutcome> => {
+    const pairings = [...buildDualPairings(opts, pair)].reverse();
+    let lastFailure: DualProbeFailure = { reason: 'front-open-failed' };
+    for (let idx = 0; idx < pairings.length; idx += 1) {
+      const pairing = pairings[idx];
+
+      // FRONT first.
+      let frontStream: MediaStream;
+      try {
+        frontStream = await getUserMedia(pairing.frontConstraints);
+      } catch (err) {
+        lastFailure = { reason: 'front-open-failed', error: err, pairingLabel: pairing.label };
+        if (!isDualRetryableError(err)) return { available: false, failure: lastFailure };
+        if (idx + 1 < pairings.length) await delay(backoffMs);
+        continue;
+      }
+
+      // REAR second, without closing the front.
+      let rearStream: MediaStream;
+      try {
+        rearStream = await getUserMedia(pairing.rearConstraints);
+      } catch (err) {
+        stopStream(frontStream);
+        lastFailure = { reason: 'front-failed', error: err, pairingLabel: pairing.label };
+        if (!isDualRetryableError(err)) return { available: false, failure: lastFailure };
+        if (idx + 1 < pairings.length) await delay(backoffMs);
+        continue;
+      }
+
+      // SETTLE, then judge by frame flow — same as the ladder.
+      await delay(settleMs);
+      if (!(await trackAlive(rearStream))) {
+        stopStream(rearStream);
+        stopStream(frontStream);
+        lastFailure = { reason: 'rear-ended', pairingLabel: pairing.label };
+        if (idx + 1 < pairings.length) await delay(backoffMs);
+        continue;
+      }
+      if (!(await trackAlive(frontStream))) {
+        stopStream(rearStream);
+        stopStream(frontStream);
+        lastFailure = { reason: 'front-failed', pairingLabel: pairing.label };
+        if (idx + 1 < pairings.length) await delay(backoffMs);
+        continue;
+      }
+
+      return { available: true, rearStream, frontStream, pairingLabel: pairing.label };
+    }
+    return { available: false, failure: lastFailure };
+  };
+
+  /* Orchestration: back-first → together → front-first. A permission
+   * denial from ANY strategy stops the probe immediately — no open
+   * order fixes a denial. The final failure's base fields come from
+   * the LAST strategy that ran, with every attempt recorded. */
+  const attempts: DualProbeAttempt[] = [];
+
+  const backFirst = await runBackFirstStrategy();
+  if (backFirst.available) return { ...backFirst, strategy: STRATEGY_BACK_FIRST };
+  attempts.push(attemptOf(STRATEGY_BACK_FIRST, backFirst.failure));
+  if (isPermissionDenial(backFirst.failure)) {
+    return failureResult({ ...backFirst.failure, attempts });
   }
-  return first;
+
+  const strategyPair = await resolveStrategyPair();
+
+  const together = await runTogetherStrategy(strategyPair);
+  if (together.available) return { ...together, strategy: STRATEGY_TOGETHER };
+  attempts.push(attemptOf(STRATEGY_TOGETHER, together.failure));
+  if (isPermissionDenial(together.failure)) {
+    return failureResult({ ...together.failure, attempts });
+  }
+
+  const frontFirst = await runFrontFirstStrategy(strategyPair);
+  if (frontFirst.available) return { ...frontFirst, strategy: STRATEGY_FRONT_FIRST };
+  attempts.push(attemptOf(STRATEGY_FRONT_FIRST, frontFirst.failure));
+  return failureResult({ ...frontFirst.failure, attempts });
 }
 
 /* ------------------------------------------------------------------ */

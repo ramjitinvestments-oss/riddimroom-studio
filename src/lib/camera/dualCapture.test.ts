@@ -246,6 +246,40 @@ describe('dualFailureDetails', () => {
     ).toBe('the main camera could not be opened (NotAllowedError) at rear 1080p + front 720p');
     expect(dualFailureDetails({ reason: 'unsupported' })).toBe('this browser does not provide camera access');
   });
+
+  it('composes the front-open-failed diagnosis (R31)', () => {
+    expect(
+      dualFailureDetails({
+        reason: 'front-open-failed',
+        error: { name: 'NotReadableError' },
+        pairingLabel: 'rear 720p + front 480p',
+      }),
+    ).toBe('the front camera could not be opened (NotReadableError) at rear 720p + front 480p');
+  });
+
+  it('appends the Tried list only when more than one strategy ran (R31)', () => {
+    const base = {
+      reason: 'front-open-failed' as const,
+      error: { name: 'NotReadableError' },
+      pairingLabel: 'rear 1080p + front 720p',
+    };
+    expect(
+      dualFailureDetails({
+        ...base,
+        attempts: [
+          { strategy: 'back camera first', reason: 'rear-failed' },
+          { strategy: 'both cameras together', reason: 'rear-failed' },
+          { strategy: 'front camera first', reason: 'front-open-failed' },
+        ],
+      }),
+    ).toBe(
+      'the front camera could not be opened (NotReadableError) at rear 1080p + front 720p Tried: back camera first, both cameras together, front camera first.',
+    );
+    // One attempt → the R30 wording, byte-identical.
+    expect(
+      dualFailureDetails({ ...base, attempts: [{ strategy: 'back camera first', reason: 'front-open-failed' }] }),
+    ).toBe('the front camera could not be opened (NotReadableError) at rear 1080p + front 720p');
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -333,41 +367,52 @@ describe('probeDualCamera', () => {
     expect(rear.track.stopped).toBe(false);
   });
 
-  it('a rear track live but with NO frames across the window fails as rear-ended after the full ladder', async () => {
+  it('a rear track live but with NO frames across the window fails as rear-ended after every strategy', async () => {
     const created: MediaStream[] = [];
-    const getUserMedia = async () => {
+    // Role is read from the constraints, NOT the open order — the
+    // R31 front-first strategy opens the front camera first, so
+    // position parity no longer identifies which camera a stream is.
+    const roles: Array<'rear' | 'front'> = [];
+    const getUserMedia = async (c: MediaStreamConstraints) => {
       const s = makeFakeStream();
       created.push(s.stream);
+      roles.push(videoOf(c).facingMode === 'user' ? 'front' : 'rear');
       return s.stream;
     };
-    // Even-index streams are the rears (opened first each pairing) — they never flow.
-    const framesFlowing = async (s: MediaStream) => created.indexOf(s) % 2 === 1;
+    // Rear streams never flow; front streams do.
+    const framesFlowing = async (s: MediaStream) => roles[created.indexOf(s)] === 'front';
     const result = await probeDualCamera(probeDeps({ getUserMedia, framesFlowing }), CANVAS);
     expect(result.available).toBe(false);
     if (!result.available) {
       expect(result.reason).toBe('rear-ended');
+      // Base fields come from the LAST strategy (front-first, whose
+      // ascending ladder ends at the largest pairing) + the Tried list.
       expect(result.details).toBe(
-        'the main camera stopped when the second camera opened at rear 720p + front 480p',
+        'the main camera stopped when the second camera opened at rear 1080p + front 720p Tried: back camera first, both cameras together, front camera first.',
       );
     }
-    // 3 pairings × 2 opens, everything stopped.
-    expect(created).toHaveLength(6);
+    // 3 strategies × 3 pairings × 2 opens, everything stopped.
+    expect(created).toHaveLength(18);
   });
 
   it('a front track with no frames fails as front-failed with the refused wording', async () => {
     const created: MediaStream[] = [];
-    const getUserMedia = async () => {
+    const roles: Array<'rear' | 'front'> = [];
+    const getUserMedia = async (c: MediaStreamConstraints) => {
       const s = makeFakeStream();
       created.push(s.stream);
+      roles.push(videoOf(c).facingMode === 'user' ? 'front' : 'rear');
       return s.stream;
     };
-    const framesFlowing = async (s: MediaStream) => created.indexOf(s) % 2 === 0;
+    // Rear streams flow; front streams never do.
+    const framesFlowing = async (s: MediaStream) => roles[created.indexOf(s)] === 'rear';
     const result = await probeDualCamera(probeDeps({ getUserMedia, framesFlowing }), CANVAS);
     expect(result.available).toBe(false);
     if (!result.available) {
       expect(result.reason).toBe('front-failed');
-      expect(result.details).toContain('the second camera was refused by the phone');
-      expect(result.details).toContain('rear 720p + front 480p');
+      expect(result.details).toBe(
+        'the second camera was refused by the phone at rear 1080p + front 720p Tried: back camera first, both cameras together, front camera first.',
+      );
     }
   });
 
@@ -401,6 +446,12 @@ describe('probeDualCamera', () => {
       expect(result.details).toBe(
         'the main camera could not be opened (NotAllowedError) at rear 1080p + front 720p',
       );
+      // R31: a permission denial stops the probe — the "together"
+      // and "front-first" strategies are never invoked (the single
+      // gum call above already proves it) and only one attempt is
+      // recorded, so the details keep the exact R30 wording.
+      expect(result.attempts).toHaveLength(1);
+      expect(result.attempts?.[0].strategy).toBe('back camera first');
     }
     expect(calls).toBe(1);
   });
@@ -501,6 +552,170 @@ describe('probeDualCamera', () => {
     expect(calls).toHaveLength(8);
     expect(videoOf(calls[6]).deviceId).toEqual({ exact: 'dev-0' });
     expect(videoOf(calls[7]).deviceId).toEqual({ exact: 'dev-1' });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* The R31 deep probe: cool-down + together + front-first              */
+/* ------------------------------------------------------------------ */
+
+describe('probeDualCamera R31 deep probe', () => {
+  it('waits out the 600ms cool-down ONCE, before the first camera open', async () => {
+    const events: string[] = [];
+    const delay = async (ms: number) => {
+      events.push(`delay:${ms}`);
+    };
+    const getUserMedia = async () => {
+      events.push('gum');
+      return makeFakeStream().stream;
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia, delay }), CANVAS);
+    expect(result.available).toBe(true);
+    // The component stopped its preview stream just before calling
+    // the probe — the cool-down lands before ANY camera open.
+    expect(events[0]).toBe('delay:600');
+    expect(events[1]).toBe('gum');
+    expect(events.filter((e) => e === 'delay:600')).toHaveLength(1);
+    if (result.available) expect(result.strategy).toBe('back camera first');
+  });
+
+  it('cooldownMs: 0 skips the cool-down wait', async () => {
+    const events: string[] = [];
+    const delay = async (ms: number) => {
+      events.push(`delay:${ms}`);
+    };
+    const getUserMedia = async () => {
+      events.push('gum');
+      return makeFakeStream().stream;
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia, delay, cooldownMs: 0 }), CANVAS);
+    expect(result.available).toBe(true);
+    expect(events[0]).toBe('gum');
+    expect(events).not.toContain('delay:600');
+  });
+
+  it('strategy "together" invokes BOTH opens before either resolves, and wins after rear-first fails', async () => {
+    const calls: MediaStreamConstraints[] = [];
+    const pending: Array<{ resolve: (s: MediaStream) => void }> = [];
+    let call = 0;
+    const getUserMedia = (c: MediaStreamConstraints): Promise<MediaStream> => {
+      calls.push(c);
+      call += 1;
+      if (call <= 6) {
+        // Rear-first ladder: the rear opens, the front (second) open
+        // refuses with NotReadableError at every pairing — the R30
+        // field failure.
+        if (call % 2 === 0) return Promise.reject({ name: 'NotReadableError' });
+        return Promise.resolve(makeFakeStream().stream);
+      }
+      // Together strategy: hold both opens pending until released.
+      let resolve!: (s: MediaStream) => void;
+      const promise = new Promise<MediaStream>((res) => {
+        resolve = res;
+      });
+      pending.push({ resolve });
+      return promise;
+    };
+    const probePromise = probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    let probeSettled = false;
+    void probePromise.then(() => {
+      probeSettled = true;
+    });
+    // Let the probe run until both together opens are in flight.
+    for (let i = 0; i < 100 && pending.length < 2; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    // Both getUserMedia invocations (calls 7 and 8) happened while
+    // NEITHER promise had resolved and the probe was still running.
+    expect(pending).toHaveLength(2);
+    expect(calls).toHaveLength(8);
+    expect(probeSettled).toBe(false);
+    pending[0].resolve(makeFakeStream().stream);
+    pending[1].resolve(makeFakeStream().stream);
+    const result = await probePromise;
+    expect(result.available).toBe(true);
+    if (result.available) {
+      expect(result.strategy).toBe('both cameras together');
+      expect(result.pairingLabel).toBe('rear 720p + front 480p');
+    }
+  });
+
+  it('strategy "together" tries the SMALLEST pairing first (rear 720p + front 480p)', async () => {
+    const calls: MediaStreamConstraints[] = [];
+    let call = 0;
+    const getUserMedia = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      call += 1;
+      if (call <= 6 && call % 2 === 0) throw { name: 'NotReadableError' };
+      return makeFakeStream().stream;
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.strategy).toBe('both cameras together');
+    // Calls 7+8 are the first together attempt — ascending order.
+    const togetherCalls = calls.slice(6);
+    expect(videoOf(togetherCalls[0]).facingMode).toBe('environment');
+    expect(videoOf(togetherCalls[0]).width).toEqual({ ideal: 720 });
+    expect(videoOf(togetherCalls[1]).facingMode).toBe('user');
+    expect(videoOf(togetherCalls[1]).width).toEqual({ ideal: 480 });
+  });
+
+  it('strategy "front-first" opens front before rear and wins after the first two strategies fail', async () => {
+    const calls: MediaStreamConstraints[] = [];
+    let call = 0;
+    const getUserMedia = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      call += 1;
+      if (call <= 6) {
+        // Rear-first: the front second-open refuses at every pairing.
+        if (call % 2 === 0) throw { name: 'NotReadableError' };
+        return makeFakeStream().stream;
+      }
+      // Together: both opens refuse at every pairing.
+      if (call <= 12) throw { name: 'NotReadableError' };
+      // Front-first: both opens succeed.
+      return makeFakeStream().stream;
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    expect(result.available).toBe(true);
+    if (result.available) {
+      expect(result.strategy).toBe('front camera first');
+      expect(result.pairingLabel).toBe('rear 720p + front 480p');
+    }
+    // Front-first phase (calls 13+): the FRONT opens first.
+    expect(videoOf(calls[12]).facingMode).toBe('user');
+    expect(videoOf(calls[13]).facingMode).toBe('environment');
+  });
+
+  it('when all three strategies fail, the details name every strategy tried and attempts record each one', async () => {
+    let calls = 0;
+    const getUserMedia = async () => {
+      calls += 1;
+      throw { name: 'NotReadableError' };
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    expect(result.available).toBe(false);
+    if (!result.available) {
+      // Base fields come from the LAST strategy (front-first: its
+      // first open refused at its last, largest ascending pairing).
+      expect(result.reason).toBe('front-open-failed');
+      expect(result.details).toBe(
+        'the front camera could not be opened (NotReadableError) at rear 1080p + front 720p Tried: back camera first, both cameras together, front camera first.',
+      );
+      expect(result.attempts?.map((a) => a.strategy)).toEqual([
+        'back camera first',
+        'both cameras together',
+        'front camera first',
+      ]);
+      expect(result.attempts?.map((a) => a.reason)).toEqual([
+        'rear-failed',
+        'rear-failed',
+        'front-open-failed',
+      ]);
+      expect(result.attempts?.[2].errorName).toBe('NotReadableError');
+    }
+    // Bounded work: 3 rear-first opens + 3×2 together + 3 front-first.
+    expect(calls).toBe(12);
   });
 });
 
