@@ -12,10 +12,11 @@ import {
   type ZoomCapability,
 } from '../../lib/camera/captureQuality';
 import {
+  DUAL_MIC_UNAVAILABLE_MESSAGE,
   DUAL_UNAVAILABLE_MESSAGE,
-  buildDualFrontAttempts,
-  buildDualRearAttempts,
+  attachMicrophone,
   probeDualCamera,
+  tryRaiseRearResolution,
 } from '../../lib/camera/dualCapture';
 
 /**
@@ -63,14 +64,30 @@ import {
  * entered, and on any phone/browser that cannot run both at once the
  * component falls back honestly to today's single-camera mode with
  * `DUAL_UNAVAILABLE_MESSAGE` explaining why — it never pretends dual
- * worked. The microphone lives on the rear stream only (the rear ladder
- * carries audio; the front attempts are video-only), so there is exactly
- * one audio source to line up. Both recorders are started back-to-back
+ * worked. The microphone lives on the rear stream only, so there is
+ * exactly one audio source to line up. Both recorders are started back-to-back
  * on one `performance.now()` anchor and the measured start delta is
  * carried with the result, so the timeline insert can line the overlay
  * up with the main clip. Stopping holds BOTH recordings for review; the
  * "Add both" choice hands the pair to the caller together, while Retake
  * re-probes back into dual mode.
+ *
+ * R30 (dual-probe v2 — R29 failed on the owner's Android): the probe
+ * now opens both cameras VIDEO-ONLY on a low-first pairing ladder
+ * inside the concurrent-stream envelope Android guarantees (rear
+ * 1080p + front 720p, descending, all 30fps); HAL rejections
+ * (NotReadableError / AbortError) step DOWN a pairing instead of
+ * killing the probe; liveness is judged after a ~1s settle window by
+ * FRAME FLOW (see `probeStreamFramesFlowing`) instead of the rear
+ * track's muted flag in the opening tick; cameras pair by exact
+ * deviceId once permission reveals labels; and the microphone is
+ * fetched LAST on its own audio-only call and merged onto the rear
+ * stream — a mic failure degrades to silent dual video with
+ * `DUAL_MIC_UNAVAILABLE_MESSAGE`, never to no dual at all. Right
+ * before recording starts, one best-effort `applyConstraints` tries
+ * to raise the rear toward 1440p; failure is ignored. A failed probe
+ * surfaces the probe's plain-words details line under the banner and
+ * in the console, so the next field report names the exact failure.
  */
 
 export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blob: Blob };
@@ -105,6 +122,60 @@ interface CameraCaptureProps {
   /** The project's own canvas dimensions — used to negotiate a matching, non-distorted recording aspect ratio (16:9 / 9:16 / 1:1 / 4:5, whatever the project actually is), and to size the live preview box to match. */
   canvasWidth: number;
   canvasHeight: number;
+}
+
+/**
+ * R30 — the real frame-flow check the dual probe judges liveness by:
+ * attach the stream to a scratch <video> and count presented frames
+ * via `requestVideoFrameCallback` (two frames = flowing). Browsers
+ * without rVFC fall back to the track's muted flag — which is only
+ * consulted here AFTER the probe's settle window, never in the tick
+ * the second camera opened. The scratch element is detached on
+ * resolution; the stream itself is untouched.
+ */
+function probeStreamFramesFlowing(stream: MediaStream): Promise<boolean> {
+  return new Promise((resolve) => {
+    const track = stream.getVideoTracks()[0];
+    if (!track || track.readyState !== 'live') {
+      resolve(false);
+      return;
+    }
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    let settled = false;
+    let frames = 0;
+    const finish = (flowing: boolean) => {
+      if (settled) return;
+      settled = true;
+      try {
+        video.srcObject = null;
+      } catch {
+        // Best-effort detach only.
+      }
+      resolve(flowing);
+    };
+    const rvfcHost = video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (callback: () => void) => number;
+    };
+    if (typeof rvfcHost.requestVideoFrameCallback === 'function') {
+      const onFrame = () => {
+        frames += 1;
+        if (frames >= 2) {
+          finish(true);
+          return;
+        }
+        rvfcHost.requestVideoFrameCallback?.(onFrame);
+      };
+      rvfcHost.requestVideoFrameCallback(onFrame);
+      void video.play().catch(() => {});
+      window.setTimeout(() => finish(frames >= 2), 900);
+    } else {
+      void video.play().catch(() => {});
+      window.setTimeout(() => finish(track.muted === false), 400);
+    }
+  });
 }
 
 function formatClock(totalSeconds: number): string {
@@ -158,6 +229,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   const dualStoppedRef = useRef(0);
   const [dualMode, setDualMode] = useState(false);
   const [dualNotice, setDualNotice] = useState<string | null>(null);
+  // R30 — the failed probe's plain-words diagnosis, shown as the
+  // banner's small "Details:" line (and logged to the console).
+  const [dualDetails, setDualDetails] = useState<string | null>(null);
+  // R30 — true while the dual probe is running (both cameras can take
+  // a few seconds to open + settle): the button disables and relabels.
+  const [dualBusy, setDualBusy] = useState(false);
+  // R30 — the mic call failed after both cameras passed: dual
+  // recording proceeds WITHOUT sound and the user is told up front.
+  const [dualMicMissing, setDualMicMissing] = useState(false);
   const [dualCamCount, setDualCamCount] = useState(0);
   const [pendingDual, setPendingDual] = useState<{
     mainBlob: Blob;
@@ -280,42 +360,60 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    * opened before dual mode is entered. If the phone/browser can't run
    * both at once, today's single-camera mode resumes and the notice
    * explains why — dual is never faked.
+   *
+   * R30 — the probe is the v2 in `lib/camera/dualCapture` (low-first
+   * video-only pairings, step-down on HAL rejections, settle +
+   * frame-flow liveness, deviceId pairing). The microphone is fetched
+   * only AFTER both cameras pass, on its own audio-only call, and
+   * merged onto the rear stream; a mic failure never blocks dual —
+   * it records silently and says so.
    */
   const enterDualMode = useCallback(async () => {
     if (!onCaptureDual) return;
     setDualNotice(null);
+    setDualDetails(null);
+    setDualMicMissing(false);
+    setDualBusy(true);
     stopStream();
-    const rearAttempts = buildDualRearAttempts({
-      canvasWidth,
-      canvasHeight,
-      quality: qualityChoice,
-      frameRate: fpsChoice,
-    });
-    const frontAttempts = buildDualFrontAttempts({ canvasWidth, canvasHeight });
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setDualNotice(DUAL_UNAVAILABLE_MESSAGE);
-      void startStream();
-      return;
+    try {
+      const gum = navigator.mediaDevices?.getUserMedia
+        ? (c: MediaStreamConstraints) => navigator.mediaDevices.getUserMedia(c)
+        : null;
+      const result = await probeDualCamera(
+        {
+          getUserMedia: gum,
+          enumerateDevices: navigator.mediaDevices?.enumerateDevices
+            ? () => navigator.mediaDevices.enumerateDevices()
+            : null,
+          framesFlowing: probeStreamFramesFlowing,
+        },
+        { canvasWidth, canvasHeight },
+      );
+      if (!result.available) {
+        // Diagnostic gold for the next field report: the banner gets
+        // the plain-words details line, the console gets the same.
+        console.warn(`[RiddimRoom Studio] Dual camera unavailable — ${result.details}`);
+        setDualNotice(DUAL_UNAVAILABLE_MESSAGE);
+        setDualDetails(result.details);
+        void startStream();
+        return;
+      }
+      // Mic LAST, separate call (R30): merged onto the rear stream so
+      // the rear recorder captures it; failure = silent dual + note.
+      const mic = await attachMicrophone(gum, result.rearStream);
+      if (!mic.ok) setDualMicMissing(true);
+      streamRef.current = result.rearStream;
+      frontStreamRef.current = result.frontStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = result.rearStream;
+        await videoRef.current.play().catch(() => {});
+      }
+      setDualMode(true);
+      setIsReady(true);
+    } finally {
+      setDualBusy(false);
     }
-    const result = await probeDualCamera(
-      { getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c) },
-      rearAttempts,
-      frontAttempts,
-    );
-    if (!result.available) {
-      setDualNotice(DUAL_UNAVAILABLE_MESSAGE);
-      void startStream();
-      return;
-    }
-    streamRef.current = result.rearStream;
-    frontStreamRef.current = result.frontStream;
-    if (videoRef.current) {
-      videoRef.current.srcObject = result.rearStream;
-      await videoRef.current.play().catch(() => {});
-    }
-    setDualMode(true);
-    setIsReady(true);
-  }, [onCaptureDual, stopStream, canvasWidth, canvasHeight, qualityChoice, fpsChoice, startStream]);
+  }, [onCaptureDual, stopStream, canvasWidth, canvasHeight, startStream]);
 
   // R29 — attach the front stream to its corner preview once dual mode
   // renders it.
@@ -409,14 +507,22 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
 
   /**
    * R29 — record BOTH cameras at once. The mic is on the rear stream
-   * only because the rear ladder carries audio:true and the front
-   * attempts are video-only — there is exactly one audio source.
-   * The two recorders start back-to-back on one performance.now()
-   * anchor; the measured delta travels with the result so the pair can
-   * be lined up on the timeline.
+   * only (R30: merged there by `attachMicrophone` after the video-only
+   * probe; the front stream never carries audio) — there is exactly
+   * one audio source. The two recorders start back-to-back on one
+   * performance.now() anchor; the measured delta travels with the
+   * result so the pair can be lined up on the timeline.
+   *
+   * R30 — first, ONE best-effort raise of the rear toward 1440p now
+   * that both streams are proven live (the probe deliberately opened
+   * low, inside the guaranteed concurrent envelope). The helper
+   * swallows any refusal, and the recorder tiers below are read from
+   * the track settings AFTER the attempt, so a successful raise is
+   * recorded at its real tier.
    */
-  const startDualRecording = useCallback(() => {
+  const startDualRecording = useCallback(async () => {
     if (!dualMode || !isReady || !streamRef.current || !frontStreamRef.current) return;
+    await tryRaiseRearResolution(streamRef.current, canvasWidth, canvasHeight);
     const rearRecorder = createRecorder(streamRef.current);
     if (!rearRecorder) return;
     const frontRecorder = createRecorder(frontStreamRef.current);
@@ -458,13 +564,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     frontRecorderRef.current = frontRecorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [dualMode, isReady, createRecorder, stopStream]);
+  }, [dualMode, isReady, createRecorder, stopStream, canvasWidth, canvasHeight]);
 
   const startRecording = useCallback(() => {
     const stream = streamRef.current;
     if (!stream || !isReady) return;
     if (dualMode) {
-      startDualRecording();
+      void startDualRecording();
       return;
     }
     chunksRef.current = [];
@@ -732,11 +838,22 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         </div>
       ) : (
       <div className="flex flex-col items-center gap-3">
+        {dualMode && dualMicMissing && (
+          <div className="max-w-md w-full rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-200 text-center">
+            {DUAL_MIC_UNAVAILABLE_MESSAGE}
+          </div>
+        )}
         {dualNotice && (
           <div className="flex items-center gap-2 max-w-md w-full rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-200">
-            <span className="flex-1">{dualNotice}</span>
+            <span className="flex-1">
+              {dualNotice}
+              {dualDetails && <span className="block mt-0.5 text-amber-200/70">Details: {dualDetails}</span>}
+            </span>
             <button
-              onClick={() => setDualNotice(null)}
+              onClick={() => {
+                setDualNotice(null);
+                setDualDetails(null);
+              }}
               aria-label="Dismiss"
               className="shrink-0 min-h-8 min-w-8 flex items-center justify-center text-amber-200/70 hover:text-amber-100"
             >
@@ -835,9 +952,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         {!dualMode && !isRecording && onCaptureDual && dualCamCount >= 2 && (
           <button
             onClick={() => void enterDualMode()}
+            disabled={dualBusy}
             className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
           >
-            Record both cameras
+            {dualBusy ? 'Checking cameras…' : 'Record both cameras'}
           </button>
         )}
         <button

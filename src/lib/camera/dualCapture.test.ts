@@ -1,189 +1,326 @@
 import { describe, it, expect } from 'vitest';
-import { buildCaptureAttempts, recorderOptionsForTrackSettings } from './captureQuality';
+import { recorderOptionsForTrackSettings } from './captureQuality';
 import {
+  DUAL_MIC_UNAVAILABLE_MESSAGE,
   DUAL_UNAVAILABLE_MESSAGE,
-  buildDualFrontAttempts,
-  buildDualRearAttempts,
+  attachMicrophone,
+  buildDualPairings,
   dualAlignmentTrims,
+  dualFailureDetails,
   dualStartDeltaMs,
+  isDualRetryableError,
+  pairFromLabels,
   probeDualCamera,
-  stepDownCaptureAttempts,
+  selectDualDevicePair,
+  tryRaiseRearResolution,
+  type DualDeviceInfo,
+  type DualProbeDeps,
 } from './dualCapture';
-import type { CaptureAttempt } from './captureQuality';
 
-function videoOf(attempt: CaptureAttempt): MediaTrackConstraints {
-  return attempt.constraints.video as MediaTrackConstraints;
-}
+const CANVAS = { canvasWidth: 1080, canvasHeight: 1920 };
+
+/* ------------------------------------------------------------------ */
+/* Fakes                                                               */
+/* ------------------------------------------------------------------ */
 
 interface FakeTrack {
   kind: string;
   readyState: string;
   muted: boolean;
   stopped: boolean;
+  deviceId?: string;
   stop: () => void;
+  getSettings: () => { deviceId?: string };
+  applyConstraints?: (c: MediaTrackConstraints) => Promise<void>;
 }
 
-function makeFakeStream(opts: { readyState?: string; muted?: boolean } = {}): {
-  stream: MediaStream;
-  track: FakeTrack;
-} {
+function makeFakeTrack(opts: { kind?: string; readyState?: string; muted?: boolean; deviceId?: string } = {}): FakeTrack {
   const track: FakeTrack = {
-    kind: 'video',
+    kind: opts.kind ?? 'video',
     readyState: opts.readyState ?? 'live',
     muted: opts.muted ?? false,
     stopped: false,
+    deviceId: opts.deviceId,
     stop() {
       this.stopped = true;
       this.readyState = 'ended';
     },
+    getSettings() {
+      return { deviceId: this.deviceId };
+    },
   };
+  return track;
+}
+
+function makeFakeStream(
+  opts: { readyState?: string; muted?: boolean; deviceId?: string } = {},
+): { stream: MediaStream; track: FakeTrack; audioTracks: FakeTrack[] } {
+  const track = makeFakeTrack(opts);
+  const audioTracks: FakeTrack[] = [];
   const stream = {
     getVideoTracks: () => [track],
-    getAudioTracks: () => [],
+    getAudioTracks: () => audioTracks,
+    getTracks: () => [track, ...audioTracks],
+    addTrack: (t: FakeTrack) => {
+      if (t.kind === 'audio') audioTracks.push(t);
+    },
+  };
+  return { stream: stream as unknown as MediaStream, track, audioTracks };
+}
+
+function makeMicStream(): { stream: MediaStream; track: FakeTrack } {
+  const track = makeFakeTrack({ kind: 'audio' });
+  const stream = {
+    getVideoTracks: () => [],
+    getAudioTracks: () => [track],
     getTracks: () => [track],
+    addTrack: () => {},
   };
   return { stream: stream as unknown as MediaStream, track };
 }
 
-const CANVAS = { canvasWidth: 1080, canvasHeight: 1920 };
-
-function rearAttempts() {
-  return buildDualRearAttempts({ ...CANVAS, quality: 'auto', frameRate: 60 });
+/** Probe deps with instant timers and always-flowing frames; override per test. */
+function probeDeps(overrides: Partial<DualProbeDeps>): DualProbeDeps {
+  return {
+    delay: async () => {},
+    framesFlowing: async () => true,
+    ...overrides,
+  } as DualProbeDeps;
 }
 
-function frontAttempts() {
-  return buildDualFrontAttempts(CANVAS);
+function videoOf(c: MediaStreamConstraints): MediaTrackConstraints {
+  return c.video as MediaTrackConstraints;
 }
 
-describe('DUAL_UNAVAILABLE_MESSAGE', () => {
-  it('is the exact fallback wording', () => {
+function device(id: string, label: string, kind = 'videoinput'): DualDeviceInfo {
+  return { deviceId: id, kind, label } as DualDeviceInfo;
+}
+
+/* ------------------------------------------------------------------ */
+/* Messages                                                            */
+/* ------------------------------------------------------------------ */
+
+describe('messages', () => {
+  it('keeps the exact R29 fallback wording', () => {
     expect(DUAL_UNAVAILABLE_MESSAGE).toBe(
       "This phone can't run both cameras at once in the browser — recording with one camera instead",
     );
   });
+
+  it('has the exact mic-unavailable note', () => {
+    expect(DUAL_MIC_UNAVAILABLE_MESSAGE).toBe(
+      'Microphone unavailable — recording both cameras without sound',
+    );
+  });
 });
 
-describe('stepDownCaptureAttempts', () => {
-  it('steps the auto/60 ladder down one tier, dedupes, and flags only the last rung as fallback', () => {
-    const input = buildCaptureAttempts({
-      canvasWidth: 1080,
-      canvasHeight: 1920,
-      facingMode: 'user',
-      quality: 'auto',
-      frameRate: 60,
-    });
-    const result = stepDownCaptureAttempts(input, 1080, 1920);
-    expect(result.map((a) => a.shortSide)).toEqual([1440, 1080, 1080]);
-    expect(result.map((a) => a.frameRate)).toEqual([60, 60, 30]);
-    expect(result.slice(0, -1).every((a) => !a.isFallback)).toBe(true);
-    expect(result[result.length - 1].isFallback).toBe(true);
-    // Audio flag and facing mode are preserved in the rebuilt constraints.
-    for (const attempt of result) {
-      expect(attempt.constraints.audio).toBe(true);
-      expect(videoOf(attempt).facingMode).toBe('user');
-    }
-  });
+/* ------------------------------------------------------------------ */
+/* Pairing ladder                                                      */
+/* ------------------------------------------------------------------ */
 
-  it('keeps the hd ladder at [1080@60, 1080@30] (the floor)', () => {
-    const input = buildCaptureAttempts({
-      canvasWidth: 1920,
-      canvasHeight: 1080,
-      facingMode: 'environment',
-      quality: 'hd',
-      frameRate: 60,
-    });
-    const result = stepDownCaptureAttempts(input, 1920, 1080);
-    expect(result.map((a) => [a.shortSide, a.frameRate])).toEqual([
-      [1080, 60],
-      [1080, 30],
+describe('buildDualPairings', () => {
+  it('descends rear 1080/front 720 → 720/720 → 720/480, all 30fps and video-only', () => {
+    const pairings = buildDualPairings(CANVAS);
+    expect(pairings.map((p) => [p.rearShortSide, p.frontShortSide])).toEqual([
+      [1080, 720],
+      [720, 720],
+      [720, 480],
     ]);
-    expect(result[result.length - 1].isFallback).toBe(true);
-    expect(result[0].isFallback).toBe(false);
-  });
-
-  it('never returns an empty array', () => {
-    expect(stepDownCaptureAttempts([], 1080, 1920).length).toBeGreaterThan(0);
-  });
-});
-
-describe('buildDualRearAttempts', () => {
-  it('faces the environment camera, keeps audio, and starts at or below 1440 for auto', () => {
-    const attempts = buildDualRearAttempts({ ...CANVAS, quality: 'auto', frameRate: 60 });
-    expect(attempts.length).toBeGreaterThan(0);
-    for (const attempt of attempts) {
-      expect(videoOf(attempt).facingMode).toBe('environment');
-      expect(attempt.constraints.audio).toBe(true);
+    expect(pairings.map((p) => p.label)).toEqual([
+      'rear 1080p + front 720p',
+      'rear 720p + front 720p',
+      'rear 720p + front 480p',
+    ]);
+    for (const pairing of pairings) {
+      for (const constraints of [pairing.rearConstraints, pairing.frontConstraints]) {
+        expect(constraints.audio).toBe(false);
+        expect(videoOf(constraints).frameRate).toEqual({ ideal: 30 });
+      }
+      expect(videoOf(pairing.rearConstraints).facingMode).toBe('environment');
+      expect(videoOf(pairing.frontConstraints).facingMode).toBe('user');
+      expect(videoOf(pairing.rearConstraints).deviceId).toBeUndefined();
     }
-    expect(attempts[0].shortSide).toBeLessThanOrEqual(1440);
   });
-});
 
-describe('buildDualFrontAttempts', () => {
-  it('is video-only, user-facing, 30fps, with 1080 then 720 rungs', () => {
-    const attempts = buildDualFrontAttempts(CANVAS);
-    expect(attempts.map((a) => a.shortSide)).toEqual([1080, 720]);
-    expect(attempts.map((a) => a.isFallback)).toEqual([false, true]);
-    for (const attempt of attempts) {
-      expect(attempt.constraints.audio).toBe(false);
-      expect(videoOf(attempt).facingMode).toBe('user');
-      expect(attempt.frameRate).toBe(30);
-      expect(videoOf(attempt).frameRate).toEqual({ ideal: 30 });
+  it('names exact deviceIds (and no facingMode) when a pair is given', () => {
+    const pairings = buildDualPairings(CANVAS, { rearId: 'cam-back', frontId: 'cam-front' });
+    for (const pairing of pairings) {
+      expect(videoOf(pairing.rearConstraints).deviceId).toEqual({ exact: 'cam-back' });
+      expect(videoOf(pairing.frontConstraints).deviceId).toEqual({ exact: 'cam-front' });
+      expect(videoOf(pairing.rearConstraints).facingMode).toBeUndefined();
+      expect(videoOf(pairing.frontConstraints).facingMode).toBeUndefined();
     }
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Device selection                                                    */
+/* ------------------------------------------------------------------ */
+
+describe('device pairing selection', () => {
+  it('pairs by back/front labels', () => {
+    const devices = [device('id-front', 'Front Camera'), device('id-back', 'Back Camera')];
+    expect(pairFromLabels(devices)).toEqual({ rearId: 'id-back', frontId: 'id-front' });
+    expect(selectDualDevicePair(devices)).toEqual({ rearId: 'id-back', frontId: 'id-front' });
+  });
+
+  it('uses the only other camera when just one side is labelled', () => {
+    expect(pairFromLabels([device('a', 'Back Camera'), device('b', '')])).toEqual({
+      rearId: 'a',
+      frontId: 'b',
+    });
+    expect(pairFromLabels([device('a', ''), device('b', 'Selfie Camera')])).toEqual({
+      rearId: 'a',
+      frontId: 'b',
+    });
+  });
+
+  it('returns null from pairFromLabels when nothing is labelled', () => {
+    expect(pairFromLabels([device('a', ''), device('b', '')])).toBeNull();
+  });
+
+  it('falls back to the first two cameras in selectDualDevicePair (desktop route)', () => {
+    expect(selectDualDevicePair([device('a', ''), device('b', ''), device('c', '')])).toEqual({
+      rearId: 'a',
+      frontId: 'b',
+    });
+  });
+
+  it('ignores non-video devices and empty deviceIds', () => {
+    expect(
+      selectDualDevicePair([
+        device('mic', 'Microphone', 'audioinput'),
+        device('', 'Back Camera'),
+        device('a', ''),
+        device('b', ''),
+      ]),
+    ).toEqual({ rearId: 'a', frontId: 'b' });
+  });
+
+  it('returns null with fewer than two usable cameras', () => {
+    expect(selectDualDevicePair([device('a', 'Back Camera')])).toBeNull();
+    expect(pairFromLabels([device('a', 'Back Camera')])).toBeNull();
+    expect(selectDualDevicePair([])).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Retry predicate + failure details                                   */
+/* ------------------------------------------------------------------ */
+
+describe('isDualRetryableError', () => {
+  it('treats HAL rejections and aborts as step-down errors', () => {
+    for (const name of ['OverconstrainedError', 'NotFoundError', 'NotReadableError', 'AbortError']) {
+      expect(isDualRetryableError({ name })).toBe(true);
+    }
+  });
+
+  it('keeps permission and unknown errors fatal', () => {
+    expect(isDualRetryableError({ name: 'NotAllowedError' })).toBe(false);
+    expect(isDualRetryableError({ name: 'SecurityError' })).toBe(false);
+    expect(isDualRetryableError(null)).toBe(false);
+    expect(isDualRetryableError(undefined)).toBe(false);
+  });
+});
+
+describe('dualFailureDetails', () => {
+  it('composes reason + error name + pairing last tried for a refused second camera', () => {
+    expect(
+      dualFailureDetails({
+        reason: 'front-failed',
+        error: { name: 'NotReadableError' },
+        pairingLabel: 'rear 1080p + front 720p',
+      }),
+    ).toBe('the second camera was refused by the phone (NotReadableError) at rear 1080p + front 720p');
+  });
+
+  it('composes the rear-ended diagnosis without an error name', () => {
+    expect(dualFailureDetails({ reason: 'rear-ended', pairingLabel: 'rear 720p + front 480p' })).toBe(
+      'the main camera stopped when the second camera opened at rear 720p + front 480p',
+    );
+  });
+
+  it('composes rear-failed and unsupported', () => {
+    expect(
+      dualFailureDetails({ reason: 'rear-failed', error: { name: 'NotAllowedError' }, pairingLabel: 'rear 1080p + front 720p' }),
+    ).toBe('the main camera could not be opened (NotAllowedError) at rear 1080p + front 720p');
+    expect(dualFailureDetails({ reason: 'unsupported' })).toBe('this browser does not provide camera access');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* The probe                                                           */
+/* ------------------------------------------------------------------ */
 
 describe('probeDualCamera', () => {
-  it('returns both streams when both tracks stay live, opening rear (environment) before front (user)', async () => {
+  it('opens rear before front, both video-only, settles, and returns both streams on the first pairing', async () => {
     const rear = makeFakeStream();
     const front = makeFakeStream();
     const calls: MediaStreamConstraints[] = [];
+    const delays: number[] = [];
     const getUserMedia = async (c: MediaStreamConstraints) => {
       calls.push(c);
       return calls.length === 1 ? rear.stream : front.stream;
     };
-    const result = await probeDualCamera({ getUserMedia }, rearAttempts(), frontAttempts());
+    const result = await probeDualCamera(
+      probeDeps({
+        getUserMedia,
+        delay: async (ms) => {
+          delays.push(ms);
+        },
+      }),
+      CANVAS,
+    );
     expect(result.available).toBe(true);
     if (result.available) {
       expect(result.rearStream).toBe(rear.stream);
       expect(result.frontStream).toBe(front.stream);
+      expect(result.pairingLabel).toBe('rear 1080p + front 720p');
     }
     expect(calls).toHaveLength(2);
-    expect((calls[0].video as MediaTrackConstraints).facingMode).toBe('environment');
-    expect((calls[1].video as MediaTrackConstraints).facingMode).toBe('user');
+    expect(videoOf(calls[0]).facingMode).toBe('environment');
+    expect(videoOf(calls[1]).facingMode).toBe('user');
+    expect(calls[0].audio).toBe(false);
+    expect(calls[1].audio).toBe(false);
+    // The settle window ran before liveness was judged.
+    expect(delays).toContain(1000);
     expect(rear.track.stopped).toBe(false);
     expect(front.track.stopped).toBe(false);
   });
 
-  it('front failure stops the rear stream and reports front-failed', async () => {
-    const rear = makeFakeStream();
+  it('steps DOWN on a NotReadableError from the front camera instead of dying (the R29 fatal bug)', async () => {
+    const created: Array<ReturnType<typeof makeFakeStream>> = [];
     let call = 0;
     const getUserMedia = async () => {
       call += 1;
-      if (call === 1) return rear.stream;
-      throw { name: 'NotReadableError' };
+      if (call === 2) throw { name: 'NotReadableError' };
+      const s = makeFakeStream();
+      created.push(s);
+      return s.stream;
     };
-    const result = await probeDualCamera({ getUserMedia }, rearAttempts(), frontAttempts());
-    expect(result.available).toBe(false);
-    if (!result.available) expect(result.reason).toBe('front-failed');
-    expect(rear.track.stopped).toBe(true);
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.pairingLabel).toBe('rear 720p + front 720p');
+    // rear(p1), front(p1)✗, rear(p2), front(p2)
+    expect(call).toBe(4);
+    // The first pairing's rear stream was stopped before stepping down.
+    expect(created[0].track.stopped).toBe(true);
   });
 
-  it('a rear track ended by the front opening reports rear-ended and stops both', async () => {
-    const rear = makeFakeStream({ readyState: 'ended' });
-    const front = makeFakeStream();
+  it('steps down when the REAR open is refused with AbortError', async () => {
     let call = 0;
     const getUserMedia = async () => {
       call += 1;
-      return call === 1 ? rear.stream : front.stream;
+      if (call === 1) throw { name: 'AbortError' };
+      return makeFakeStream().stream;
     };
-    const result = await probeDualCamera({ getUserMedia }, rearAttempts(), frontAttempts());
-    expect(result.available).toBe(false);
-    if (!result.available) expect(result.reason).toBe('rear-ended');
-    expect(rear.track.stopped).toBe(true);
-    expect(front.track.stopped).toBe(true);
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.pairingLabel).toBe('rear 720p + front 720p');
+    expect(call).toBe(3);
   });
 
-  it('a rear track muted by the front opening also reports rear-ended', async () => {
+  it('a rear track MUTED after the front opens still passes when frames are flowing (the R29 false negative)', async () => {
     const rear = makeFakeStream({ muted: true });
     const front = makeFakeStream();
     let call = 0;
@@ -191,31 +328,254 @@ describe('probeDualCamera', () => {
       call += 1;
       return call === 1 ? rear.stream : front.stream;
     };
-    const result = await probeDualCamera({ getUserMedia }, rearAttempts(), frontAttempts());
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
+    expect(result.available).toBe(true);
+    expect(rear.track.stopped).toBe(false);
+  });
+
+  it('a rear track live but with NO frames across the window fails as rear-ended after the full ladder', async () => {
+    const created: MediaStream[] = [];
+    const getUserMedia = async () => {
+      const s = makeFakeStream();
+      created.push(s.stream);
+      return s.stream;
+    };
+    // Even-index streams are the rears (opened first each pairing) — they never flow.
+    const framesFlowing = async (s: MediaStream) => created.indexOf(s) % 2 === 1;
+    const result = await probeDualCamera(probeDeps({ getUserMedia, framesFlowing }), CANVAS);
+    expect(result.available).toBe(false);
+    if (!result.available) {
+      expect(result.reason).toBe('rear-ended');
+      expect(result.details).toBe(
+        'the main camera stopped when the second camera opened at rear 720p + front 480p',
+      );
+    }
+    // 3 pairings × 2 opens, everything stopped.
+    expect(created).toHaveLength(6);
+  });
+
+  it('a front track with no frames fails as front-failed with the refused wording', async () => {
+    const created: MediaStream[] = [];
+    const getUserMedia = async () => {
+      const s = makeFakeStream();
+      created.push(s.stream);
+      return s.stream;
+    };
+    const framesFlowing = async (s: MediaStream) => created.indexOf(s) % 2 === 0;
+    const result = await probeDualCamera(probeDeps({ getUserMedia, framesFlowing }), CANVAS);
+    expect(result.available).toBe(false);
+    if (!result.available) {
+      expect(result.reason).toBe('front-failed');
+      expect(result.details).toContain('the second camera was refused by the phone');
+      expect(result.details).toContain('rear 720p + front 480p');
+    }
+  });
+
+  it('an ENDED rear track fails as rear-ended even without a frame probe', async () => {
+    const rear = makeFakeStream({ readyState: 'ended' });
+    const front = makeFakeStream();
+    let call = 0;
+    const getUserMedia = async () => {
+      call += 1;
+      return call % 2 === 1 ? rear.stream : front.stream;
+    };
+    const result = await probeDualCamera(
+      probeDeps({ getUserMedia, framesFlowing: undefined }),
+      CANVAS,
+    );
     expect(result.available).toBe(false);
     if (!result.available) expect(result.reason).toBe('rear-ended');
-    expect(rear.track.stopped).toBe(true);
     expect(front.track.stopped).toBe(true);
   });
 
-  it('a non-retryable rear error fails immediately with exactly one call', async () => {
+  it('a non-retryable rear error fails immediately with exactly one call and full details', async () => {
     let calls = 0;
     const getUserMedia = async () => {
       calls += 1;
       throw { name: 'NotAllowedError' };
     };
-    const result = await probeDualCamera({ getUserMedia }, rearAttempts(), frontAttempts());
+    const result = await probeDualCamera(probeDeps({ getUserMedia }), CANVAS);
     expect(result.available).toBe(false);
-    if (!result.available) expect(result.reason).toBe('rear-failed');
+    if (!result.available) {
+      expect(result.reason).toBe('rear-failed');
+      expect(result.details).toBe(
+        'the main camera could not be opened (NotAllowedError) at rear 1080p + front 720p',
+      );
+    }
     expect(calls).toBe(1);
   });
 
   it('reports unsupported when there is no getUserMedia', async () => {
-    const result = await probeDualCamera({ getUserMedia: null }, rearAttempts(), frontAttempts());
+    const result = await probeDualCamera(probeDeps({ getUserMedia: null }), CANVAS);
     expect(result.available).toBe(false);
-    if (!result.available) expect(result.reason).toBe('unsupported');
+    if (!result.available) {
+      expect(result.reason).toBe('unsupported');
+      expect(result.details).toBe('this browser does not provide camera access');
+    }
+  });
+
+  it('uses label-exact deviceIds from the start when enumeration reveals them', async () => {
+    const calls: MediaStreamConstraints[] = [];
+    const getUserMedia = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      return makeFakeStream().stream;
+    };
+    const enumerateDevices = async () =>
+      [device('cam-front', 'Front Camera'), device('cam-back', 'Back Camera')] as unknown as MediaDeviceInfo[];
+    const result = await probeDualCamera(probeDeps({ getUserMedia, enumerateDevices }), CANVAS);
+    expect(result.available).toBe(true);
+    expect(videoOf(calls[0]).deviceId).toEqual({ exact: 'cam-back' });
+    expect(videoOf(calls[1]).deviceId).toEqual({ exact: 'cam-front' });
+  });
+
+  it('refines to label-exact ids after the first open when the rear is the right camera', async () => {
+    const calls: MediaStreamConstraints[] = [];
+    let enumCalls = 0;
+    const enumerateDevices = async () => {
+      enumCalls += 1;
+      return (enumCalls === 1
+        ? [device('cam-back', ''), device('cam-front', '')]
+        : [device('cam-back', 'Back Camera'), device('cam-front', 'Front Camera')]) as unknown as MediaDeviceInfo[];
+    };
+    const getUserMedia = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      // The facingMode rear open lands on cam-back (its real id).
+      return makeFakeStream({ deviceId: calls.length === 1 ? 'cam-back' : undefined }).stream;
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia, enumerateDevices }), CANVAS);
+    expect(result.available).toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(videoOf(calls[0]).facingMode).toBe('environment');
+    // The front open used the refined exact id.
+    expect(videoOf(calls[1]).deviceId).toEqual({ exact: 'cam-front' });
+  });
+
+  it('reopens the rear by exact id when facingMode landed on the WRONG physical camera', async () => {
+    const made: Array<ReturnType<typeof makeFakeStream>> = [];
+    let enumCalls = 0;
+    const enumerateDevices = async () => {
+      enumCalls += 1;
+      return (enumCalls === 1
+        ? [device('cam-back', ''), device('cam-front', '')]
+        : [device('cam-back', 'Back Camera'), device('cam-front', 'Front Camera')]) as unknown as MediaDeviceInfo[];
+    };
+    const getUserMedia = async () => {
+      const s = makeFakeStream({ deviceId: made.length === 0 ? 'cam-ultrawide' : undefined });
+      made.push(s);
+      return s.stream;
+    };
+    const calls: MediaStreamConstraints[] = [];
+    const recordingGum = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      return getUserMedia();
+    };
+    const result = await probeDualCamera(
+      probeDeps({ getUserMedia: recordingGum, enumerateDevices }),
+      CANVAS,
+    );
+    expect(result.available).toBe(true);
+    // rear(facingMode) → stopped → rear(exact) → front(exact)
+    expect(calls).toHaveLength(3);
+    expect(made[0].track.stopped).toBe(true);
+    expect(videoOf(calls[1]).deviceId).toEqual({ exact: 'cam-back' });
+    expect(videoOf(calls[2]).deviceId).toEqual({ exact: 'cam-front' });
+  });
+
+  it('falls back to first-two deviceId pairing when the whole facingMode ladder fails (desktop route)', async () => {
+    const calls: MediaStreamConstraints[] = [];
+    const enumerateDevices = async () =>
+      [device('dev-0', ''), device('dev-1', '')] as unknown as MediaDeviceInfo[];
+    const getUserMedia = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      const video = videoOf(c);
+      const deviceIdExact = (video.deviceId as { exact?: string } | undefined)?.exact;
+      const isFrontAsk = video.facingMode === 'user' || deviceIdExact === 'dev-1';
+      const isDeviceIdAsk = !!video.deviceId;
+      // Front refuses under facingMode at every pairing; succeeds by deviceId.
+      if (isFrontAsk && !isDeviceIdAsk) throw { name: 'OverconstrainedError' };
+      return makeFakeStream().stream;
+    };
+    const result = await probeDualCamera(probeDeps({ getUserMedia, enumerateDevices }), CANVAS);
+    expect(result.available).toBe(true);
+    // 3 facingMode pairings × 2 calls + 2 deviceId calls.
+    expect(calls).toHaveLength(8);
+    expect(videoOf(calls[6]).deviceId).toEqual({ exact: 'dev-0' });
+    expect(videoOf(calls[7]).deviceId).toEqual({ exact: 'dev-1' });
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Mic (separate, last)                                                */
+/* ------------------------------------------------------------------ */
+
+describe('attachMicrophone', () => {
+  it('merges the mic track onto the rear stream', async () => {
+    const rear = makeFakeStream();
+    const mic = makeMicStream();
+    const calls: MediaStreamConstraints[] = [];
+    const getUserMedia = async (c: MediaStreamConstraints) => {
+      calls.push(c);
+      return mic.stream;
+    };
+    const result = await attachMicrophone(getUserMedia, rear.stream);
+    expect(result.ok).toBe(true);
+    expect(calls).toEqual([{ audio: true }]);
+    expect(rear.audioTracks).toContain(mic.track);
+  });
+
+  it('reports failure without throwing, leaving the rear stream silent (dual proceeds)', async () => {
+    const rear = makeFakeStream();
+    const getUserMedia = async () => {
+      throw { name: 'NotAllowedError' };
+    };
+    const result = await attachMicrophone(getUserMedia, rear.stream);
+    expect(result.ok).toBe(false);
+    expect(rear.audioTracks).toHaveLength(0);
+  });
+
+  it('reports failure when getUserMedia is unavailable', async () => {
+    const rear = makeFakeStream();
+    expect((await attachMicrophone(null, rear.stream)).ok).toBe(false);
+    expect((await attachMicrophone(undefined, rear.stream)).ok).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Best-effort rear raise                                              */
+/* ------------------------------------------------------------------ */
+
+describe('tryRaiseRearResolution', () => {
+  it('applies 1440p-class ideal constraints to the rear track', async () => {
+    const rear = makeFakeStream();
+    const applied: MediaTrackConstraints[] = [];
+    rear.track.applyConstraints = async (c) => {
+      applied.push(c);
+    };
+    expect(await tryRaiseRearResolution(rear.stream, 1080, 1920)).toBe(true);
+    expect(applied).toHaveLength(1);
+    // 9:16 canvas at short side 1440 → 1440 × 2560.
+    expect(applied[0].width).toEqual({ ideal: 1440 });
+    expect(applied[0].height).toEqual({ ideal: 2560 });
+  });
+
+  it('swallows a refusal and reports false', async () => {
+    const rear = makeFakeStream();
+    rear.track.applyConstraints = async () => {
+      throw { name: 'NotReadableError' };
+    };
+    expect(await tryRaiseRearResolution(rear.stream, 1080, 1920)).toBe(false);
+  });
+
+  it('reports false when the track has no applyConstraints', async () => {
+    const rear = makeFakeStream();
+    rear.track.applyConstraints = undefined;
+    expect(await tryRaiseRearResolution(rear.stream, 1080, 1920)).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Start alignment (unchanged from R29)                                */
+/* ------------------------------------------------------------------ */
 
 describe('dual start alignment', () => {
   it('dualStartDeltaMs is front start minus rear start', () => {
@@ -235,8 +595,8 @@ describe('dual start alignment', () => {
   });
 });
 
-describe('recorder config for the dual front stream (documentation)', () => {
-  it('the front stream at its 1080 cap records at the 10 Mbps HD tier', () => {
+describe('recorder config for the dual streams (documentation)', () => {
+  it('a 1080p-class stream records at the 10 Mbps HD tier', () => {
     expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080 }).videoBitsPerSecond).toBe(10_000_000);
   });
 });

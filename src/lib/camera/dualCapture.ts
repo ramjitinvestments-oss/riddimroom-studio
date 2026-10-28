@@ -1,200 +1,301 @@
 /**
- * Pure dual-camera capture logic for R29 — one-button recording with
- * BOTH cameras at once (rear/main + front PiP).
+ * Pure dual-camera capture logic — one-button recording with BOTH
+ * cameras at once (rear/main + front PiP). R29 shipped the first
+ * version; R30 is the probe-v2 fix after R29 failed on the owner's
+ * Android with the honest fallback banner.
  *
- * Kept separate from the capture component so the stepped-down
- * constraint ladders, the dual-camera availability probe and the
- * start-alignment maths are unit-testable without a DOM or real
- * cameras — same split as `captureQuality.ts` (R24), which this
- * module builds on and never duplicates.
+ * Kept separate from the capture component so the pairing ladder, the
+ * dual-camera availability probe and the start-alignment maths are
+ * unit-testable without a DOM or real cameras — same split as
+ * `captureQuality.ts` (R24), which this module builds on and never
+ * duplicates. Everything here is scoped to the DUAL path: nothing in
+ * this module is used by single-camera capture, whose behaviour is
+ * byte-identical to before.
  *
- * WHY dual capture needs its own ladders: running two camera streams
- * at once is the most demanding thing `getUserMedia` can be asked to
- * do. A phone that happily gives a single camera 4K may refuse, kill
- * or silently mute one stream when a second camera opens — especially
- * at high resolution / frame rate. So dual capture deliberately asks
- * for LESS than single capture: every rear rung is stepped one
- * resolution tier down from the R24 ladder, and the front camera
- * (a small PiP overlay, where detail matters least) is capped at
- * 1080 with a 720 fallback and carries NO audio — the microphone is
- * recorded once, on the rear/main stream only, so the two files can
- * never carry competing / echoing soundtracks.
+ * WHAT R29 GOT WRONG (root causes, from the AOSP concurrent-streaming
+ * guarantees + the shipped code):
+ * 1. Android only GUARANTEES concurrent camera streams at modest
+ *    sizes — the mandatory concurrent combinations cap a pair at
+ *    roughly 720p + 1440p, and only on devices that advertise
+ *    concurrent support at all. R29's ladders floored at 1080 for
+ *    BOTH cameras and preserved 60fps rungs — outside the envelope.
+ * 2. A camera-HAL rejection of an oversized concurrent combo
+ *    surfaces as `NotReadableError`, which the single-camera ladder
+ *    predicate treats as FATAL — so R29's probe died on its first
+ *    too-big ask instead of stepping down to a pairing that works.
+ * 3. R29 judged the rear track's `muted` flag in the same tick the
+ *    front camera opened. Phones commonly mute/pause the first track
+ *    briefly while the second camera configures, then recover — a
+ *    false 'rear-ended' on hardware that was about to work.
+ * 4. The mic rode inside the big rear `getUserMedia` call
+ *    (`audio: true`); under concurrency the combined audio+video
+ *    configuration can be rejected wholesale, killing both cameras
+ *    for the microphone's sake.
+ * 5. `facingMode` alone can pair the wrong physical sensor on
+ *    multi-rear-lens phones; exact `deviceId` pairing is reliable
+ *    once permission has revealed the device labels.
  *
- * WHY a probe at all: some platforms (notably older/single-camera-at-
- * a-time hardware paths) let the second `getUserMedia` succeed while
- * quietly ending or muting the FIRST stream. Opening both and then
- * checking the first track is still live is the only reliable way to
- * know dual capture really worked — see `probeDualCamera`.
+ * THE R30 SHAPE: both cameras open VIDEO-ONLY, low-first, inside the
+ * guaranteed envelope (rear 1080p + front 720p, descending), all at
+ * 30fps. HAL rejections step DOWN the pairing ladder instead of
+ * dying. Liveness is judged AFTER a settle window by FRAME FLOW, not
+ * by the muted flag alone. The microphone is fetched LAST, on its own
+ * audio-only call, and merged onto the rear stream — if the mic call
+ * fails, dual video proceeds silently rather than not at all. And a
+ * failed probe reports a plain-words `details` line (reason + error
+ * name + pairing last tried) so the next field report is precise.
  *
  * $0 rule: no dependencies, only the platform `getUserMedia` API the
  * capture component already used.
  */
 
-import {
-  buildCaptureAttempts,
-  dimensionsForShortSide,
-  isLadderRetryableError,
-} from './captureQuality';
-import type { CaptureAttempt, CaptureFpsChoice, CaptureQualityChoice } from './captureQuality';
+import { dimensionsForShortSide } from './captureQuality';
 
 /**
  * Shown when dual capture is not available on this device/browser and
  * recording falls back to a single camera. Wording is plain and says
  * what happened AND what happens instead — the user tapped "both
  * cameras", so silence or a technical error would read as a bug.
+ * (Unchanged from R29 — the banner's main sentence does not move.)
  */
 export const DUAL_UNAVAILABLE_MESSAGE =
   "This phone can't run both cameras at once in the browser — recording with one camera instead";
 
 /**
- * One resolution tier below `shortSide`, floored at 1080: 2160 steps
- * to 1440, 1440 steps to 1080, and 1080 (or anything lower) stays at
- * the 1080 floor — dual capture never asks a rung below HD, and never
- * keeps a flagship rung the hardware would struggle to sustain twice.
+ * Shown (in dual mode) when both cameras work but the separate
+ * microphone call failed: dual recording proceeds WITHOUT sound, and
+ * the user is told so before they rely on the audio.
  */
-function steppedDownShortSide(shortSide: number): number {
-  if (shortSide > 1440) return 1440;
-  if (shortSide > 1080) return 1080;
-  return 1080;
+export const DUAL_MIC_UNAVAILABLE_MESSAGE =
+  'Microphone unavailable — recording both cameras without sound';
+
+/* ------------------------------------------------------------------ */
+/* Device pairing (exact deviceIds)                                    */
+/* ------------------------------------------------------------------ */
+
+/** The structural slice of `MediaDeviceInfo` the pairing logic needs. */
+export type DualDeviceInfo = Pick<MediaDeviceInfo, 'deviceId' | 'kind' | 'label'>;
+
+/** An exact front/back camera pair, by `deviceId`. */
+export interface DualDevicePair {
+  rearId: string;
+  frontId: string;
+}
+
+const REAR_LABEL_HINT = /back|rear|environment/i;
+const FRONT_LABEL_HINT = /front|user|selfie/i;
+
+function usableVideoInputs(devices: DualDeviceInfo[]): DualDeviceInfo[] {
+  return devices.filter((d) => d.kind === 'videoinput' && !!d.deviceId);
 }
 
 /**
- * Build one attempt with constraints shaped exactly like
- * `captureQuality`'s internal `attemptFor` (width/height/aspectRatio/
- * frameRate all `{ ideal }`, never exact/min — a device that can't hit
- * a rung negotiates its closest match instead of rejecting outright),
- * but with an explicit audio flag: the rear ladder keeps the mic, the
- * front ladder must not ask for it.
+ * Pair the cameras by their LABELS only (Android Chrome labels read
+ * like "Back Camera" / "Front Camera" once permission is granted).
+ * Returns null when the labels identify neither side — pre-permission
+ * enumerations carry blank labels, and guessing from a half-labelled
+ * list is still better than guessing blind: when exactly one side is
+ * labelled, the other side is the first remaining camera.
  */
-function dualAttemptFor(
+export function pairFromLabels(devices: DualDeviceInfo[]): DualDevicePair | null {
+  const vids = usableVideoInputs(devices);
+  if (vids.length < 2) return null;
+  const rear = vids.find((d) => REAR_LABEL_HINT.test(d.label ?? ''));
+  const front = vids.find((d) => d !== rear && FRONT_LABEL_HINT.test(d.label ?? ''));
+  if (rear && front) return { rearId: rear.deviceId, frontId: front.deviceId };
+  if (rear) {
+    const other = vids.find((d) => d !== rear);
+    if (other) return { rearId: rear.deviceId, frontId: other.deviceId };
+  }
+  if (front) {
+    const other = vids.find((d) => d !== front);
+    if (other) return { rearId: other.deviceId, frontId: front.deviceId };
+  }
+  return null;
+}
+
+/**
+ * The deviceId pair to try: label pairing when the labels say
+ * anything, otherwise the first two cameras (the desktop case — two
+ * webcams rarely label themselves front/back, and R29's pairing
+ * behaved exactly this way). Null when fewer than two usable cameras
+ * exist.
+ */
+export function selectDualDevicePair(devices: DualDeviceInfo[]): DualDevicePair | null {
+  const vids = usableVideoInputs(devices);
+  if (vids.length < 2) return null;
+  return pairFromLabels(vids) ?? { rearId: vids[0].deviceId, frontId: vids[1].deviceId };
+}
+
+/* ------------------------------------------------------------------ */
+/* Pairing ladder (low-first, video-only, 30fps)                       */
+/* ------------------------------------------------------------------ */
+
+/** One rung of the dual ladder: a rear/front size pairing + its constraints. */
+export interface DualPairing {
+  /** Plain-words description for diagnostics, e.g. "rear 1080p + front 720p". */
+  label: string;
+  rearShortSide: number;
+  frontShortSide: number;
+  /** VIDEO-ONLY constraints (`audio: false` — the mic is fetched separately, last). */
+  rearConstraints: MediaStreamConstraints;
+  frontConstraints: MediaStreamConstraints;
+}
+
+/**
+ * The dual pairings, in try-order — all inside (then below) the
+ * concurrent-stream envelope Android guarantees, all 30fps (60fps
+ * concurrent pairings are essentially never guaranteed). Descending:
+ * if the phone refuses a pairing, the next one asks for less.
+ */
+const DUAL_PAIRING_SIZES: ReadonlyArray<{ rear: number; front: number }> = [
+  { rear: 1080, front: 720 },
+  { rear: 720, front: 720 },
+  { rear: 720, front: 480 },
+];
+
+function dualVideoOnlyConstraints(
+  selector: { deviceId: string } | { facingMode: 'user' | 'environment' },
   canvasWidth: number,
   canvasHeight: number,
-  facingMode: 'user' | 'environment',
   shortSide: number,
-  frameRate: number,
-  isFallback: boolean,
-  audio: boolean,
-): CaptureAttempt {
+): MediaStreamConstraints {
   const dims = dimensionsForShortSide(canvasWidth, canvasHeight, shortSide);
-  return {
-    shortSide,
-    frameRate,
-    isFallback,
-    constraints: {
-      video: {
-        facingMode,
-        width: { ideal: dims.width },
-        height: { ideal: dims.height },
-        aspectRatio: { ideal: dims.ratio },
-        frameRate: { ideal: frameRate },
-      },
-      audio,
-    },
+  const video: MediaTrackConstraints = {
+    // "ideal", never "exact"/"min" — a device that can't hit a rung
+    // negotiates its closest match instead of rejecting outright.
+    width: { ideal: dims.width },
+    height: { ideal: dims.height },
+    aspectRatio: { ideal: dims.ratio },
+    frameRate: { ideal: 30 },
   };
+  if ('deviceId' in selector) {
+    video.deviceId = { exact: selector.deviceId };
+  } else {
+    video.facingMode = selector.facingMode;
+  }
+  return { video, audio: false };
 }
 
 /**
- * Rebuild each attempt one resolution tier lower (see
- * `steppedDownShortSide`), preserving the attempt's facing mode, frame
- * rate and audio flag.
- *
- * Stepping down can make neighbouring rungs identical — e.g. the
- * single-camera 1440@60 and 1080@60 rungs both become 1080@60. Asking
- * `getUserMedia` the exact same question twice wastes a (possibly
- * slow, permission-prompting) call and gains nothing, so consecutive
- * duplicates (same short side AND frame rate as the previous kept
- * attempt) are dropped. After dedupe, exactly the LAST kept attempt
- * is flagged `isFallback` — the fallback flag describes position in
- * THIS ladder, not the source ladder.
- *
- * Never returns an empty array: an empty input still yields one
- * permissive 1080@30 fallback rung, so a caller walking the ladder
- * always has something to try.
+ * Build the pairing ladder. Without a device pair, cameras are
+ * selected by `facingMode` (the only option before permission reveals
+ * labels/ids); with a pair, both constraints name the exact
+ * `deviceId` — the reliable route on multi-lens phones and desktops.
  */
-export function stepDownCaptureAttempts(
-  attempts: CaptureAttempt[],
-  canvasWidth: number,
-  canvasHeight: number,
-): CaptureAttempt[] {
-  if (attempts.length === 0) {
-    return [dualAttemptFor(canvasWidth, canvasHeight, 'environment', 1080, 30, true, true)];
-  }
-  const kept: CaptureAttempt[] = [];
-  for (const attempt of attempts) {
-    const video = attempt.constraints.video;
-    const facingMode =
-      video && typeof video === 'object' ? (video as MediaTrackConstraints).facingMode : undefined;
-    const facing: 'user' | 'environment' = facingMode === 'user' ? 'user' : 'environment';
-    const newShortSide = steppedDownShortSide(attempt.shortSide);
-    const previous = kept[kept.length - 1];
-    if (previous && previous.shortSide === newShortSide && previous.frameRate === attempt.frameRate) {
-      continue;
-    }
-    kept.push(
-      dualAttemptFor(
-        canvasWidth,
-        canvasHeight,
-        facing,
-        newShortSide,
-        attempt.frameRate,
-        false,
-        attempt.constraints.audio === true,
-      ),
-    );
-  }
-  // `kept` cannot be empty here (the first attempt is always kept),
-  // but guard anyway so the never-empty contract holds by construction.
-  if (kept.length === 0) {
-    return [dualAttemptFor(canvasWidth, canvasHeight, 'environment', 1080, 30, true, true)];
-  }
-  kept[kept.length - 1].isFallback = true;
-  return kept;
+export function buildDualPairings(
+  opts: { canvasWidth: number; canvasHeight: number },
+  pair?: DualDevicePair | null,
+): DualPairing[] {
+  return DUAL_PAIRING_SIZES.map(({ rear, front }) => ({
+    label: `rear ${rear}p + front ${front}p`,
+    rearShortSide: rear,
+    frontShortSide: front,
+    rearConstraints: dualVideoOnlyConstraints(
+      pair ? { deviceId: pair.rearId } : { facingMode: 'environment' },
+      opts.canvasWidth,
+      opts.canvasHeight,
+      rear,
+    ),
+    frontConstraints: dualVideoOnlyConstraints(
+      pair ? { deviceId: pair.frontId } : { facingMode: 'user' },
+      opts.canvasWidth,
+      opts.canvasHeight,
+      front,
+    ),
+  }));
 }
 
+/* ------------------------------------------------------------------ */
+/* Errors + failure details                                            */
+/* ------------------------------------------------------------------ */
+
 /**
- * The REAR (main) camera ladder for dual capture: the user's chosen
- * single-camera quality/fps ladder (R24), stepped one tier down, on
- * the `environment` camera. Audio stays true — this stream carries
- * THE microphone for the whole dual recording.
+ * Errors that mean "this pairing doesn't fit — step down", on the
+ * DUAL path only. Deliberately wider than the single-camera
+ * predicate (`isLadderRetryableError`, untouched): a HAL rejection
+ * of a concurrent combo arrives as `NotReadableError`, and a raced
+ * camera-service abort as `AbortError` — both can succeed at a
+ * smaller pairing. `NotAllowedError` (permission) stays fatal:
+ * no pairing fixes a denial.
  */
-export function buildDualRearAttempts(opts: {
-  canvasWidth: number;
-  canvasHeight: number;
-  quality: CaptureQualityChoice;
-  frameRate: CaptureFpsChoice;
-}): CaptureAttempt[] {
-  return stepDownCaptureAttempts(
-    buildCaptureAttempts({ ...opts, facingMode: 'environment' }),
-    opts.canvasWidth,
-    opts.canvasHeight,
+export function isDualRetryableError(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  return (
+    name === 'OverconstrainedError' ||
+    name === 'NotFoundError' ||
+    name === 'NotReadableError' ||
+    name === 'AbortError'
   );
 }
 
-/**
- * The FRONT (PiP) camera ladder for dual capture: VIDEO ONLY on every
- * rung (`audio: false` — the mic lives on the rear stream), `user`
- * facing, 30fps, 1080 short side then a 720 fallback. The front clip
- * plays as a small overlay, so resolution buys little here — asking
- * for less is what makes room (bandwidth, encoder, thermals) for the
- * main camera to hold its own stream.
- */
-export function buildDualFrontAttempts(opts: {
-  canvasWidth: number;
-  canvasHeight: number;
-}): CaptureAttempt[] {
-  return [
-    dualAttemptFor(opts.canvasWidth, opts.canvasHeight, 'user', 1080, 30, false, false),
-    dualAttemptFor(opts.canvasWidth, opts.canvasHeight, 'user', 720, 30, true, false),
-  ];
+export type DualProbeFailureReason = 'unsupported' | 'rear-failed' | 'front-failed' | 'rear-ended';
+
+export interface DualProbeFailure {
+  reason: DualProbeFailureReason;
+  error?: unknown;
+  /** Label of the pairing being tried when the failure settled, e.g. "rear 720p + front 480p". */
+  pairingLabel?: string;
 }
 
+/**
+ * Compose the plain-words details line for a failed probe — the
+ * banner's small print and the console log carry the same string.
+ * Names WHAT failed, the platform error name when there is one, and
+ * the pairing last tried, so a field report ("it failed again")
+ * becomes a diagnosis instead of a shrug.
+ */
+export function dualFailureDetails(failure: DualProbeFailure): string {
+  const errName = (failure.error as { name?: string } | null | undefined)?.name;
+  const errPart = errName ? ` (${errName})` : '';
+  const atPart = failure.pairingLabel ? ` at ${failure.pairingLabel}` : '';
+  switch (failure.reason) {
+    case 'unsupported':
+      return 'this browser does not provide camera access';
+    case 'rear-failed':
+      return `the main camera could not be opened${errPart}${atPart}`;
+    case 'front-failed':
+      return `the second camera was refused by the phone${errPart}${atPart}`;
+    case 'rear-ended':
+      return `the main camera stopped when the second camera opened${atPart}`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* The probe                                                           */
+/* ------------------------------------------------------------------ */
+
 export type DualProbeResult =
-  | { available: true; rearStream: MediaStream; frontStream: MediaStream }
+  | { available: true; rearStream: MediaStream; frontStream: MediaStream; pairingLabel: string }
   | {
       available: false;
-      reason: 'unsupported' | 'rear-failed' | 'front-failed' | 'rear-ended';
+      reason: DualProbeFailureReason;
       error?: unknown;
+      pairingLabel?: string;
+      /** Plain-words diagnosis — see `dualFailureDetails`. */
+      details: string;
     };
+
+export interface DualProbeDeps {
+  getUserMedia: ((c: MediaStreamConstraints) => Promise<MediaStream>) | null | undefined;
+  /** Optional — enables exact deviceId pairing (labels / desktop fallback). */
+  enumerateDevices?: (() => Promise<MediaDeviceInfo[]>) | null | undefined;
+  /** Injectable for tests; defaults to a real timer. */
+  delay?: (ms: number) => Promise<void>;
+  /**
+   * Injectable FRAME-FLOW check: resolves true when the stream's
+   * video is actually presenting frames. The component supplies a
+   * `requestVideoFrameCallback`-based implementation. When absent
+   * (or if it throws), liveness falls back to readyState + the muted
+   * flag — evaluated AFTER the settle window, never in the same tick
+   * the second camera opened (the R29 false-negative).
+   */
+  framesFlowing?: ((stream: MediaStream) => Promise<boolean>) | null | undefined;
+  /** How long to let both cameras settle before judging liveness. Default 1000ms. */
+  settleMs?: number;
+  /** Pause between pairing rungs after a retryable rejection. Default 300ms. */
+  backoffMs?: number;
+}
 
 function stopStream(stream: MediaStream): void {
   try {
@@ -205,93 +306,252 @@ function stopStream(stream: MediaStream): void {
   }
 }
 
-function isTrackLive(track: MediaStreamTrack | undefined): boolean {
-  return !!track && track.readyState === 'live' && track.muted === false;
-}
-
-/**
- * Walk one ladder: try each rung in order, moving to the next rung
- * ONLY on a ladder-retryable error (this rung doesn't fit — see
- * `isLadderRetryableError`). Any other error (permission denied, no
- * such camera, device busy…) fails immediately — retrying a different
- * resolution cannot fix it, and extra calls just burn time and calls
- * the tests/users can observe. Throws the last / fatal error.
- */
-async function openLadder(
-  getUserMedia: (c: MediaStreamConstraints) => Promise<MediaStream>,
-  attempts: CaptureAttempt[],
-): Promise<MediaStream> {
-  let lastError: unknown;
-  for (const attempt of attempts) {
-    try {
-      return await getUserMedia(attempt.constraints);
-    } catch (err) {
-      lastError = err;
-      if (!isLadderRetryableError(err)) throw err;
-    }
-  }
-  throw lastError;
+function failureResult(failure: DualProbeFailure): DualProbeResult {
+  return {
+    available: false,
+    reason: failure.reason,
+    error: failure.error,
+    pairingLabel: failure.pairingLabel,
+    details: dualFailureDetails(failure),
+  };
 }
 
 /**
  * Probe whether this device/browser can really run both cameras at
  * once, opening the streams the recording will use if it can.
  *
- * Order matters: the REAR stream opens first (it is the main picture
- * and the mic owner), then the FRONT. If the front cannot open, the
- * rear stream is stopped before returning — a failed probe must never
- * leak a live camera. After both are open, both video tracks are
- * checked for liveness: on single-camera-at-a-time platforms the
- * front opening silently ends/mutes the rear track, which is reported
- * as 'rear-ended' (distinct from the front simply failing) and BOTH
- * streams are stopped. On success the streams are NOT stopped —
- * ownership passes to the caller, which records from them directly
- * (re-opening would re-run the very race the probe just settled).
+ * Flow: select by label-exact deviceIds when an enumeration already
+ * reveals them, else by `facingMode`. Walk the pairing ladder
+ * (low-first); a retryable rejection steps down with a short backoff
+ * instead of failing. After the first successful rear open
+ * (permission now exists, so labels are readable), refine the
+ * selectors to the label-exact pair — reopening the rear only if it
+ * turns out to be the wrong physical camera. Once both streams are
+ * open, WAIT out the settle window, then judge liveness by frame
+ * flow: ended or zero-frames fails; live-with-frames passes even if
+ * the track still flags muted. If the whole facingMode ladder fails
+ * without a permission denial and 2+ cameras exist, retry the ladder
+ * once with first-two deviceId pairing (the desktop route). On
+ * success the streams are NOT stopped — ownership passes to the
+ * caller. On failure every opened track is stopped.
  */
 export async function probeDualCamera(
-  deps: {
-    getUserMedia: ((c: MediaStreamConstraints) => Promise<MediaStream>) | null | undefined;
-  },
-  rearAttempts: CaptureAttempt[],
-  frontAttempts: CaptureAttempt[],
+  deps: DualProbeDeps,
+  opts: { canvasWidth: number; canvasHeight: number },
 ): Promise<DualProbeResult> {
   const getUserMedia = deps.getUserMedia;
   if (!getUserMedia) {
-    return { available: false, reason: 'unsupported' };
+    return failureResult({ reason: 'unsupported' });
   }
+  const delay = deps.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const settleMs = deps.settleMs ?? 1000;
+  const backoffMs = deps.backoffMs ?? 300;
+  const framesFlowing = deps.framesFlowing ?? null;
 
-  let rearStream: MediaStream;
-  try {
-    rearStream = await openLadder(getUserMedia, rearAttempts);
-  } catch (err) {
-    return { available: false, reason: 'rear-failed', error: err };
-  }
+  const tryEnumerate = async (): Promise<MediaDeviceInfo[] | null> => {
+    if (!deps.enumerateDevices) return null;
+    try {
+      return await deps.enumerateDevices();
+    } catch {
+      return null;
+    }
+  };
 
-  let frontStream: MediaStream;
-  try {
-    frontStream = await openLadder(getUserMedia, frontAttempts);
-  } catch (err) {
-    stopStream(rearStream);
-    return { available: false, reason: 'front-failed', error: err };
-  }
+  const trackAlive = async (stream: MediaStream): Promise<boolean> => {
+    const track = stream.getVideoTracks()[0];
+    if (!track || track.readyState !== 'live') return false;
+    if (framesFlowing) {
+      try {
+        return await framesFlowing(stream);
+      } catch {
+        // A broken frame probe must not convict a live camera — fall
+        // through to the post-settle muted check.
+      }
+    }
+    return track.muted === false;
+  };
 
-  const rearLive = isTrackLive(rearStream.getVideoTracks()[0]);
-  const frontLive = isTrackLive(frontStream.getVideoTracks()[0]);
-  if (!rearLive) {
-    // The classic single-camera-at-a-time behaviour: opening the
-    // front camera killed (ended or muted) the rear one.
-    stopStream(rearStream);
-    stopStream(frontStream);
-    return { available: false, reason: 'rear-ended' };
-  }
-  if (!frontLive) {
-    stopStream(rearStream);
-    stopStream(frontStream);
-    return { available: false, reason: 'front-failed' };
-  }
+  /**
+   * Run the pairing ladder with one selector strategy.
+   * `allowRefine` lets the ladder upgrade itself to label-exact
+   * deviceIds after the first rear open (see the flow notes above).
+   */
+  const runPairingLadder = async (
+    initialPair: DualDevicePair | null,
+    allowRefine: boolean,
+  ): Promise<DualProbeResult> => {
+    let pair = initialPair;
+    let pairings = buildDualPairings(opts, pair);
+    let refined = !allowRefine;
+    let lastFailure: DualProbeFailure = { reason: 'rear-failed' };
+    let idx = 0;
+    while (idx < pairings.length) {
+      // REAR (main) first — it is the primary picture.
+      let rearStream: MediaStream;
+      try {
+        rearStream = await getUserMedia(pairings[idx].rearConstraints);
+      } catch (err) {
+        lastFailure = { reason: 'rear-failed', error: err, pairingLabel: pairings[idx].label };
+        if (!isDualRetryableError(err)) return failureResult(lastFailure);
+        idx += 1;
+        if (idx < pairings.length) await delay(backoffMs);
+        continue;
+      }
 
-  return { available: true, rearStream, frontStream };
+      // Permission exists now: labels are readable. If we opened by
+      // facingMode and a label-exact pair emerges, adopt it — for the
+      // front immediately, and for the rear by reopening ONLY when
+      // the stream we got is a different physical camera.
+      if (!refined) {
+        refined = true;
+        if (!pair) {
+          const fresh = await tryEnumerate();
+          const labelPair = fresh ? pairFromLabels(fresh) : null;
+          if (labelPair) {
+            pair = labelPair;
+            pairings = buildDualPairings(opts, pair);
+            const actualRearId = rearStream.getVideoTracks()[0]?.getSettings?.().deviceId;
+            if (actualRearId !== labelPair.rearId) {
+              stopStream(rearStream);
+              idx = 0;
+              continue;
+            }
+          }
+        }
+      }
+
+      // FRONT (PiP) second, without closing the rear.
+      let frontStream: MediaStream;
+      try {
+        frontStream = await getUserMedia(pairings[idx].frontConstraints);
+      } catch (err) {
+        stopStream(rearStream);
+        lastFailure = { reason: 'front-failed', error: err, pairingLabel: pairings[idx].label };
+        if (!isDualRetryableError(err)) return failureResult(lastFailure);
+        idx += 1;
+        if (idx < pairings.length) await delay(backoffMs);
+        continue;
+      }
+
+      // SETTLE, then judge by frame flow — never in the opening tick.
+      await delay(settleMs);
+      if (!(await trackAlive(rearStream))) {
+        // The classic single-camera-at-a-time behaviour: opening the
+        // front camera ended the rear one (or it never produced a
+        // frame). A smaller pairing may still revive it — step down.
+        stopStream(rearStream);
+        stopStream(frontStream);
+        lastFailure = { reason: 'rear-ended', pairingLabel: pairings[idx].label };
+        idx += 1;
+        if (idx < pairings.length) await delay(backoffMs);
+        continue;
+      }
+      if (!(await trackAlive(frontStream))) {
+        stopStream(rearStream);
+        stopStream(frontStream);
+        lastFailure = { reason: 'front-failed', pairingLabel: pairings[idx].label };
+        idx += 1;
+        if (idx < pairings.length) await delay(backoffMs);
+        continue;
+      }
+
+      return { available: true, rearStream, frontStream, pairingLabel: pairings[idx].label };
+    }
+    return failureResult(lastFailure);
+  };
+
+  const initialDevices = await tryEnumerate();
+  const labelPair = initialDevices ? pairFromLabels(initialDevices) : null;
+  const first = await runPairingLadder(labelPair, !labelPair);
+  if (first.available) return first;
+
+  // Desktop fallback: the facingMode ladder failed (but NOT on a
+  // permission denial — retrying cannot fix that) and the device has
+  // 2+ cameras: pair the first two by exact deviceId and run the
+  // ladder once more.
+  if (!labelPair && deps.enumerateDevices) {
+    const errName = (first.error as { name?: string } | null | undefined)?.name;
+    if (errName !== 'NotAllowedError') {
+      const devices = await tryEnumerate();
+      const pair = devices ? selectDualDevicePair(devices) : null;
+      if (pair) {
+        const second = await runPairingLadder(pair, false);
+        if (second.available) return second;
+        return second;
+      }
+    }
+  }
+  return first;
 }
+
+/* ------------------------------------------------------------------ */
+/* Mic (last, separate) + best-effort rear raise                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fetch the microphone on its OWN audio-only call and merge its
+ * track onto the (video-only) rear stream, so the rear MediaRecorder
+ * captures picture + sound exactly as a single merged stream. Never
+ * throws: on any failure the caller proceeds with silent dual video
+ * and shows `DUAL_MIC_UNAVAILABLE_MESSAGE`.
+ */
+export async function attachMicrophone(
+  getUserMedia: ((c: MediaStreamConstraints) => Promise<MediaStream>) | null | undefined,
+  rearStream: MediaStream,
+): Promise<{ ok: boolean; error?: unknown }> {
+  if (!getUserMedia) return { ok: false };
+  try {
+    const micStream = await getUserMedia({ audio: true });
+    const tracks = micStream.getAudioTracks();
+    const track = tracks[0];
+    if (!track) return { ok: false };
+    rearStream.addTrack(track);
+    // The mic stream is a donor — any extra tracks stay stopped so
+    // nothing is left capturing unnoticed.
+    tracks.slice(1).forEach((extra) => {
+      try {
+        extra.stop();
+      } catch {
+        // Best-effort cleanup only.
+      }
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err };
+  }
+}
+
+/**
+ * ONE best-effort raise of the rear camera toward 1440p, attempted
+ * once both streams are proven live and recording is about to start
+ * (the guaranteed concurrent envelope tops out around 1440p for the
+ * larger stream). Any failure — no `applyConstraints`, a HAL that
+ * refuses mid-flight — is swallowed: the negotiated 1080p (or lower)
+ * stream simply records as-is. Never throws.
+ */
+export async function tryRaiseRearResolution(
+  rearStream: MediaStream,
+  canvasWidth: number,
+  canvasHeight: number,
+): Promise<boolean> {
+  try {
+    const track = rearStream.getVideoTracks()[0];
+    if (!track?.applyConstraints) return false;
+    const dims = dimensionsForShortSide(canvasWidth, canvasHeight, 1440);
+    await track.applyConstraints({
+      width: { ideal: dims.width },
+      height: { ideal: dims.height },
+      aspectRatio: { ideal: dims.ratio },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Start alignment (unchanged from R29)                                */
+/* ------------------------------------------------------------------ */
 
 /**
  * How far apart the two recorders actually started, in milliseconds:
