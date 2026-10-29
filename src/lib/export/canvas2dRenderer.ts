@@ -23,8 +23,8 @@
  */
 
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getMainTrackEnd, getProjectDuration } from '../timeline/utils';
-import { computeAudioGainAtTime, computeLoopedSourceTime, drawFrame } from './../render/compositor';
+import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
+import { computeAudioGainAtTime, computeLoopedSourceTime, drawFrame, findHeldMainVisualItem, videoSourceTimeForItem } from './../render/compositor';
 import type { Renderer, RenderOptions, RenderResult } from './renderer';
 import { RenderAbortedError } from './renderer';
 import { EXPORT_FINISHING_ERROR } from './exportErrors';
@@ -51,12 +51,14 @@ export class Canvas2DRenderer implements Renderer {
     if (totalSeconds <= 0) {
       throw new Error('This project has no timeline items to export.');
     }
-    // R26 WS-A2: the main visual track's end is the audio boundary for
-    // the whole export — every gain below is computed through
-    // `computeAudioGainAtTime`, which contributes exactly 0 at/past it
-    // (null = no visual main track = no clipping, pre-R26 behaviour).
+    // R36: the PROJECT end (`totalSeconds`, the longest-video law's
+    // duration) is the audio boundary for the whole export — every gain
+    // below is computed through `computeAudioGainAtTime`, which
+    // contributes exactly 0 at/past it and anchors fade-outs to it.
+    // (R26 anchored to the main track's end; that would cut audio at
+    // the old main end when a PiP/overlay video extends the project.)
     // Render-time clamp only: stored items are never modified.
-    const mainTrackEnd = getMainTrackEnd(project);
+    const projectEnd = totalSeconds;
 
     // Export-quality output size (Phase 2.1): defaults to the project's
     // own canvas dimensions exactly as before. When the picker asked for a
@@ -300,7 +302,18 @@ export class Canvas2DRenderer implements Renderer {
         const activeVideoAssetIds = new Set<string>();
         const videosMap = new Map<string, HTMLVideoElement>();
         let frameActiveVideo: { assetId: string; element: HTMLVideoElement } | undefined;
-        for (const item of activeItems) {
+        // R36 hold-last-frame (media binding): the held main video is
+        // not in `activeItems`, so it joins this sync list explicitly —
+        // paused on its last frame (shared clamped source time), gain 0,
+        // but present in `videosMap` so drawFrame's held draw can paint
+        // it for the tail instead of leaving the canvas black.
+        const heldItem = findHeldMainVisualItem(project, t);
+        const heldVideoItem = heldItem && heldItem.type === 'video' ? heldItem : null;
+        const syncItems =
+          heldVideoItem && !activeItems.some((i) => i.id === heldVideoItem.id)
+            ? [...activeItems, heldVideoItem]
+            : activeItems;
+        for (const item of syncItems) {
           if (item.type !== 'video') continue;
           const asset = project.mediaAssets[item.mediaAssetId];
           if (!asset) continue;
@@ -311,16 +324,25 @@ export class Canvas2DRenderer implements Renderer {
           // time through it, so a 2x clip occupies half the timeline span
           // in the export just as it does in the preview.
           (handle.element as HTMLVideoElement).playbackRate = item.speed || 1;
-          const targetTime = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
+          const targetTime = videoSourceTimeForItem(item, t);
+          if (heldVideoItem && item.id === heldVideoItem.id) {
+            if (Math.abs((handle.element as HTMLVideoElement).currentTime - targetTime) > 0.05) {
+              try { (handle.element as HTMLVideoElement).currentTime = targetTime; } catch { /* not seekable yet */ }
+            }
+            handle.element.pause();
+            handle.gain.gain.value = 0;
+            videosMap.set(asset.id, handle.element as HTMLVideoElement);
+            continue;
+          }
           if (Math.abs((handle.element as HTMLVideoElement).currentTime - targetTime) > 0.35) {
             try { (handle.element as HTMLVideoElement).currentTime = targetTime; } catch { /* not seekable yet */ }
           }
           handle.element.play().catch(() => {});
-          // The item's own fade (WS-A1) and the main-track boundary
-          // (WS-A2) both live in the shared gain helper — the embedded
-          // audio of a clip that overhangs the main end contributes
+          // The item's own fade (WS-A1) and the project-end boundary
+          // (R36) both live in the shared gain helper — the embedded
+          // audio of a clip that overhangs the project end contributes
           // nothing past the boundary, same as a standalone audio item.
-          handle.gain.gain.value = computeAudioGainAtTime(item, t, mainTrackEnd);
+          handle.gain.gain.value = computeAudioGainAtTime(item, t, projectEnd);
           videosMap.set(asset.id, handle.element as HTMLVideoElement);
           if (!frameActiveVideo) frameActiveVideo = { assetId: asset.id, element: handle.element as HTMLVideoElement };
         }
@@ -372,13 +394,13 @@ export class Canvas2DRenderer implements Renderer {
           // anywhere (found during the full-app audio audit alongside
           // exposing it in the inspector for the first time); reuses the
           // exact same ramp `drawFrame` applies to visual opacity so an
-          // audio fade and a video/image fade behave identically. R26:
+          // audio fade and a video/image fade behave identically. R36:
           // the shared helper also clamps the audible window at the
-          // main-track boundary (WS-A2) — a looping item keeps wrapping
+          // project end — a looping item keeps wrapping
           // inside its trim window below, but its gain is exactly 0
           // at/past the boundary, so the fill never sounds past the
-          // main end.
-          handle.gain.gain.value = computeAudioGainAtTime(item, t, mainTrackEnd);
+          // project end.
+          handle.gain.gain.value = computeAudioGainAtTime(item, t, projectEnd);
         });
         videoHandles.forEach((h, key) => {
           if (key.startsWith('audio:')) {

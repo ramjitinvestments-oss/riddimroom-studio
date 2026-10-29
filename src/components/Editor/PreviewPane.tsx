@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { canvasFontStack, ensureFontsLoaded } from '../../lib/fonts';
 import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getItemsByTrackType, getMainTrackEnd, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
-import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime, getItemBoundsPercent, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
+import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime, findHeldMainVisualItem, getItemBoundsPercent, videoSourceTimeForItem, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
 import { useProject } from '../../context/ProjectContext';
 
 /**
@@ -245,13 +245,15 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         return;
       }
 
-      // R26 WS-A2: the main-track boundary for this frame — audio gains
+      // R36: the project-end boundary for this frame — audio gains
       // below anchor their fade-out to it via `effectiveAudioEndTime`, the
-      // same computation both exporters use (`computeAudioGainAtTime`), so
-      // a boundary-clipped item fades out ON the boundary in preview
-      // exactly as it does in the exported file. Null = no main track =
-      // no clipping (pre-R26 behaviour).
-      const mainTrackEnd = getMainTrackEnd(proj);
+      // same computation both exporters use (`computeAudioGainAtTime`
+      // with `getProjectDuration`), so a boundary-clipped item fades out
+      // ON the project end in preview exactly as it does in the exported
+      // file — including when a PiP/overlay video extends the project
+      // past the main track (the R36 law; R26 anchored to the main
+      // track's end, which would cut audio at the old main end).
+      const projectEnd = getProjectDuration(proj);
       const videoItems = getItemsByTrackType(proj, 'video').filter((i) => i.type === 'video');
       let t = currentTimeRef.current;
       const active = videoItems.find((i) => t >= i.startTime && t < i.endTime) as
@@ -279,8 +281,9 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
             videoElsRef.current.forEach((el) => el.pause());
             // Speed (Phase 2.3): timeline seconds map to source seconds
             // through the item's rate — source = trimStart + elapsed * speed
-            // (the inverse of the clock derivation below).
-            const targetSourceTime = active.trimStart + Math.max(0, t - active.startTime) * (active.speed || 1);
+            // (the inverse of the clock derivation below), clamped to the
+            // trim window by the shared helper.
+            const targetSourceTime = videoSourceTimeForItem(active, t);
             if (Number.isFinite(targetSourceTime)) {
               try {
                 videoEl.currentTime = targetSourceTime;
@@ -311,7 +314,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // clip's fade-in/fade-out (set via the shared Timing/fade block
           // in ItemInspector) visibly faded its picture but silently had NO
           // effect on its own audio in the live preview.
-          const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, effectiveAudioEndTime(active.endTime, mainTrackEnd) - t);
+          const videoFadeMul = computeFadeOpacity(active.fade, t - active.startTime, effectiveAudioEndTime(active.endTime, projectEnd) - t);
           videoEl.volume = Math.max(0, Math.min(1, active.volume * videoFadeMul * masterVolumeRef.current));
 
           if (isPlayingRef.current) {
@@ -367,7 +370,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         if (!asset) return;
         activeAudioItemIds.add(item.id);
         const audioEl = getAudioEl(asset.id, asset.storageUrl);
-        const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, mainTrackEnd) - t);
+        const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, projectEnd) - t);
         audioEl.muted = item.muted;
         audioEl.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
         // Looping items (tweaks round): the target wraps inside the trim
@@ -444,7 +447,19 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         const activeVideoItems = getItemsByTrackType(proj, 'video').filter(
           (i) => i.type === 'video' && t >= i.startTime && t < i.endTime,
         );
-        for (const item of activeVideoItems) {
+        // R36 hold-last-frame (media binding): past the main layer's
+        // end, the held main video's element must ALSO be in the map
+        // drawFrame receives — paused on its last frame (the shared
+        // clamped source time) and silent (its own audio ended with
+        // the item) — otherwise the compositor's held draw has no
+        // element to draw and the canvas would go black for the tail.
+        const heldItem = findHeldMainVisualItem(proj, t);
+        const heldVideoItem = heldItem && heldItem.type === 'video' ? heldItem : null;
+        const syncVideoItems =
+          heldVideoItem && !activeVideoItems.some((i) => i.id === heldVideoItem.id)
+            ? [...activeVideoItems, heldVideoItem]
+            : activeVideoItems;
+        for (const item of syncVideoItems) {
           if (item.type !== 'video') continue;
           const asset = proj.mediaAssets[item.mediaAssetId];
           if (!asset) continue;
@@ -454,7 +469,15 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           // branch — elapsed timeline seconds consume `speed`x source
           // seconds, and the element runs at the item's rate.
           el.playbackRate = item.speed || 1;
-          const target = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
+          const target = videoSourceTimeForItem(item, t);
+          if (heldVideoItem && item.id === heldVideoItem.id) {
+            el.pause();
+            if (Math.abs(el.currentTime - target) > 0.05) {
+              try { el.currentTime = target; } catch { /* ignore */ }
+            }
+            el.volume = 0;
+            continue;
+          }
           if (isPlayingRef.current) {
             if (Math.abs(el.currentTime - target) > 0.35) {
               try { el.currentTime = target; } catch { /* not seekable yet */ }
@@ -466,7 +489,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
               try { el.currentTime = target; } catch { /* ignore */ }
             }
           }
-          const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, mainTrackEnd) - t);
+          const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, projectEnd) - t);
           el.muted = item.muted;
           el.volume = Math.max(0, Math.min(1, item.volume * fadeMul * masterVolumeRef.current));
         }
@@ -533,7 +556,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       const asset = project.mediaAssets[active.mediaAssetId];
       if (asset) {
         const el = getVideoEl(asset.id, asset.storageUrl);
-        const targetSourceTime = active.trimStart + Math.max(0, currentTime - active.startTime) * (active.speed || 1);
+        const targetSourceTime = videoSourceTimeForItem(active, currentTime);
         try {
           el.currentTime = targetSourceTime;
         } catch {

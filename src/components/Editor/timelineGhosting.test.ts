@@ -3,11 +3,13 @@
  * Pure-helper unit tests plus server-render markup assertions: a 180s
  * song under a 12s main must stay fully scrollable (extent 180), show
  * the project end line at 12s, and render only 0–12s of the song solid.
+ * R36 adds the PiP-longest case: with a 40s PiP over the 12s main, the
+ * end line moves to the PiP's end (40s) and only audio past 40 ghosts.
  */
 import { describe, it, expect, vi } from 'vitest';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { buildGhostProject, buildReferenceProject } from './timelineFixture';
+import { buildGhostProject, buildPipLongestProject, buildReferenceProject } from './timelineFixture';
 import { getGhostSplit, getProjectEndSeconds, getTimelineExtent } from './timelinePanelLogic';
 import { getMaxItemEnd, getProjectDuration } from '../../lib/timeline/utils';
 
@@ -70,6 +72,39 @@ describe('WS-A2 ghost split', () => {
     expect(getGhostSplit({ ...main, endTime: 180 }, 12)).toBeNull();
     const song = ghost.items.find((i) => i.id === 'item-song')!;
     expect(getGhostSplit(song, 0)).toBeNull();
+  });
+});
+
+describe('R36 — PiP-longest project: end line and ghosting follow the longest video', () => {
+  it('project end is the PiP end (40), not the main end (12); extent still reaches the 180s song', () => {
+    const project = buildPipLongestProject();
+    expect(getProjectDuration(project)).toBe(40);
+    expect(getProjectEndSeconds(project)).toBe(40);
+    expect(getTimelineExtent(project)).toBe(180);
+  });
+
+  it('the song ghosts only past 40: ghost split starts at the PiP end', () => {
+    const project = buildPipLongestProject();
+    const song = project.items.find((i) => i.id === 'item-song')!;
+    const split = getGhostSplit(song, getProjectEndSeconds(project));
+    expect(split).not.toBeNull();
+    expect(split!.ghostStartTime).toBe(40);
+    expect(split!.ghostOffsetFraction).toBeCloseTo(40 / 180, 6);
+    expect(split!.fullyGhosted).toBe(false);
+    // Audio between the main end (12) and the PiP end (40) is NOT ghosted.
+    const upToPipEnd = { ...song, id: 'up-to-pip', startTime: 0, endTime: 40 };
+    expect(getGhostSplit(upToPipEnd, 40)).toBeNull();
+  });
+
+  it('panel rendering: end line at 40s, ghost overlay from 40s, stored song unchanged', () => {
+    const project = buildPipLongestProject();
+    const markup = renderPanel(project);
+    expect(markup).toContain('data-testid="project-end-line"');
+    expect(markup).toContain('data-end-seconds="40"');
+    expect(markup).toContain(`left:${(40 / 180) * 100}%`);
+    expect(markup).toContain('data-testid="clip-ghost"');
+    expect(markup).toContain('data-ghost-start="40"');
+    expect(project.items.find((i) => i.id === 'item-song')!.endTime).toBe(180);
   });
 });
 

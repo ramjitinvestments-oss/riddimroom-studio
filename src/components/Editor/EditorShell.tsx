@@ -22,7 +22,7 @@ import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair } from '../../lib/timeline/insert';
-import { addPipOverlay } from '../../lib/pip';
+import { addPipOverlay, isPipItem } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
@@ -182,7 +182,14 @@ function EditorInner({ uid }: { uid: string }) {
   const [openGroup, setOpenGroup] = useState<string>('add');
   useEffect(() => {
     if (!selectedItemId) return;
-    setOpenGroup('item');
+    // R36 WS-1 — a PiP or pair item's controls live in the Overlay
+    // group (PipPanel), so selecting one opens that group instead of
+    // the inspector group. This is also what leaves the PipPanel open
+    // on a freshly recorded/uploaded PiP: the overlay insert path
+    // selects the new item (see handleOverlayAssetUploaded).
+    const selected = projectStateRef.current?.items.find((i) => i.id === selectedItemId);
+    const isPairItem = !!selected && (selected.type === 'video' || selected.type === 'image') && !!selected.pair;
+    setOpenGroup(selected && (isPipItem(selected) || isPairItem) ? 'overlay' : 'item');
     // R27 WS-M3 — on a small viewport, tapping a clip visibly does
     // something: its item sheet opens (desktop keeps the side column).
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1023px)').matches) {
@@ -265,9 +272,32 @@ function EditorInner({ uid }: { uid: string }) {
   // on canvas afterwards); images land as corner-placed overlay items on
   // the image track, sized like an overlay rather than a full-frame
   // photo. Either way the overlay starts at the playhead.
+  // R36 WS-1 — a landed overlay becomes the SELECTED item: the
+  // insert helpers generate the new item's id inside the mutate, so
+  // the handler only raises a flag; the effect below resolves the
+  // flag against the post-mutate project (the first newly-appeared
+  // PiP / overlay item) and selects it. The selection effect above
+  // then opens the Overlay group, leaving the PipPanel open on it.
+  const overlaySelectPendingRef = useRef(false);
+  const prevItemIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!project) return;
+    const prev = prevItemIdsRef.current;
+    if (overlaySelectPendingRef.current) {
+      overlaySelectPendingRef.current = false;
+      const added = project.items.find(
+        (i) =>
+          !prev.has(i.id) &&
+          (isPipItem(i) || (i.type === 'image' && i.role === 'overlay')),
+      );
+      if (added) setSelectedItemId(added.id);
+    }
+    prevItemIdsRef.current = new Set(project.items.map((i) => i.id));
+  }, [project]);
+
   const handleOverlayAssetUploaded = useCallback(
     (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; muted?: boolean }) => {
-      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      if (asset.kind === 'video' || asset.kind === 'image') overlaySelectPendingRef.current = true;
       if (asset.kind === 'video') {
         mutate((p) =>
           addPipOverlay(p, asset, {
@@ -290,7 +320,9 @@ function EditorInner({ uid }: { uid: string }) {
           }),
         );
       }
-      if (wasEmpty) setStep(2);
+      // Overlay work is editing work: land on Step 2 where the
+      // timeline's Overlay lane and the PipPanel live.
+      setStep(2);
     },
     [mutate, currentTime],
   );

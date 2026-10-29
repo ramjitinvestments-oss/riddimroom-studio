@@ -244,9 +244,14 @@ export function getMaxItemEnd(project: Project): number {
  *   stage artwork as `graphic`/`photo` images).
  * Text, caption and audio items are never main content, and neither are
  * PiP videos or watermark/logo/sticker/overlay images — those accompany
- * the main content, they don't define how long the project is.
+ * the main content, so they don't count toward the MAIN-track end
+ * (`getMainTrackEnd`). (Under the R36 duration law a PiP video still
+ * counts toward the PROJECT duration via `getLongestVideoEnd` — main
+ * classification and project duration are separate measures now.)
+ * Exported for the compositor's R36 hold-last-frame logic, which must
+ * find the latest-ending main visual item with this same classification.
  */
-function isMainVisualItem(item: TimelineItem): boolean {
+export function isMainVisualItem(item: TimelineItem): boolean {
   if (item.type === 'video') return !item.pip?.isPip;
   if (item.type === 'image') return item.role === 'photo' || item.role === 'graphic';
   return false;
@@ -268,6 +273,12 @@ function isMainVisualItem(item: TimelineItem): boolean {
  * track type doesn't match the item, is not on a primary visual track and
  * doesn't count. Null (not 0) when no such track/items exist, so callers
  * can distinguish "no main content" from "main content ending at 0".
+ *
+ * R36: this remains the MAIN-ONLY measure, kept intact for consumers
+ * that genuinely need it (the compositor's hold-last-frame logic needs
+ * to know where the main layer itself ends). It is NOT the project
+ * duration on its own any more — `getProjectDuration` combines it with
+ * `getLongestVideoEnd`.
  */
 export function getMainTrackEnd(project: Project): number | null {
   const mainTrackIds = new Set(
@@ -283,16 +294,51 @@ export function getMainTrackEnd(project: Project): number | null {
 }
 
 /**
- * Total timeline duration (R26, WS-A2): when the project has main content,
- * the MAIN track defines the duration (`getMainTrackEnd`) — a 3-minute
- * song under a 12s video makes a 12s project, and audio past the main end
- * is clipped at render time rather than extending the project. When there
- * is no main track (audio-only, text-only, caption-only or empty
- * projects), this falls back to the old latest-end-across-every-item rule
- * (`getMaxItemEnd`), so those projects keep exactly their old duration.
+ * R36 — the latest endTime among ALL video items on any track, or null
+ * when the project has no video items. PiP/overlay videos and pair
+ * tiles (split seconds, camera pairs) count exactly like main videos:
+ * this is the "longest video" measure the R36 duration law is built
+ * on. Track placement is irrelevant here on purpose — a PiP lives on
+ * the same video track as the main clip in this model, and an imported
+ * pair tile can sit on the image track, so any track filter would
+ * silently drop real video content.
+ */
+export function getLongestVideoEnd(project: Project): number | null {
+  let end: number | null = null;
+  for (const item of project.items) {
+    if (item.type !== 'video') continue;
+    end = end === null ? item.endTime : Math.max(end, item.endTime);
+  }
+  return end;
+}
+
+/**
+ * Total timeline duration — the R36 LONGEST-VIDEO DURATION LAW (owner
+ * decision, superseding R26's PiP exclusion): when at least one of
+ * {the main-track end (`getMainTrackEnd`), the longest-video end
+ * (`getLongestVideoEnd`)} exists, the duration is the MAX of those
+ * present — so a 40s PiP over a 12s main makes a 40s project (R26
+ * made it 12s: the PiP was excluded from the main measure and simply
+ * clipped), and a 40s main over a 12s PiP still makes 40s. A main
+ * photo ending at 20s over a 12s video still makes 20s (the main
+ * measure wins when it is longer). When NEITHER exists (audio-only,
+ * text-only, caption-only or empty projects), this falls back to the
+ * old latest-end-across-every-item rule (`getMaxItemEnd`) exactly, so
+ * those projects keep exactly their old duration. Audio NEVER extends
+ * a project that has visual/video content: a 3-minute song under a
+ * 12s main with no longer video still makes a 12s project, and audio
+ * past the project end is clipped at render time.
+ *
+ * `getMainTrackEnd` above stays intact as the MAIN-ONLY measure for
+ * consumers that genuinely need it (e.g. the compositor's hold-last-
+ * frame logic, which must know where the main layer itself ends) —
+ * it is no longer, on its own, the project duration.
  */
 export function getProjectDuration(project: Project): number {
-  return getMainTrackEnd(project) ?? getMaxItemEnd(project);
+  const mainEnd = getMainTrackEnd(project);
+  const longestVideoEnd = getLongestVideoEnd(project);
+  if (mainEnd === null && longestVideoEnd === null) return getMaxItemEnd(project);
+  return Math.max(mainEnd ?? Number.NEGATIVE_INFINITY, longestVideoEnd ?? Number.NEGATIVE_INFINITY);
 }
 
 /**
@@ -309,6 +355,9 @@ export function getProjectDuration(project: Project): number {
  * longer trips this guard (the song doesn't make the project longer; the
  * per-item cap in `trimItemEnd`/`appendMediaToTimeline` still bounds the
  * audio item itself), while growing the main track past the limit still does.
+ * R36: the guard follows the longest-video law automatically (it calls
+ * `getProjectDuration`), so a PiP/overlay video that pushes the total past
+ * the limit now trips it too — that is the law working, not a regression.
  */
 export function projectDurationExceedsLimit(project: Project, maxSeconds: number = MAX_MEDIA_SECONDS): boolean {
   return getProjectDuration(project) > maxSeconds + DURATION_LIMIT_EPSILON_SECONDS;

@@ -48,8 +48,8 @@
  */
 
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getMainTrackEnd, getProjectDuration } from '../timeline/utils';
-import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime } from '../render/compositor';
+import { getItemsAtTime, getProjectDuration } from '../timeline/utils';
+import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime, findHeldMainVisualItem, videoSourceTimeForItem } from '../render/compositor';
 import type { Renderer, RenderOptions, RenderResult, RenderResultMetadata } from './renderer';
 import { RenderAbortedError } from './renderer';
 import { Canvas2DRenderer } from './canvas2dRenderer';
@@ -727,12 +727,13 @@ function waitForSeek(element: HTMLVideoElement, timeoutMs = SEEK_TIMEOUT_MS): Pr
 }
 
 /**
- * One entry of the offline audio-mix plan (R26): a single audible
- * timeline item resolved to everything the mixer needs, with its
- * audible window ALREADY clamped to the main-track boundary (WS-A2) —
- * `endTime` here is the item's EFFECTIVE end (`effectiveAudioEndTime`),
- * never the stored end. An item the boundary clips away entirely
- * (effective duration ≤ 0) is absent from the plan altogether.
+ * One entry of the offline audio-mix plan (R26, boundary moved by
+ * R36): a single audible timeline item resolved to everything the
+ * mixer needs, with its audible window ALREADY clamped to the
+ * project-end boundary — `endTime` here is the item's EFFECTIVE end
+ * (`effectiveAudioEndTime`), never the stored end. An item the
+ * boundary clips away entirely (effective duration ≤ 0) is absent
+ * from the plan altogether.
  */
 export interface AudioMixPlanItem {
   assetId: string;
@@ -753,22 +754,24 @@ export interface AudioMixPlanItem {
 
 /**
  * The pure scheduling plan behind `mixProjectAudioOffline` — exported
- * so the WS-A2 boundary behaviour is testable without an
+ * so the boundary behaviour is testable without an
  * OfflineAudioContext: every audio-carrying item (standalone audio AND
  * video items' embedded audio) that is audible at all (not muted,
  * volume > 0, asset present) appears with its end clamped to
- * `mainTrackEnd`; a null boundary leaves every end untouched (the
+ * `projectEnd` — since R36 the caller passes `getProjectDuration`, so
+ * a PiP-longest project mixes audio out to the PiP's end, not the old
+ * main end; a null boundary leaves every end untouched (the
  * pre-R26 plan). Stored items are never modified — this is a
  * render-time view only.
  */
-export function planProjectAudioMix(project: Project, mainTrackEnd: number | null): AudioMixPlanItem[] {
+export function planProjectAudioMix(project: Project, projectEnd: number | null): AudioMixPlanItem[] {
   const plan: AudioMixPlanItem[] = [];
   for (const item of project.items) {
     if (item.type !== 'audio' && item.type !== 'video') continue;
     if (item.muted || item.volume <= 0) continue;
     const asset = project.mediaAssets[item.mediaAssetId];
     if (!asset) continue;
-    const endTime = effectiveAudioEndTime(item.endTime, mainTrackEnd);
+    const endTime = effectiveAudioEndTime(item.endTime, projectEnd);
     if (endTime - item.startTime <= 0) continue;
     plan.push({
       assetId: asset.id,
@@ -807,13 +810,14 @@ async function mixProjectAudioOffline(
   project: Project,
   totalSeconds: number,
 ): Promise<AudioBuffer | null> {
-  // R26 WS-A2: the plan clamps every item's audible window at the main
-  // track's end (getMainTrackEnd; null = no visual main track = no
-  // clipping). Scheduling below only ever sees the clamped windows, so
-  // the mixed buffer can contain no audio energy past the boundary —
-  // and loop-to-fill wraps inside it, because the loop below fills
-  // only the clamped timeline duration. Stored items are untouched.
-  const audible = planProjectAudioMix(project, getMainTrackEnd(project));
+  // R36: the plan clamps every item's audible window at the PROJECT
+  // end (`getProjectDuration` — the longest-video law; a PiP-longest
+  // project mixes out to the PiP's end). Scheduling below only ever
+  // sees the clamped windows, so the mixed buffer can contain no
+  // audio energy past the boundary — and loop-to-fill wraps inside
+  // it, because the loop below fills only the clamped timeline
+  // duration. Stored items are untouched.
+  const audible = planProjectAudioMix(project, getProjectDuration(project));
   if (audible.length === 0) return null;
 
   const offline = new OfflineAudioContext(
@@ -856,7 +860,7 @@ async function mixProjectAudioOffline(
     // Fade/volume automation sampled from computeFadeOpacity at 33
     // points across the item — the same curve the preview applies.
     // R26: sampled over the CLAMPED duration, so a fade-out ramp
-    // completes exactly at the main-track boundary rather than being
+    // completes exactly at the project-end boundary rather than being
     // cut off mid-ramp (the same anchoring `computeAudioGainAtTime`
     // applies in the realtime paths).
     const SAMPLES = 32;
@@ -881,7 +885,7 @@ async function mixProjectAudioOffline(
       // Wrap inside the trim window (computeLoopedSourceTime semantics):
       // schedule consecutive trim-window passes until the item's span
       // is filled. The span here is the CLAMPED duration, so the fill
-      // wraps inside the main-track boundary and never past it.
+      // wraps inside the project-end boundary and never past it.
       const span = item.trimEnd - item.trimStart;
       if (span > 0) {
         let elapsed = 0;
@@ -1051,12 +1055,23 @@ export class MediabunnyRenderer implements Renderer {
         const activeItems: TimelineItem[] = getItemsAtTime(project, t);
         const videosMap = new Map<string, HTMLVideoElement>();
         let frameActiveVideo: { assetId: string; element: HTMLVideoElement } | undefined;
-        for (const item of activeItems) {
+        // R36 hold-last-frame (media binding): the held main video is
+        // not active at t, so it joins the sync list explicitly — the
+        // shared clamped source time sits it on its last frame for
+        // drawFrame's held draw (this element is a frame source only;
+        // its audio comes from the offline mix, clamped at its own end).
+        const heldItem = findHeldMainVisualItem(project, t);
+        const heldVideoItem = heldItem && heldItem.type === 'video' ? heldItem : null;
+        const syncItems =
+          heldVideoItem && !activeItems.some((i) => i.id === heldVideoItem.id)
+            ? [...activeItems, heldVideoItem]
+            : activeItems;
+        for (const item of syncItems) {
           if (item.type !== 'video') continue;
           const asset = project.mediaAssets[item.mediaAssetId];
           if (!asset) continue;
           const el = getVideoEl(asset.id, asset.storageUrl);
-          const targetTime = item.trimStart + Math.max(0, t - item.startTime) * (item.speed || 1);
+          const targetTime = videoSourceTimeForItem(item, t);
           if (Math.abs(el.currentTime - targetTime) > 1 / frameRate / 2) {
             try {
               el.currentTime = targetTime;

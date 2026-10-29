@@ -47,10 +47,21 @@ import {
 import {
   deviceProfileForFacing,
   loadDeviceProfiles,
+  provenSmoothnessSuggestion,
   saveDeviceProfile,
   shortSideClassFor,
+  withTakeOutcome,
   type DeviceProfileStorage,
+  type SmoothnessSuggestion,
+  type TakeDropOutcome,
 } from '../../lib/camera/deviceProfile';
+import {
+  countdownDisplayForElapsed,
+  createCoachGate,
+  createTransitionGate,
+  meterIntervalMs,
+  zebraRecomputedWhile,
+} from '../../lib/camera/readoutGate';
 import {
   buildContinuityPlan,
   buildLockPlan,
@@ -73,7 +84,7 @@ import {
   analyzeLightSample,
   lightAdvice,
   lightStateLabel,
-  type LightMeterResult,
+  type LightState,
 } from '../../lib/camera/lightMeter';
 import {
   DUAL_MIC_UNAVAILABLE_MESSAGE,
@@ -212,6 +223,24 @@ import {
  * and re-applied, clamped to the front track's ranges, at step 2.
  * On devices exposing none of this (desktop, iOS), nothing renders.
  *
+ * R36 WS-4 (ultra-smooth cameras): the per-sample readouts left the
+ * React render path. The light pill + advice are React state set ONLY
+ * on value transitions; the zebra grid, the coach pill and the level
+ * indicator are painted by direct DOM writes through refs, gated by
+ * the pure `lib/camera/readoutGate` module (coach hysteresis: a new
+ * level must persist across two samples, and the visible pill changes
+ * at most every 500ms). While recording, the meter samples at most
+ * once a second and the zebra recomputation is paused, so the only
+ * per-second React update left in a take is the record timer. During
+ * a take the only `applyConstraints` a user action can still land are
+ * the ramped zoom and the torch; tap-focus, Lock and the brightness
+ * slider are gated off, and every AUTOMATIC apply (warm-up settle,
+ * two-step colour continuity, the dual rear raise) completes before
+ * its recorder starts. Finished takes record their smoothness
+ * outcome on the device profile (same drop threshold as the receipt
+ * advisory), which can surface a one-step-down quality suggestion —
+ * shown, never applied automatically.
+ *
  * R32 Phase 3 (smooth-motion kit): all decision logic is the pure
  * `lib/camera/motionCoach` module; this component owns the sensors.
  * A "Steady start" toggle (default on, saved on this phone) holds a
@@ -268,6 +297,14 @@ interface CameraCaptureProps {
    * dual mode is never offered.
    */
   onCaptureDual?: (result: CaptureDualResult) => void;
+  /**
+   * R36 WS-4 (from WS-1) — forced-overlay mode: the caller has wired
+   * BOTH confirm callbacks to the overlay landing (MediaImportPanel's
+   * PiP camera mode), so the single-camera review presents ONE
+   * primary action, "Add as PiP", instead of the standard
+   * main-vs-overlay pair. Absent = the standard review, unchanged.
+   */
+  overlayOnly?: boolean;
   onClose: () => void;
   /** The project's own canvas dimensions — used to negotiate a matching, non-distorted recording aspect ratio (16:9 / 9:16 / 1:1 / 4:5, whatever the project actually is), and to size the live preview box to match. */
   canvasWidth: number;
@@ -357,19 +394,31 @@ function saveProvenProfile(
   settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
   mimeType: string,
   fallbackFps: number,
+  opts?: { quality?: CaptureQualityChoice | null; outcome?: TakeDropOutcome | null },
 ): void {
   const width = settings?.width ?? 0;
   const height = settings?.height ?? 0;
   const shortSide = width > 0 && height > 0 ? Math.min(width, height) : 0;
-  saveDeviceProfile(browserLocalStorage(), {
-    facing,
-    shortSideClass: shortSideClassFor(shortSide),
-    fps:
-      typeof settings?.frameRate === 'number' && settings.frameRate > 0
-        ? Math.round(settings.frameRate)
-        : fallbackFps,
-    mimeType: mimeType ?? '',
-  });
+  // R36 WS-4 — the take's smoothness outcome rides along when the
+  // caller measured one, so the profile can later offer its
+  // one-step-down suggestion. Callers without a quality context
+  // (dual) pass neither field and the core save is unchanged.
+  saveDeviceProfile(
+    browserLocalStorage(),
+    withTakeOutcome(
+      {
+        facing,
+        shortSideClass: shortSideClassFor(shortSide),
+        fps:
+          typeof settings?.frameRate === 'number' && settings.frameRate > 0
+            ? Math.round(settings.frameRate)
+            : fallbackFps,
+        mimeType: mimeType ?? '',
+      },
+      opts?.quality,
+      opts?.outcome,
+    ),
+  );
 }
 
 /** The proven recorder mime for a facing, when one is saved. */
@@ -433,7 +482,7 @@ function orientationPermissionNeeded(): boolean {
   );
 }
 
-export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
+export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, overlayOnly, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -453,6 +502,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   const [zoomValue, setZoomValue] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  /** R36 WS-4 — ref mirror of `isRecording` for timer/sampler closures and constraint gates. */
+  const isRecordingRef = useRef(false);
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [isReady, setIsReady] = useState(false);
   // Review state (tweaks round): a stopped recording is HELD here for
@@ -579,8 +633,24 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   const [exposureCompValue, setExposureCompValue] = useState(0);
   const [torchOn, setTorchOn] = useState(false);
   const [selfieLight, setSelfieLight] = useState(false);
-  /** The latest light-meter reading; null until the sampler's first pass. */
-  const [lightResult, setLightResult] = useState<LightMeterResult | null>(null);
+  // R36 WS-4 — the light meter OFF React state per sample: the pill's
+  // STATE (one of four values) is discrete React state set only when
+  // it transitions; the full latest reading lives in a ref, and the
+  // zebra grid is a DOM node painted directly by the sampler.
+  /** The meter pill's current light state; null until the sampler's first pass. Set ONLY on transitions. */
+  const [lightState, setLightState] = useState<LightState | null>(null);
+  /** The meter advice line; null when there is nothing worth saying. Set ONLY when the line changes. */
+  const [meterAdviceText, setMeterAdviceText] = useState<string | null>(null);
+  /** The latest full meter reading (mean/clipped/zebra source) — a ref, never state. */
+  const lightResultRef = useRef<import('../../lib/camera/lightMeter').LightMeterResult | null>(null);
+  /** Transition gates for the pill state + advice line (pure, in readoutGate). */
+  const lightStateGateRef = useRef(createTransitionGate<LightState>());
+  const meterAdviceGateRef = useRef(createTransitionGate<string | null>());
+  /** The zebra overlay's cell nodes, painted by direct DOM writes from the sampler. */
+  const zebraCellRefs = useRef<Array<HTMLDivElement | null>>([]);
+  /** True once any zebra cell is painted on — drives the overlay container's visibility class only on flips. */
+  const [zebraAnyOn, setZebraAnyOn] = useState(false);
+  const zebraAnyGateRef = useRef(createTransitionGate<boolean>());
   const warmupTimerRef = useRef<number | null>(null);
   const focusRingTimersRef = useRef<number[]>([]);
   const lastCompApplyRef = useRef(0);
@@ -596,20 +666,29 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   );
   /** True while the steady-start countdown overlay is up (the pending recorder start sits in a ref). */
   const [countdownActive, setCountdownActive] = useState(false);
-  /** The countdown's displayed number (3, then 2, then 1). */
+  /** The countdown's displayed number (3, then 2, then 1) — set ONLY when the digit changes (R36 WS-4). */
   const [countdownDisplay, setCountdownDisplay] = useState(3);
+  const countdownDisplayGateRef = useRef(createTransitionGate<number>());
   /** The recorder start waiting on the countdown — single, dual (via startRecording) or step-2. */
   const countdownPendingRef = useRef<(() => void) | null>(null);
   /** Rolling motion-level history, written by the motion sampler; the countdown decision reads it. */
   const levelHistoryRef = useRef<MotionLevel[]>([]);
-  /** The live motion-coach pill state while recording; null = no pill (no signal, or not recording). */
-  const [coachState, setCoachState] = useState<MotionCoachState | null>(null);
+  // R36 WS-4 — the coach pill is a DOM node painted directly (never
+  // React state per sample); the pure gate adds hysteresis (a level
+  // must persist across two samples) and a 500ms minimum between
+  // visible changes.
+  const coachPillRef = useRef<HTMLDivElement | null>(null);
+  const coachGateRef = useRef(createCoachGate());
   /** Level indicator on/off. Default ON only where enabling it needs no permission prompt on this platform. */
   const [levelEnabled, setLevelEnabled] = useState<boolean>(
     () => deviceOrientationAvailable() && !orientationPermissionNeeded(),
   );
-  /** Latest horizon tilt in degrees; null = no orientation signal yet. */
-  const [horizonTilt, setHorizonTilt] = useState<number | null>(null);
+  // R36 WS-4 — the horizon readout is painted directly onto these
+  // DOM nodes by the orientation listener (per-event React state
+  // was the worst churn source of all when the phone moved).
+  const levelWrapRef = useRef<HTMLDivElement | null>(null);
+  const horizonLineRef = useRef<HTMLDivElement | null>(null);
+  const levelBubbleRef = useRef<HTMLDivElement | null>(null);
   /** Rolling sensor buffers for the motion sampler (gyro primary, frame-diff fallback). */
   const motionBufferRef = useRef<{ gyro: GyroSample[]; diffs: number[]; lastFrame: FrameSampleInput | null }>({
     gyro: [],
@@ -632,6 +711,17 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       setFpsChoice(profile.fps as CaptureFpsChoice);
     }
   }, [facingMode, fpsChoice, twoPassPhase]);
+
+  // R36 WS-4 — the proven-smooth suggestion for the current facing:
+  // refreshed when the facing flips and whenever a take finishes
+  // (a review appearing is the moment a new outcome was just saved).
+  // A suggestion only — applying it is the user's one tap below.
+  const [profileSuggestion, setProfileSuggestion] = useState<SmoothnessSuggestion | null>(null);
+  useEffect(() => {
+    setProfileSuggestion(
+      provenSmoothnessSuggestion(loadDeviceProfiles(browserLocalStorage()), facingMode),
+    );
+  }, [facingMode, pendingVideo, pendingDual, testReceipt]);
 
   const step2PlaybackRef = useRef<HTMLVideoElement>(null);
   const step2ChunksRef = useRef<Blob[]>([]);
@@ -688,7 +778,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     setLockedSystems([]);
     setLockNote(null);
     setTorchOn(false);
-    setLightResult(null);
+    // R36 WS-4 — the meter readout resets with the stream: ref,
+    // transition gates and the (transition-gated) pill/advice state.
+    lightResultRef.current = null;
+    lightStateGateRef.current.reset();
+    meterAdviceGateRef.current.reset();
+    zebraAnyGateRef.current.reset();
+    setLightState(null);
+    setMeterAdviceText(null);
+    setZebraAnyOn(false);
     // R32 Phase 3 — a stopped stream also stops the zoom ramp (its
     // track is gone), any pending steady-start countdown (its start
     // must never fire into a dead stream) and the coach pill.
@@ -698,7 +796,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     }
     countdownPendingRef.current = null;
     setCountdownActive(false);
-    setCoachState(null);
+    coachGateRef.current.reset();
+    if (coachPillRef.current) coachPillRef.current.style.display = 'none';
   }, []);
 
   const startStream = useCallback(async (override?: { quality: CaptureQualityChoice; fps: CaptureFpsChoice }) => {
@@ -804,7 +903,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         const phase = twoPassPhaseRef.current;
         if (phase === 'step1-live') {
           continuityProfileRef.current = extractContinuityProfile(settings);
-        } else if (phase === 'step2-live' && continuityProfileRef.current) {
+        } else if (phase === 'step2-live' && continuityProfileRef.current && !isRecordingRef.current) {
+          // R36 WS-4 — capture discipline: this AUTOMATIC apply must
+          // complete BEFORE the step-2 recorder starts. Warm-up runs
+          // ~800ms after the stream opens and Record is available
+          // immediately, so a fast Record press could otherwise land
+          // it mid-take — in that case it is skipped outright (the
+          // take records with the front camera's own settings).
           const plan = buildContinuityPlan(continuityProfileRef.current, caps);
           for (const constraints of plan) {
             void track
@@ -1053,7 +1158,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    */
   const handlePreviewTap = useCallback(
     (e: React.MouseEvent<HTMLVideoElement>) => {
-      if (!controlCaps?.pointsOfInterest || !isReady || pendingVideo || pendingDual) return;
+      // R36 WS-4 — tap-focus is gated OFF during a take: mid-take,
+      // only the ramped zoom and the torch may apply constraints.
+      if (!controlCaps?.pointsOfInterest || !isReady || isRecording || pendingVideo || pendingDual) return;
       const track = streamRef.current?.getVideoTracks()[0];
       if (!track?.applyConstraints) return;
       const rect = e.currentTarget.getBoundingClientRect();
@@ -1075,7 +1182,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         })
         .catch(() => {});
     },
-    [controlCaps, isReady, pendingVideo, pendingDual, facingMode, dualMode],
+    [controlCaps, isReady, isRecording, pendingVideo, pendingDual, facingMode, dualMode],
   );
 
   /**
@@ -1087,6 +1194,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    * the chip + note.
    */
   const toggleLock = useCallback(async () => {
+    // R36 WS-4 — Lock is gated OFF during a take (the button is also
+    // disabled then): a lock/unlock apply mid-recording is exactly
+    // the automatic-feeling constraint churn this round removes.
+    if (isRecordingRef.current) return;
     const track = streamRef.current?.getVideoTracks()[0];
     if (!track?.applyConstraints || !controlCaps) return;
     if (lockedSystems.length > 0) {
@@ -1124,6 +1235,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    */
   const applyExposureCompensation = useCallback(
     (rawValue: number, force = false) => {
+      // R36 WS-4 — the brightness slider is gated OFF during a take
+      // (and disabled in the UI then): no exposure applies mid-take.
+      if (isRecordingRef.current) return;
       const range = controlCaps?.exposure?.compensationRange;
       if (!range) return;
       const value = clampExposureCompensation(rawValue, range);
@@ -1293,7 +1407,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       const frontStartMs = dualStartRef.current?.frontStartMs ?? rearStartMs;
       const mainReceipt = receiptForRecording(rearSettings, rearRecorder.mimeType, mainBlob, rearStartMs, rearEstimate);
       const frontReceipt = receiptForRecording(frontSettings, frontRecorder.mimeType, frontBlob, frontStartMs, null);
-      saveProvenProfile('environment', rearSettings, rearRecorder.mimeType, fpsChoiceRef.current);
+      saveProvenProfile('environment', rearSettings, rearRecorder.mimeType, fpsChoiceRef.current, {
+        outcome: rearEstimate
+          ? { droppedFrames: rearEstimate.droppedFramesEstimate, expectedFrames: rearEstimate.expectedFrames }
+          : null,
+      });
       stopStream();
       setPendingDual({
         mainBlob,
@@ -1357,7 +1475,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       const estimate = tracker?.stop() ?? null;
       tracker = null;
       const receipt = receiptForRecording(settingsSnapshot, recorder.mimeType, blob, startedAtMs, estimate);
-      saveProvenProfile(facingModeRef.current, settingsSnapshot, recorder.mimeType, fpsChoiceRef.current);
+      saveProvenProfile(facingModeRef.current, settingsSnapshot, recorder.mimeType, fpsChoiceRef.current, {
+        quality: qualityChoiceRef.current,
+        outcome: estimate
+          ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
+          : null,
+      });
       // R32 Phase 1 — "Test my camera": the test take is measured and
       // profiled above, then DISCARDED — it never reaches a review
       // state, the timeline or the project. The live camera restarts
@@ -1481,7 +1604,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       const mainReceipt =
         step1ReceiptRef.current ??
         buildCaptureReceipt({ trackSettings: null, mimeType: mainBlob.type, blobSize: mainBlob.size, durationSeconds: 0 });
-      saveProvenProfile('user', settingsSnapshot, recorder.mimeType, fpsChoiceRef.current);
+      saveProvenProfile('user', settingsSnapshot, recorder.mimeType, fpsChoiceRef.current, {
+        quality: twoPassLockRef.current?.quality ?? qualityChoiceRef.current,
+        outcome: estimate
+          ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
+          : null,
+      });
       // Transfer the retained step-1 URL into pendingDual: clearing
       // the ref hands ownership to the pendingDual effect, which
       // revokes it when the review clears.
@@ -1641,16 +1769,26 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   }, [isRecording, recordSeconds, stopRecording]);
 
   // R32 Phase 2 — light meter sampler: draw the live preview into a
-  // tiny (<= 96px wide) offscreen canvas at ~4Hz and analyse it with
-  // the pure meter. Runs only while a single-camera stream is live
+  // tiny (<= 96px wide) offscreen canvas and analyse it with the
+  // pure meter. Runs only while a single-camera stream is live
   // and warmed up — never during review, dual mode or two-pass step
   // 2 (whose main frame is playback, not the camera) — and stops
   // with the stream. It only ever ADVISES; it never touches the
   // user's quality/fps choices.
+  //
+  // R36 WS-4 — schedule + output discipline: BEFORE a take the meter
+  // samples at the full ~4Hz; WHILE RECORDING it slows to at most
+  // 1/sec and the zebra recomputation is PAUSED (the grid keeps its
+  // last pre-take painting), so the canvas analysis pass never runs
+  // at 4Hz during a take. Outputs: the full reading goes to a ref;
+  // the pill state and the advice line reach React state ONLY on
+  // value transitions (the gates in readoutGate); the zebra cells
+  // are painted by direct DOM writes.
   useEffect(() => {
     if (!warmedUp || !isReady || dualMode || isStep2Phase || pendingVideo || pendingDual || error) return;
     let cancelled = false;
     const canvas = document.createElement('canvas');
+    const recording = isRecording;
     const sample = () => {
       const video = videoRef.current;
       if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) return;
@@ -1663,8 +1801,29 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       try {
         ctx.drawImage(video, 0, 0, width, height);
         const image = ctx.getImageData(0, 0, width, height);
-        if (!cancelled) {
-          setLightResult(analyzeLightSample({ data: image.data, width, height, format: 'rgba' }));
+        if (cancelled) return;
+        const result = analyzeLightSample({ data: image.data, width, height, format: 'rgba' });
+        lightResultRef.current = result;
+        if (lightStateGateRef.current.push(result.state)) {
+          setLightState(result.state);
+        }
+        const advice = lightAdvice(result, {
+          demandingCapture: qualityChoice !== 'hd' || fpsChoice === 60,
+          torchAvailable: facingMode === 'environment' && controlCaps?.torch === true,
+        });
+        if (meterAdviceGateRef.current.push(advice)) {
+          setMeterAdviceText(advice);
+        }
+        if (zebraRecomputedWhile(recording)) {
+          let anyOn = false;
+          result.zebraCells.forEach((flagged, i) => {
+            if (flagged) anyOn = true;
+            const cell = zebraCellRefs.current[i];
+            if (cell) cell.style.display = flagged ? 'block' : 'none';
+          });
+          if (zebraAnyGateRef.current.push(anyOn)) {
+            setZebraAnyOn(anyOn);
+          }
         }
       } catch {
         // A frame that can't be read (stream mid-swap) is skipped —
@@ -1672,12 +1831,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       }
     };
     sample();
-    const interval = window.setInterval(sample, 250);
+    const interval = window.setInterval(sample, meterIntervalMs(recording));
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [warmedUp, isReady, dualMode, isStep2Phase, pendingVideo, pendingDual, error]);
+  }, [warmedUp, isReady, dualMode, isStep2Phase, pendingVideo, pendingDual, error, isRecording, qualityChoice, fpsChoice, facingMode, controlCaps]);
 
   // R32 Phase 3 — motion sampler: while the steady-start countdown
   // is up OR a recording is running, sample motion at ~4Hz. Gyro is
@@ -1748,9 +1907,16 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // R32 Phase 3 — the coach pill follows the sampler's level while
   // recording (single, dual and step-2 alike — all share this
   // recording state); it clears the moment recording stops.
+  //
+  // R36 WS-4 — the pill is painted by DIRECT DOM WRITES, never React
+  // state: the pure coach gate (readoutGate) applies hysteresis (a
+  // new level must persist across two consecutive samples) and a
+  // 500ms minimum between visible changes, so even the DOM paints
+  // are rare; the sampler ticks write nothing to React at all.
   useEffect(() => {
     if (!isRecording) {
-      setCoachState(null);
+      coachGateRef.current.reset();
+      if (coachPillRef.current) coachPillRef.current.style.display = 'none';
       return;
     }
     const interval = window.setInterval(() => {
@@ -1758,7 +1924,19 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         gyroSamples: motionBufferRef.current.gyro,
         frameDiffs: motionBufferRef.current.diffs,
       });
-      setCoachState(coachStateForLevel(level));
+      const next = coachGateRef.current.push(level, performance.now());
+      if (next === undefined) return;
+      const pill = coachPillRef.current;
+      if (!pill) return;
+      if (next === null) {
+        pill.style.display = 'none';
+        return;
+      }
+      pill.textContent = next.text;
+      pill.className = `absolute bottom-3 left-3 text-[10px] font-bold uppercase tracking-wide text-white rounded px-2 py-1 pointer-events-none ${
+        next.tone === 'good' ? 'bg-emerald-600/85' : next.tone === 'warn' ? 'bg-amber-600/90' : 'bg-red-600/90'
+      }`;
+      pill.style.display = 'block';
     }, 250);
     return () => window.clearInterval(interval);
   }, [isRecording]);
@@ -1782,11 +1960,19 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // completes — it never hard-blocks a recording.
   useEffect(() => {
     if (!countdownActive) return;
-    setCountdownDisplay(3);
+    // R36 WS-4 — the display state is set only when the DIGIT
+    // changes (3 renders per countdown, not ~20): the 150ms tick
+    // still polls the early-finish decision at full rate, it just
+    // no longer re-renders for a digit that has not moved.
+    countdownDisplayGateRef.current.reset();
+    if (countdownDisplayGateRef.current.push(3)) setCountdownDisplay(3);
     const startedAt = performance.now();
     const interval = window.setInterval(() => {
       const elapsed = performance.now() - startedAt;
-      setCountdownDisplay(Math.max(1, 3 - Math.floor(elapsed / 1000)));
+      const digit = countdownDisplayForElapsed(elapsed);
+      if (countdownDisplayGateRef.current.push(digit)) {
+        setCountdownDisplay(digit);
+      }
       if (elapsed >= 3000 || isStillEnough(levelHistoryRef.current)) {
         completeCountdown();
       }
@@ -1817,15 +2003,34 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // R32 Phase 3 — level indicator listener: DeviceOrientation
   // beta/gamma → the pure horizon-tilt conversion. The listener only
   // exists while the Level toggle is on.
+  //
+  // R36 WS-4 — orientation events can fire dozens of times a second
+  // while the phone moves; every one used to be a React render.
+  // Now the listener paints the horizon line + bubble by direct DOM
+  // writes and touches no React state at all.
   useEffect(() => {
     if (!levelEnabled) return;
     const onOrientation = (e: DeviceOrientationEvent) => {
-      setHorizonTilt(horizonTiltDegrees(e.beta, e.gamma));
+      const tilt = horizonTiltDegrees(e.beta, e.gamma);
+      const wrap = levelWrapRef.current;
+      const line = horizonLineRef.current;
+      const bubble = levelBubbleRef.current;
+      if (!wrap || !line || !bubble) return;
+      if (tilt === null) {
+        wrap.style.display = 'none';
+        return;
+      }
+      wrap.style.display = 'block';
+      const level = Math.abs(tilt) <= 2;
+      line.style.transform = `rotate(${-tilt}deg)`;
+      line.className = `w-28 h-0.5 rounded ${level ? 'bg-emerald-400/90' : 'bg-white/70'}`;
+      bubble.style.transform = `translate(calc(-50% + ${levelBubbleOffsetPx(tilt, 40)}px), -50%)`;
+      bubble.className = `absolute top-1/2 left-1/2 w-2.5 h-2.5 rounded-full ${level ? 'bg-emerald-400' : 'bg-gold'}`;
     };
     window.addEventListener('deviceorientation', onOrientation);
     return () => {
       window.removeEventListener('deviceorientation', onOrientation);
-      setHorizonTilt(null);
+      if (levelWrapRef.current) levelWrapRef.current.style.display = 'none';
     };
   }, [levelEnabled]);
 
@@ -1872,14 +2077,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // a 4K-class quality choice or 60fps) and never changes a choice.
   const phase2Lockable = controlCaps ? lockableSystems(controlCaps) : [];
   const lockedChip = formatLockedChip(lockedSystems);
-  const meterAdvice =
-    lightResult && !isStep2Phase
-      ? lightAdvice(lightResult, {
-          demandingCapture: qualityChoice !== 'hd' || fpsChoice === 60,
-          torchAvailable: facingMode === 'environment' && controlCaps?.torch === true,
-        })
-      : null;
-  const zebraOn = !isStep2Phase && !pendingVideo && !pendingDual && (lightResult?.zebraCells.some(Boolean) ?? false);
+  // R36 WS-4 — the advice line is transition-gated state written by
+  // the meter sampler (above); step 2's frame is playback, not the
+  // camera, so the line never shows there.
+  const meterAdvice = isStep2Phase ? null : meterAdviceText;
+  const zebraOn = !isStep2Phase && !pendingVideo && !pendingDual && zebraAnyOn;
 
   return (
     <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center gap-4 p-6">
@@ -1943,24 +2145,30 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             where the light meter's grid says highlights are clipping.
             Pointer-events none, and like the guides they can never
             appear in a recording (the stream is captured, not the DOM). */}
-        {zebraOn && lightResult && (
+        {/* R36 WS-4 — the full cell grid is mounted once (cells start
+            hidden); the meter sampler paints flagged cells by direct
+            DOM writes, so a zebra change costs no React render. The
+            container itself mounts only once a cell has flagged. */}
+        {zebraOn && (
           <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
-            {lightResult.zebraCells.map((flagged, i) =>
-              flagged ? (
-                <div
-                  key={i}
-                  className="absolute"
-                  style={{
-                    left: `${((i % LIGHT_GRID_COLS) / LIGHT_GRID_COLS) * 100}%`,
-                    top: `${(Math.floor(i / LIGHT_GRID_COLS) / LIGHT_GRID_ROWS) * 100}%`,
-                    width: `${100 / LIGHT_GRID_COLS}%`,
-                    height: `${100 / LIGHT_GRID_ROWS}%`,
-                    background:
-                      'repeating-linear-gradient(45deg, rgba(255,70,70,0.4) 0 4px, rgba(255,70,70,0.08) 4px 8px)',
-                  }}
-                />
-              ) : null,
-            )}
+            {Array.from({ length: LIGHT_GRID_COLS * LIGHT_GRID_ROWS }, (_, i) => (
+              <div
+                key={i}
+                ref={(el) => {
+                  zebraCellRefs.current[i] = el;
+                }}
+                className="absolute"
+                style={{
+                  display: 'none',
+                  left: `${((i % LIGHT_GRID_COLS) / LIGHT_GRID_COLS) * 100}%`,
+                  top: `${(Math.floor(i / LIGHT_GRID_COLS) / LIGHT_GRID_ROWS) * 100}%`,
+                  width: `${100 / LIGHT_GRID_COLS}%`,
+                  height: `${100 / LIGHT_GRID_ROWS}%`,
+                  background:
+                    'repeating-linear-gradient(45deg, rgba(255,70,70,0.4) 0 4px, rgba(255,70,70,0.08) 4px 8px)',
+                }}
+              />
+            ))}
           </div>
         )}
         {/* R32 Phase 2 — tap-to-focus ring: a brief marker at the tap
@@ -1993,54 +2201,50 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         )}
         {/* R32 Phase 2 — light meter pill (top-right; the REC badge
             owns top-left). Live single-camera view only. */}
-        {lightResult && !isStep2Phase && !pendingVideo && !pendingDual && !error && (
+        {lightState && !isStep2Phase && !pendingVideo && !pendingDual && !error && (
           <div className="absolute top-3 right-3 text-[10px] font-bold uppercase tracking-wide text-white bg-black/50 rounded px-2 py-1 pointer-events-none">
-            {lightStateLabel(lightResult.state)}
+            {lightStateLabel(lightState)}
           </div>
         )}
         {/* R32 Phase 3 — level indicator: a horizon line that stays
             with the real horizon (counter-rotated by the tilt) plus a
             bubble in a track at the top. DOM only, pointer-events
             none — like the guides, it can never enter a recording. */}
-        {levelEnabled && horizonTilt !== null && !pendingVideo && !pendingDual && !error && (
-          <>
+        {/* R36 WS-4 — the indicator's wrapper mounts with the Level
+            toggle; the orientation listener shows/rotates it by
+            direct DOM writes (it starts hidden until a real tilt
+            reading arrives). */}
+        {levelEnabled && !pendingVideo && !pendingDual && !error && (
+          <div ref={levelWrapRef} style={{ display: 'none' }}>
             <div
               className="absolute left-1/2 top-1/2 pointer-events-none"
               style={{ transform: 'translate(-50%, -50%)' }}
               aria-hidden="true"
             >
-              <div
-                className={`w-28 h-0.5 rounded ${Math.abs(horizonTilt) <= 2 ? 'bg-emerald-400/90' : 'bg-white/70'}`}
-                style={{ transform: `rotate(${-horizonTilt}deg)` }}
-              />
+              <div ref={horizonLineRef} className="w-28 h-0.5 rounded bg-white/70" />
             </div>
             <div
               className="absolute top-3 left-1/2 -translate-x-1/2 w-24 h-4 rounded-full bg-black/45 pointer-events-none"
               aria-hidden="true"
             >
               <div className="absolute top-1/2 left-1/2 w-px h-2 bg-white/50" style={{ transform: 'translate(-50%, -50%)' }} />
-              <div
-                className={`absolute top-1/2 left-1/2 w-2.5 h-2.5 rounded-full ${Math.abs(horizonTilt) <= 2 ? 'bg-emerald-400' : 'bg-gold'}`}
-                style={{ transform: `translate(calc(-50% + ${levelBubbleOffsetPx(horizonTilt, 40)}px), -50%)` }}
-              />
+              <div ref={levelBubbleRef} className="absolute top-1/2 left-1/2 w-2.5 h-2.5 rounded-full bg-gold" />
             </div>
-          </>
+          </div>
         )}
         {/* R32 Phase 3 — motion coach pill while recording: Smooth /
             Slow down / Too shaky from the live motion level. No pill
             at all when there is no motion signal to judge by. */}
-        {isRecording && coachState && (
+        {/* R36 WS-4 — the pill node mounts while recording but is
+            painted (text, tone class, visibility) by direct DOM
+            writes from the gated coach effect — it starts hidden
+            and stays hidden while there is no motion signal. */}
+        {isRecording && (
           <div
-            className={`absolute bottom-3 left-3 text-[10px] font-bold uppercase tracking-wide text-white rounded px-2 py-1 pointer-events-none ${
-              coachState.tone === 'good'
-                ? 'bg-emerald-600/85'
-                : coachState.tone === 'warn'
-                  ? 'bg-amber-600/90'
-                  : 'bg-red-600/90'
-            }`}
-          >
-            {coachState.text}
-          </div>
+            ref={coachPillRef}
+            className="absolute bottom-3 left-3 text-[10px] font-bold uppercase tracking-wide text-white rounded px-2 py-1 pointer-events-none bg-emerald-600/85"
+            style={{ display: 'none' }}
+          />
         )}
         {/* R32 Phase 3 — steady-start countdown overlay: the count
             finishes early once the phone is still enough, finishes
@@ -2257,6 +2461,36 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               </button>
             </div>
           </div>
+        ) : overlayOnly ? (
+          <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
+            <p className="text-xs text-white/60 text-center">
+              Your recording is ready. Add it as a talking-head overlay on top of your main video.
+            </p>
+            <ReceiptLines receipt={pendingVideo.receipt} />
+            <div className="flex items-center gap-2.5 flex-wrap justify-center">
+              <button
+                onClick={() => confirmPendingVideo(true)}
+                className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
+              >
+                <PictureInPicture2 size={15} /> Add as PiP
+              </button>
+              <button
+                onClick={discardPendingVideo}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Retake
+              </button>
+              <button
+                onClick={() => {
+                  stopStream();
+                  onClose();
+                }}
+                className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
             <p className="text-xs text-white/60 text-center">
@@ -2434,6 +2668,22 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             </button>
           )}
         </div>
+        {/* R36 WS-4 — proven-smooth suggestion: the last take at this
+            camera dropped frames, so the step below is offered with
+            a one-tap apply. Shown only while the rough quality is
+            still the chosen one; ignoring it costs nothing and it is
+            NEVER applied automatically. */}
+        {profileSuggestion && !isRecording && qualityChoice === profileSuggestion.fromQuality && (
+          <div className="flex flex-col items-center gap-1.5 max-w-md w-full rounded-lg bg-white/5 border border-white/15 px-3 py-2.5">
+            <p className="text-[11px] text-white/70 text-center">{profileSuggestion.text}</p>
+            <button
+              onClick={() => setQualityChoice(profileSuggestion.suggestedQuality)}
+              className="min-h-9 px-3 flex items-center justify-center rounded-md bg-gold hover:bg-gold-bright text-black text-[11px] font-bold uppercase tracking-wide transition"
+            >
+              {profileSuggestion.applyLabel}
+            </button>
+          </div>
+        )}
         {isTestingCamera && isRecording && (
           <div className="max-w-md w-full rounded-lg bg-white/5 border border-white/15 px-3 py-2 text-[11px] text-white/80 text-center">
             Recording a 10-second test… move and pan slowly
@@ -2454,7 +2704,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           </div>
         )}
         {/* R24 WS-P4a: real camera zoom — rendered ONLY when the live
-            track exposes a zoom capability (silent absence otherwise). */}
+            track exposes a zoom capability (silent absence otherwise).
+            R36 WS-4: the slider stays ENABLED while recording — the
+            ramped zoom is one of the two applies allowed mid-take. */}
         {zoomCapability && (
           <label className="flex items-center gap-2 w-full max-w-xs text-white/70">
             <span className="text-[11px] font-bold uppercase tracking-wide">Zoom</span>
@@ -2464,7 +2716,6 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               max={zoomCapability.max}
               step={zoomCapability.step}
               value={zoomValue}
-              disabled={isRecording}
               onChange={(e) => applyZoom(Number(e.target.value))}
               className="flex-1 accent-amber-400 disabled:opacity-40"
               aria-label="Camera zoom"
@@ -2486,8 +2737,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               {phase2Lockable.length > 0 && (
                 <button
                   onClick={() => void toggleLock()}
+                  disabled={isRecording}
                   aria-pressed={lockedSystems.length > 0}
-                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg disabled:opacity-40 transition ${
                     lockedSystems.length > 0
                       ? 'bg-gold text-black'
                       : 'bg-white/5 text-white/70 hover:bg-white/10'
@@ -2539,10 +2791,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
                   max={controlCaps.exposure.compensationRange.max}
                   step={controlCaps.exposure.compensationRange.step ?? 0.1}
                   value={exposureCompValue}
+                  disabled={isRecording}
                   onChange={(e) => applyExposureCompensation(Number(e.target.value))}
                   onPointerUp={(e) => applyExposureCompensation(Number((e.target as HTMLInputElement).value), true)}
                   onBlur={(e) => applyExposureCompensation(Number(e.target.value), true)}
-                  className="flex-1 accent-amber-400"
+                  className="flex-1 accent-amber-400 disabled:opacity-40"
                   aria-label="Exposure compensation"
                 />
                 <span className="text-[11px] font-bold tabular-nums w-9 text-right">

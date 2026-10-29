@@ -594,6 +594,14 @@ describe('R26 WS-A2 — planProjectAudioMix (offline mix plan, boundary-clamped)
     expect(plan[0].endTime - plan[0].startTime).toBe(12);
   });
 
+  it('R36: with the project-end boundary (40 = 12s main + 40s PiP), the song is planned to 40, not the old main end 12', () => {
+    const pip = videoItem('v2', 0, 40, { mediaAssetId: 'clip', trimStart: 0, trimEnd: 40 });
+    const plan = planProjectAudioMix(projectWith([videoItem('v1', 0, 12), pip, audioItem('a1', 0, 180)]), 40);
+    const entry = plan.find((p) => p.kind === 'audio');
+    expect(entry).toBeDefined();
+    expect(entry!.endTime).toBe(40); // fades anchor to the new end in the offline mix too
+  });
+
   it('fade fields ride along untouched for the gain-curve sampler (WS-A1)', () => {
     const plan = planProjectAudioMix(projectWith([audioItem('a1', 0, 12)]), 12);
     expect(plan[0].fade).toEqual({ fadeInDuration: 0, fadeOutDuration: 2 });

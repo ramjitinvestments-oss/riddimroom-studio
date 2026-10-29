@@ -354,6 +354,46 @@ describe('R26 WS-S2 — frame-hash gate: cache ON vs OFF must be identical', () 
     expect(factoryCalls).toBe(1);
   });
 
+  it('R36 held photo: a still photo held past its end by a longer PiP video — hashes identical cache ON vs OFF, in span and in the held range', async () => {
+    // Photo main 0–10 (projectWithPhoto's span) + a PiP video 0–20:
+    // the project runs to 20 under the longest-video law, so at t=15
+    // the photo is drawing HELD. Cache eligibility already requires an
+    // identity adjustment for the whole span, and the held draw uses
+    // that same identity — the layer rendered in span must composite
+    // to exactly the held direct draw.
+    const pipEl = { videoWidth: 640, videoHeight: 640 } as unknown as HTMLVideoElement;
+    const build = async (): Promise<Project> => {
+      const project = await projectWithPhoto();
+      const videoTrack = project.tracks.find((t) => t.type === 'video');
+      if (!videoTrack) throw new Error('expected a video track');
+      project.items.push({
+        id: 'pip-1', type: 'video', trackId: videoTrack.id, startTime: 0, endTime: 20,
+        zIndex: 5, visible: true, mediaAssetId: 'pip-vid',
+        position: { x: 80, y: 80 }, scale: 0.3, rotation: 0, opacity: 1,
+        trimStart: 0, trimEnd: 20, speed: 1, reverse: false, volume: 1, muted: true,
+        pip: { isPip: true, shape: 'rounded', borderWidth: 0, borderColor: '#000000', shadow: false },
+      });
+      return project;
+    };
+    const assets = {
+      images: new Map([[photoAsset.id, photoEl]]),
+      videos: new Map([['pip-vid', pipEl]]),
+    };
+    const times = [2, 15, 19];
+    const offProject = await build();
+    setStaticLayerCacheEnabled(false);
+    const off = times.map((t) => frameHash(offProject, assets, t).hash);
+    const onProject = await build();
+    setStaticLayerCacheEnabled(true);
+    const on = times.map((t) => frameHash(onProject, assets, t).hash);
+    expect(on).toEqual(off);
+    // The held frames really did draw the photo (a composite of the
+    // cached layer), not a black tail: one layer render total, and
+    // the in-span and held hashes differ only by the PiP's presence
+    // in both modes equally (asserted by the equality above).
+    expect(factoryCalls).toBe(1);
+  });
+
   it('a mutated item re-renders its layer instead of serving a stale one (signature invalidation)', async () => {
     const assets = { images: new Map([[photoAsset.id, photoEl]]) };
     const project = await projectWithPhoto();

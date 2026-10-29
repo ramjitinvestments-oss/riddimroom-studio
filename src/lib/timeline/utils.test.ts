@@ -9,6 +9,7 @@ import {
   trimItemEnd,
   setItemDuration,
   getProjectDuration,
+  getLongestVideoEnd,
   getMainTrackEnd,
   getMaxItemEnd,
   projectDurationExceedsLimit,
@@ -239,18 +240,25 @@ describe('main-track duration semantics (R26 WS-A2: getMainTrackEnd / getProject
     expect(getProjectDuration(project)).toBe(20);
   });
 
-  it('(b3) non-main visuals do not extend the main end: PiP video, watermark and graphic stage art rules', () => {
+  it('(b3) non-main visuals do not extend the MAIN end: PiP video, watermark and graphic stage art rules', () => {
     const { project: base, ids } = projectWithTracks();
     let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
-    // PiP overlay video running long is an overlay, not the main video.
+    // PiP overlay video running long is an overlay, not the main video —
+    // the MAIN-only measure (`getMainTrackEnd`) is unchanged by R36.
     project = addItem(project, makeVideo({ trackId: ids.video, startTime: 0, endTime: 30, pip: { isPip: true, shape: 'circle', borderWidth: 0, borderColor: '#000000', shadow: false } }));
     // A watermark image running long is decoration, not main content.
     project = addItem(project, makeItem({ trackId: ids.image, startTime: 0, endTime: 50, role: 'watermark' }));
     expect(getMainTrackEnd(project)).toBe(12);
-    expect(getProjectDuration(project)).toBe(12);
+    // R36 SUPERSEDES the R26 expectation here (was: duration 12): the
+    // PiP is a video, so the longest-video law extends the PROJECT
+    // duration to its end — 30, not the watermark's 50 (images that
+    // aren't main content never extend via the video measure).
+    expect(getLongestVideoEnd(project)).toBe(30);
+    expect(getProjectDuration(project)).toBe(30);
     // Promo stage artwork (role 'graphic', the recipes' main images) IS main content.
     project = addItem(project, makeItem({ trackId: ids.image, startTime: 0, endTime: 15, role: 'graphic' }));
     expect(getMainTrackEnd(project)).toBe(15);
+    expect(getProjectDuration(project)).toBe(30); // the 30s PiP video is still the longest video
   });
 
   it('(c) audio-only project → no main end, old max-end rule unchanged', () => {
@@ -283,6 +291,158 @@ describe('main-track duration semantics (R26 WS-A2: getMainTrackEnd / getProject
     const project = addItem(base, makeVideo({ trackId: ids.audio, startTime: 0, endTime: 12 }));
     expect(getMainTrackEnd(project)).toBeNull();
     expect(getProjectDuration(project)).toBe(12);
+  });
+});
+
+describe('longest-video duration law (R36: getLongestVideoEnd / getProjectDuration)', () => {
+  function makeVideo(overrides: Partial<VideoTimelineItem> & { trackId: string }): VideoTimelineItem {
+    return {
+      id: generateTimelineId('item'),
+      type: 'video',
+      startTime: 0,
+      endTime: 12,
+      zIndex: 0,
+      visible: true,
+      mediaAssetId: 'video-asset',
+      position: { x: 50, y: 50 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      trimStart: 0,
+      trimEnd: 12,
+      speed: 1,
+      reverse: false,
+      volume: 1,
+      muted: false,
+      ...overrides,
+    };
+  }
+
+  function makeAudio(overrides: Partial<AudioTimelineItem> & { trackId: string }): AudioTimelineItem {
+    return {
+      id: generateTimelineId('item'),
+      type: 'audio',
+      startTime: 0,
+      endTime: 180,
+      zIndex: 1,
+      visible: true,
+      mediaAssetId: 'audio-asset',
+      role: 'music',
+      volume: 1,
+      muted: false,
+      trimStart: 0,
+      trimEnd: 180,
+      fade: { fadeInDuration: 0, fadeOutDuration: 0 },
+      ...overrides,
+    };
+  }
+
+  function projectWithTracks(): { project: Project; ids: Record<string, string> } {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const ids: Record<string, string> = {};
+    (['video', 'image', 'text', 'caption', 'audio'] as const).forEach((type, i) => {
+      const track = createTrack(type, type, i);
+      ids[type] = track.id;
+      project = addTrack(project, track);
+    });
+    return { project, ids };
+  }
+
+  const pip = { isPip: true, shape: 'circle', borderWidth: 0, borderColor: '#000000', shadow: false } as const;
+
+  it('12s main + 40s PiP = 40 (the PiP is the longest video)', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    project = addItem(project, makeVideo({ trackId: ids.video, startTime: 0, endTime: 40, pip: { ...pip } }));
+    expect(getMainTrackEnd(project)).toBe(12); // main-only measure intact
+    expect(getLongestVideoEnd(project)).toBe(40);
+    expect(getProjectDuration(project)).toBe(40);
+  });
+
+  it('40s main + 12s PiP = 40 (the main video is the longest video)', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 40, trimEnd: 40 }));
+    project = addItem(project, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12, pip: { ...pip } }));
+    expect(getLongestVideoEnd(project)).toBe(40);
+    expect(getProjectDuration(project)).toBe(40);
+  });
+
+  it('main photo 20s + video 12s = 20 (unchanged from R26: the main measure wins when longer)', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeItem({ trackId: ids.image, startTime: 0, endTime: 20, role: 'photo' }));
+    project = addItem(project, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    expect(getMainTrackEnd(project)).toBe(20);
+    expect(getLongestVideoEnd(project)).toBe(12);
+    expect(getProjectDuration(project)).toBe(20);
+  });
+
+  it('image-only project is unchanged (no video items → longest-video end is null)', () => {
+    const { project: base, ids } = projectWithTracks();
+    const project = addItem(base, makeItem({ trackId: ids.image, startTime: 0, endTime: 9, role: 'photo' }));
+    expect(getLongestVideoEnd(project)).toBeNull();
+    expect(getProjectDuration(project)).toBe(9);
+  });
+
+  it('a 3-minute song under a 12s main with no longer video still = 12 (audio never extends)', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    project = addItem(project, makeAudio({ trackId: ids.audio, startTime: 0, endTime: 180 }));
+    expect(getProjectDuration(project)).toBe(12);
+  });
+
+  it('a pair second (video, pair role second) counts as a video for the longest end', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    project = addItem(
+      project,
+      makeVideo({
+        trackId: ids.video,
+        startTime: 0,
+        endTime: 40,
+        pair: {
+          pairId: 'pair-1',
+          role: 'second',
+          layout: 'pip',
+          dividerStyle: 'none',
+          dividerWidthPx: 0,
+        } as VideoTimelineItem['pair'],
+      }),
+    );
+    expect(getLongestVideoEnd(project)).toBe(40);
+    expect(getProjectDuration(project)).toBe(40);
+  });
+
+  it('a video on ANY track counts (track placement does not filter the video measure)', () => {
+    const { project: base, ids } = projectWithTracks();
+    // Deliberately mismatched placement (video item on the audio track,
+    // outside the primary visual track set): getMainTrackEnd ignores
+    // it, getLongestVideoEnd does not.
+    const project = addItem(base, makeVideo({ trackId: ids.audio, startTime: 0, endTime: 33, trimEnd: 33 }));
+    expect(getMainTrackEnd(project)).toBeNull();
+    expect(getLongestVideoEnd(project)).toBe(33);
+    expect(getProjectDuration(project)).toBe(33);
+  });
+
+  it('no video items at all → longest-video end is null (audio-only / text-only / empty)', () => {
+    const { project: base, ids } = projectWithTracks();
+    const audioOnly = addItem(base, makeAudio({ trackId: ids.audio, startTime: 0, endTime: 180 }));
+    expect(getLongestVideoEnd(audioOnly)).toBeNull();
+    expect(getProjectDuration(audioOnly)).toBe(180); // fallback rule, exactly as before
+    expect(getLongestVideoEnd(base)).toBeNull();
+    expect(getProjectDuration(base)).toBe(0);
+  });
+
+  it('a PiP pushing the total past the technical ceiling trips projectDurationExceedsLimit (the law working)', () => {
+    const { project: base, ids } = projectWithTracks();
+    let project = addItem(base, makeVideo({ trackId: ids.video, startTime: 0, endTime: 12 }));
+    project = addItem(project, makeVideo({ trackId: ids.video, startTime: 0, endTime: 40, pip: { ...pip } }));
+    // Under R26 this was 12 and did NOT trip a 30s limit; under R36 it is 40 and does.
+    expect(projectDurationExceedsLimit(project, 30)).toBe(true);
+    const overCeiling = addItem(
+      project,
+      makeVideo({ trackId: ids.video, startTime: 0, endTime: MAX_MEDIA_SECONDS + 1, pip: { ...pip } }),
+    );
+    expect(projectDurationExceedsLimit(overCeiling)).toBe(true);
   });
 });
 

@@ -3,6 +3,7 @@ import { ArrowLeftRight, FlipHorizontal2, Volume2, VolumeX } from 'lucide-react'
 import { useProject } from '../../context/ProjectContext';
 import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipShapeRefitZoom, pipSyncNudgePatch, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, PIP_SYNC_NUDGE_MAX_FRAMES, type PipLayoutId } from '../../lib/pip';
 import { PipRingControls, PipShapeStrip } from './PipShapeControls';
+import { PipAddButtons } from './PipAddButtons';
 import { framingSlackPx, pipBoxPx, resolveCropOffset, resolveCropZoom } from '../../lib/render/compositor';
 import { updateItem } from '../../lib/timeline/utils';
 import {
@@ -186,6 +187,12 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
       <p className="text-[11px] text-white/40">Talking-head / explainer: overlay a video on top of your main video. Drag + resize on canvas.</p>
       {pipCount > 0 && <p className="text-[11px] text-emerald-400">{pipCount} overlay{pipCount === 1 ? '' : 's'} on timeline</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
+      {/* R36 WS-1 — empty state (no PiP selected): Record PiP and
+          Upload PiP as equal primary actions. The buttons dispatch
+          the PiP request events (lib/pipRequests); MediaImportPanel
+          owns the camera and the overlay file input and answers them,
+          so the take/file lands through the existing overlay path. */}
+      {!selectedPip && <PipAddButtons />}
       <label className="flex flex-col gap-1 text-xs text-white/60">
         Layout
         <select value={layoutId} onChange={(e) => setLayoutId(e.target.value as PipLayoutId)} className="bg-white/10 rounded px-2 py-2 text-white text-base min-h-11">

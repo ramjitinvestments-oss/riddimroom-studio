@@ -34,6 +34,7 @@ import {
 } from '../../lib/timeline/utils';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
 import { isPipItem } from '../../lib/pip';
+import { findHeldMainVisualItem } from '../../lib/render/compositor';
 import {
   TRANSITION_CATEGORIES,
   TRANSITION_INTENSITY_DEFAULT,
@@ -129,6 +130,16 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
   // track item to dissolve into/from (see `findAdjacentNextItem`'s doc
   // comment); this is what keeps the control from ever being a cosmetic
   // button with nothing real to do.
+  // R36 hold-last-frame: this item will hold (its last frame / the
+  // picture stays up for the project's tail) exactly when the shared
+  // compositor's finder names it the holder at its own end — one
+  // source of truth, so the note never appears for an item that
+  // won't actually hold.
+  const willHold =
+    !!project &&
+    (item.type === 'video' || item.type === 'image') &&
+    findHeldMainVisualItem(project, item.endTime)?.id === item.id;
+
   const dissolveAvailable = hasAnimation && !!project && canCrossDissolve(project, item.id);
   const dissolveApplied = dissolveAvailable && !!project && crossDissolveAlreadyApplied(project, item.id, CROSS_DISSOLVE_DURATION_SECONDS);
 
@@ -760,6 +771,12 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
         </div>
       )}
       {item.type !== 'caption' && <p className="text-white/30">Duration: {duration.toFixed(1)}s</p>}
+      {willHold && item.type === 'video' && (
+        <p className="text-white/50">{"This clip's last frame stays on screen until the project ends."}</p>
+      )}
+      {willHold && item.type === 'image' && (
+        <p className="text-white/50">This picture stays on screen until the project ends.</p>
+      )}
 
       {item.type === 'caption' && <CaptionInspector item={item} />}
       {item.type === 'audio' && <AudioInspector item={item} />}

@@ -8,22 +8,26 @@
  * past the Free plan's limit and still export. This module is the one
  * place that turns the plan value into an export decision.
  *
- * Duration is measured by the project's MAIN-TRACK end
- * (`getMainTrackEnd`, the R26 semantics the renderers already use to
- * clip audio): an over-long song under a short main clip does not make
- * the project longer. A project with no main visual content measures 0
- * here — the renderers' fallback duration for audio/text-only projects
- * is unchanged, and those projects have no main content to cap.
+ * Duration is measured by the R36 LONGEST-VIDEO DURATION LAW:
+ * `getProjectDuration(project)` (the max of the main-track end and the
+ * longest-video end, PiP/overlay and pair videos included) whenever
+ * the project has any visual content — a main visual item OR any
+ * video item at all. An over-long song under a short visual project
+ * still does not make the project longer (audio never extends). A
+ * project with NO visual content (audio-only, text-only, caption-only
+ * or empty) measures 0 here — preserving R35's documented exemption:
+ * those projects keep the renderers' fallback duration, and a
+ * song-only project has no visual content to cap.
  */
 
 import { maxProjectSecondsFor, type LicenseTier } from './licensing';
 import { DURATION_LIMIT_EPSILON_SECONDS } from './media/constants';
-import { formatTimecode, getMainTrackEnd } from './timeline/utils';
+import { formatTimecode, getLongestVideoEnd, getProjectDuration, isMainVisualItem } from './timeline/utils';
 import type { Project } from '../types/timeline';
 
 export interface ProjectDurationGate {
   tier: LicenseTier;
-  /** Main-track end in seconds — the duration the cap is judged on. */
+  /** Project duration in seconds (R36 measure) — the duration the cap is judged on. */
   durationSeconds: number;
   /** The tier's cap, from the licensing source of truth. */
   maxProjectSeconds: number;
@@ -77,7 +81,12 @@ export function projectDurationCapIndicator(
  * consumes no daily export quota.
  */
 export function evaluateProjectExportGate(project: Project, tier: LicenseTier): ProjectDurationGate {
-  const durationSeconds = getMainTrackEnd(project) ?? 0;
+  // R36 measure: the full project duration when the project has any
+  // visual content (a main visual item, or any video item — a PiP-only
+  // project is visual content too); 0 for audio/text-only projects.
+  const hasVisualContent =
+    getLongestVideoEnd(project) !== null || project.items.some((item) => isMainVisualItem(item));
+  const durationSeconds = hasVisualContent ? getProjectDuration(project) : 0;
   const maxProjectSeconds = maxProjectSecondsFor(tier);
   const exceedsCap = durationSeconds > maxProjectSeconds + DURATION_LIMIT_EPSILON_SECONDS;
   return {

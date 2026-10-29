@@ -38,7 +38,8 @@
 import type { AnimationPreset, CaptionTimelineItem, ColorGradeSettings, CropSettings, EndTransformSettings, FramingSettings, ImageTimelineItem, MotionSettings, Project, TextTimelineItem, Transform } from '../../types/timeline';
 import { canvasFontStack } from '../fonts';
 import { PIP_GOLD_RING_STOPS, tracePipShapePath } from '../pip';
-import { getItemsAtTime } from '../timeline/utils';
+import { getItemsAtTime, getProjectDuration, isMainVisualItem } from '../timeline/utils';
+import type { TimelineItem } from '../../types/timeline';
 import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle, resolveCaptionFontPx } from '../captions/styles';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
@@ -512,26 +513,33 @@ export function computeLoopedSourceTime(trimStart: number, trimEnd: number, elap
 }
 
 // ---------------------------------------------------------------------------
-// R26 WS-A2 — audio clipped at the main track's end, at RENDER time only
+// R26 WS-A2 / R36 — audio clipped at the PROJECT end, at RENDER time only
 //
-// `getMainTrackEnd(project)` (lib/timeline/utils.ts) returns the end of
-// the primary visual track, or null when the project has no visual main
-// track. Every render path — live preview gain computation and both
-// exporters — must let an audio-carrying item contribute NOTHING at or
-// past that boundary, without ever modifying the stored item (the
-// timeline keeps showing the item's true length; only its audible
-// window is clamped here). A null (or non-finite) boundary means "no
-// main track" → no clipping, exactly the pre-R26 behaviour.
+// R26 clipped audio at the main track's end. R36 (the longest-video
+// duration law) moves the boundary: every render path — live preview
+// gain computation and both exporters — now passes
+// `getProjectDuration(project)` (lib/timeline/utils.ts) as the boundary,
+// so an audio-carrying item contributes NOTHING at or past the project
+// end, and its fade-out lands ON that end — including when a PiP/overlay
+// video is what extends the project past the main track. Without ever
+// modifying the stored item (the timeline keeps showing the item's true
+// length; only its audible window is clamped here). A null (or
+// non-finite) boundary means "no boundary supplied" → no clipping.
+// Callers pass the project duration, never `getMainTrackEnd` — that
+// main-only measure would re-impose R26's superseded PiP exclusion on
+// the audio mix.
 // ---------------------------------------------------------------------------
 
 /**
- * The audible end of an item under the WS-A2 main-track boundary: the
+ * The audible end of an item under the project-end boundary: the
  * item's own end, pulled back to the boundary when one exists. Never
- * moves the end later, never touches stored state.
+ * moves the end later, never touches stored state. (The parameter was
+ * the main-track end under R26; since R36 it is the project duration —
+ * the parameter name follows the new law.)
  */
-export function effectiveAudioEndTime(endTime: number, mainTrackEnd: number | null | undefined): number {
-  if (mainTrackEnd === null || mainTrackEnd === undefined || !Number.isFinite(mainTrackEnd)) return endTime;
-  return Math.min(endTime, mainTrackEnd);
+export function effectiveAudioEndTime(endTime: number, projectEnd: number | null | undefined): number {
+  if (projectEnd === null || projectEnd === undefined || !Number.isFinite(projectEnd)) return endTime;
+  return Math.min(endTime, projectEnd);
 }
 
 /**
@@ -541,7 +549,7 @@ export function effectiveAudioEndTime(endTime: number, mainTrackEnd: number | nu
  * effectiveEnd)`, and inside the window `volume × computeFadeOpacity`
  * with the fade ramps anchored to the EFFECTIVE end. Anchoring to the
  * effective end is what makes the two workstreams compose: when the
- * main-track boundary clips an item, its fade-out ramp lands ON the
+ * project-end boundary clips an item, its fade-out ramp lands ON the
  * boundary (the audible fitted end) instead of being cut off mid-ramp
  * by a hard mute. With no boundary (null) or a boundary at/past the
  * item's own end this is exactly the pre-R26 gain formula
@@ -550,8 +558,9 @@ export function effectiveAudioEndTime(endTime: number, mainTrackEnd: number | nu
  *
  * Used by both exporters; the live preview's per-frame gain lines in
  * PreviewPane compute the identical factor as
- * `computeFadeOpacity(fade, t - start, effectiveAudioEndTime(end, main) - t)`
- * with the boundary from `getMainTrackEnd`, so preview and export agree.
+ * `computeFadeOpacity(fade, t - start, effectiveAudioEndTime(end, projectEnd) - t)`
+ * with the boundary from `getProjectDuration` (R36), so preview and
+ * export agree.
  */
 export function computeAudioGainAtTime(
   item: {
@@ -562,12 +571,73 @@ export function computeAudioGainAtTime(
     fade?: { fadeInDuration: number; fadeOutDuration: number };
   },
   timeSeconds: number,
-  mainTrackEnd: number | null | undefined,
+  projectEnd: number | null | undefined,
 ): number {
   if (item.muted) return 0;
-  const end = effectiveAudioEndTime(item.endTime, mainTrackEnd);
+  const end = effectiveAudioEndTime(item.endTime, projectEnd);
   if (!(timeSeconds >= item.startTime && timeSeconds < end)) return 0;
   return item.volume * computeFadeOpacity(item.fade, timeSeconds - item.startTime, end - timeSeconds);
+}
+
+// ---------------------------------------------------------------------------
+// R36 — HOLD-LAST-FRAME (shared compositor, preview AND export)
+//
+// Under the longest-video law a project can continue past the MAIN
+// visual layer's end (today that only happens when an overlay/pair
+// video is the longest). The canvas must never go black for that tail:
+// the latest-ending MAIN visual item (per `isMainVisualItem` in
+// lib/timeline/utils.ts) keeps drawing until the project end — a video
+// draws its FINAL frame (its media time clamped to its last frame,
+// see `videoSourceTimeForItem`), an image simply keeps drawing.
+// PiP/overlay items do NOT hold — they end at their endTime as always
+// (a frozen overlay in the corner is a defect, not the law's intent).
+// Sequential main clips are unaffected: the hold only applies past
+// the main layer's latest end, when no other main visual item is
+// active. Preview and both exporters inherit this because they all
+// draw through `drawFrame` — their media binding must ALSO include
+// the held item's video element (sought to its clamped last frame),
+// which is what `findHeldMainVisualItem` is exported for.
+// ---------------------------------------------------------------------------
+
+/**
+ * The main visual item that holds at `timeSeconds`, or null when no
+ * hold applies: a hold applies only when the project runs past the
+ * main visual layer's latest end (`timeSeconds` at/past that end and
+ * before the R36 project duration) — which by construction means no
+ * main visual item is active at that instant. The holder is the
+ * latest-ending visible main visual item (ties: highest zIndex,
+ * then id, so the choice is deterministic).
+ */
+export function findHeldMainVisualItem(project: Project, timeSeconds: number): TimelineItem | null {
+  const mainItems = project.items.filter((item) => item.visible && isMainVisualItem(item));
+  if (mainItems.length === 0) return null;
+  const mainLayerEnd = Math.max(...mainItems.map((item) => item.endTime));
+  if (!(timeSeconds >= mainLayerEnd && timeSeconds < getProjectDuration(project))) return null;
+  // Defensive: an active main visual item (overlapping sequential
+  // content) means this instant is not past the main layer after all.
+  if (mainItems.some((item) => item.startTime <= timeSeconds && timeSeconds < item.endTime)) return null;
+  const sorted = [...mainItems].sort(
+    (a, b) => b.endTime - a.endTime || b.zIndex - a.zIndex || a.id.localeCompare(b.id),
+  );
+  return sorted[0] ?? null;
+}
+
+/**
+ * The source-media time (seconds) a video item shows at timeline time
+ * `timeSeconds`: `trimStart + elapsed × speed`, CLAMPED to the item's
+ * trim window. Within the item's span this is exactly the mapping
+ * every render path already used; past the item's end it clamps to
+ * `trimEnd` — the last frame — which is what makes hold-last-frame a
+ * one-line binding for the preview and both exporters: sync the held
+ * item's element with this same function and it sits on its final
+ * frame instead of running off the end of its source.
+ */
+export function videoSourceTimeForItem(
+  item: { startTime: number; trimStart: number; trimEnd: number; speed?: number },
+  timeSeconds: number,
+): number {
+  const raw = item.trimStart + Math.max(0, timeSeconds - item.startTime) * (item.speed || 1);
+  return Math.min(raw, item.trimEnd);
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,6 +1319,7 @@ function drawVideoItem(
   canvasWidth: number,
   canvasHeight: number,
   timeSeconds: number,
+  held = false,
 ) {
   // Keyframe-lite (Phase 2.3): the frame's effective transform — base
   // transform unless an end transform interpolates it across the item.
@@ -1271,8 +1342,14 @@ function drawVideoItem(
       : { w: canvasWidth * effective.scale, h: canvasHeight * effective.scale };
   const w = box.w;
   const h = box.h;
-  const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
-  const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
+  // R36 hold: a held item draws its FINAL state at full strength — the
+  // entrance/exit + fade machinery must not run (its `untilEnd` is
+  // negative past the item's end, which would ramp the held frame to
+  // invisible), while a continuous motion effect settles at its own
+  // final position (elapsed = the item's full duration, progress 1).
+  const itemDuration = item.endTime - item.startTime;
+  const transitionAdjustment = held ? { ...IDENTITY_ADJUSTMENT } : animationFor(item, timeSeconds, canvasWidth, canvasHeight);
+  const motionAdjustment = computeMotionAdjustment(item.motion, held ? itemDuration : timeSeconds - item.startTime, itemDuration, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
   const isPip = !!item.pip?.isPip;
   applyTransformedDraw(
@@ -1368,6 +1445,7 @@ function drawImageItem(
   canvasWidth: number,
   canvasHeight: number,
   timeSeconds: number,
+  held = false,
 ) {
   // Keyframe-lite (Phase 2.3): same effective-transform treatment as video.
   const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
@@ -1391,8 +1469,11 @@ function drawImageItem(
       : 1;
   const w = tileBox ? tileBox.w * (effective.scale / (item.scale || 1)) : baseWidth;
   const h = tileBox ? tileBox.h * (effective.scale / (item.scale || 1)) : baseWidth * aspect;
-  const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
-  const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
+  // R36 hold: same rule as drawVideoItem — final state, full strength
+  // (no exit/fade ramp), motion settled at progress 1.
+  const itemDuration = item.endTime - item.startTime;
+  const transitionAdjustment = held ? { ...IDENTITY_ADJUSTMENT } : animationFor(item, timeSeconds, canvasWidth, canvasHeight);
+  const motionAdjustment = computeMotionAdjustment(item.motion, held ? itemDuration : timeSeconds - item.startTime, itemDuration, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
   // R24 framing (zoom/pan): when active, the drawn source rect comes
   // from the same cover/zoom/pan math the video path uses, cover-fitting
@@ -1971,6 +2052,7 @@ function drawImageItemCached(
   canvasWidth: number,
   canvasHeight: number,
   timeSeconds: number,
+  held = false,
 ): boolean {
   if (!staticLayerCacheEnabled) return false;
   if (!isStaticLayerCacheEligible(item)) return false;
@@ -1988,7 +2070,13 @@ function drawImageItemCached(
   if (!existing && perProject.size >= MAX_STATIC_LAYER_ENTRIES) return false;
   const layer = (staticLayerCanvasFactoryOverride ?? defaultStaticLayerCanvas)(canvasWidth, canvasHeight);
   if (!layer) return false;
-  drawImageItem(layer.ctx as CanvasRenderingContext2D, item, img, canvasWidth, canvasHeight, timeSeconds);
+  // R36: the held range is consistent with the cache by construction —
+  // eligibility already requires an identity adjustment for the WHOLE
+  // span (no motion/animation/fade/endTransform), and the held draw
+  // uses that same identity adjustment, so a layer rendered during the
+  // item's normal span and one first rendered while held are the same
+  // pixels. The signature stays time-free, as before.
+  drawImageItem(layer.ctx as CanvasRenderingContext2D, item, img, canvasWidth, canvasHeight, timeSeconds, held);
   perProject.set(item.id, { signature, img, canvas: layer.canvas, generation: staticLayerGeneration });
   ctx.drawImage(layer.canvas, 0, 0);
   return true;
@@ -2027,15 +2115,27 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
     for (const winner of byZone.values()) captionWinners.add(winner.id);
   }
 
-  for (const item of activeItems) {
+  // R36 hold-last-frame: past the main layer's end (and only then),
+  // the latest-ending main visual item joins the draw list in its
+  // zIndex position and draws held (final frame / full strength).
+  // Overlay/PiP items are never held, and the pair-divider block
+  // below still reads `activeItems` only, so a lone held tile paints
+  // no seam.
+  const heldItem = findHeldMainVisualItem(project, timeSeconds);
+  const drawItems = heldItem
+    ? [...activeItems, heldItem].sort((a, b) => a.zIndex - b.zIndex)
+    : activeItems;
+
+  for (const item of drawItems) {
     if (!item.visible) continue;
+    const held = heldItem !== null && item.id === heldItem.id;
     switch (item.type) {
       case 'video': {
         const videoEl =
           assets.videos?.get(item.mediaAssetId) ??
           (assets.activeVideo && assets.activeVideo.assetId === item.mediaAssetId ? assets.activeVideo.element : undefined);
         if (videoEl) {
-          drawVideoItem(ctx, item, videoEl, canvasWidth, canvasHeight, timeSeconds);
+          drawVideoItem(ctx, item, videoEl, canvasWidth, canvasHeight, timeSeconds, held);
         }
         break;
       }
@@ -2049,8 +2149,8 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
         // cache (rendered once, composited thereafter); everything else
         // draws directly, exactly as before.
         if (img && isImageReady(img)) {
-          if (!drawImageItemCached(ctx, project, item, img, canvasWidth, canvasHeight, timeSeconds)) {
-            drawImageItem(ctx, item, img, canvasWidth, canvasHeight, timeSeconds);
+          if (!drawImageItemCached(ctx, project, item, img, canvasWidth, canvasHeight, timeSeconds, held)) {
+            drawImageItem(ctx, item, img, canvasWidth, canvasHeight, timeSeconds, held);
           }
         }
         break;

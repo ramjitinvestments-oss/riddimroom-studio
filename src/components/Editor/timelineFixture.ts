@@ -103,6 +103,49 @@ export function buildReferenceProject(): Project {
   };
 }
 
+/**
+ * R36 ghosting fixture: 12s main video + a 40s PiP video (the longest
+ * video, so the project ends at 40 under the longest-video law) under
+ * a 180s song. The end line must sit at 40 and only audio past 40
+ * ghosts.
+ */
+export function buildPipLongestProject(): Project {
+  const project = buildReferenceProject();
+  const vidAsset = asset('asset-main', 'video', 'main.mp4', 12);
+  const pipAsset = asset('asset-pip', 'video', 'pip.mp4', 40);
+  const songAsset = asset('asset-song', 'audio', 'song.mp3', 180);
+  return {
+    ...project,
+    id: 'project-pip-longest',
+    tracks: [
+      { id: 'track-video', type: 'video', name: 'Main Video', order: 0, visible: true, locked: false },
+      { id: 'track-audio', type: 'audio', name: 'Music', order: 1, visible: true, locked: false, muted: false },
+    ],
+    mediaAssets: { [vidAsset.id]: vidAsset, [pipAsset.id]: pipAsset, [songAsset.id]: songAsset },
+    items: [
+      {
+        id: 'item-main', type: 'video', trackId: 'track-video', startTime: 0, endTime: 12,
+        zIndex: 0, visible: true, mediaAssetId: vidAsset.id,
+        position: { ...T }, scale: 1, rotation: 0, opacity: 1,
+        trimStart: 0, trimEnd: 12, speed: 1, reverse: false, volume: 1, muted: false,
+      },
+      {
+        id: 'item-pip', type: 'video', trackId: 'track-video', startTime: 0, endTime: 40,
+        zIndex: 1, visible: true, mediaAssetId: pipAsset.id,
+        position: { x: 80, y: 80 }, scale: 0.3, rotation: 0, opacity: 1,
+        trimStart: 0, trimEnd: 40, speed: 1, reverse: false, volume: 1, muted: true,
+        pip: { isPip: true, shape: 'rounded', borderWidth: 0, borderColor: '#000000', shadow: false },
+      },
+      {
+        id: 'item-song', type: 'audio', trackId: 'track-audio', startTime: 0, endTime: 180,
+        zIndex: 0, visible: true, mediaAssetId: songAsset.id, role: 'music',
+        trimStart: 0, trimEnd: 180, volume: 0.8, muted: false,
+        fade: { fadeInDuration: 0, fadeOutDuration: 0 },
+      },
+    ],
+  };
+}
+
 /** WS-A2 ghosting fixture: 12s main video under a 180s song. */
 export function buildGhostProject(): Project {
   const project = buildReferenceProject();

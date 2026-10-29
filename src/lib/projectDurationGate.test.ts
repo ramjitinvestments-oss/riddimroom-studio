@@ -12,7 +12,45 @@ import {
   updateItem,
 } from './timeline/utils';
 import { deserializeProject, serializeProject } from './timeline/serialization';
-import type { AudioTimelineItem, ImageTimelineItem, Project } from '../types/timeline';
+import type { AudioTimelineItem, ImageTimelineItem, Project, VideoTimelineItem } from '../types/timeline';
+
+function makeVideo(overrides: Partial<VideoTimelineItem> & { trackId: string }): VideoTimelineItem {
+  return {
+    id: generateTimelineId('item'),
+    type: 'video',
+    startTime: 0,
+    endTime: 12,
+    zIndex: 0,
+    visible: true,
+    mediaAssetId: 'video-asset',
+    position: { x: 50, y: 50 },
+    scale: 1,
+    rotation: 0,
+    opacity: 1,
+    trimStart: 0,
+    trimEnd: 12,
+    speed: 1,
+    reverse: false,
+    volume: 1,
+    muted: false,
+    ...overrides,
+  };
+}
+
+const PIP_SETTINGS = { isPip: true, shape: 'circle', borderWidth: 0, borderColor: '#000000', shadow: false } as const;
+
+/** Main video `mainSeconds` + a PiP video ending at `pipEndSeconds`, on the one video track. */
+function projectWithMainAndPip(mainSeconds: number, pipEndSeconds: number): Project {
+  let project = createEmptyProject({ ownerUid: 'test-uid' });
+  const track = createTrack('video', 'Main Video', 0);
+  project = addTrack(project, track);
+  project = addItem(project, makeVideo({ trackId: track.id, startTime: 0, endTime: mainSeconds, trimEnd: mainSeconds }));
+  project = addItem(
+    project,
+    makeVideo({ trackId: track.id, startTime: 0, endTime: pipEndSeconds, trimEnd: pipEndSeconds, pip: { ...PIP_SETTINGS }, zIndex: 2 }),
+  );
+  return project;
+}
 
 function makeImage(overrides: Partial<ImageTimelineItem> & { trackId: string }): ImageTimelineItem {
   return {
@@ -111,6 +149,52 @@ describe('project duration export gate — tier matrix', () => {
     expect(gate.message).toBe(
       'This project is 10:00.1 long, but Lifetime projects can be up to 10 minutes. Trim it to 10 minutes to export it.',
     );
+  });
+
+  it('R36: 12s main + 40s PiP on Free is refused, and the copy reads 0:40', () => {
+    const gate = evaluateProjectExportGate(projectWithMainAndPip(12, 40), 'free');
+    expect(gate.durationSeconds).toBe(40);
+    expect(gate.exceedsCap).toBe(true);
+    expect(gate.message).toBe(
+      'This project is 0:40 long, but Free projects can be up to 30 seconds. Trim it to 30 seconds or upgrade to Lifetime to export it.',
+    );
+    expect(gate.indicator).toContain('Free plan: up to 30 seconds — this project is 0:40');
+  });
+
+  it('R36: 40s main + 12s PiP on Free is refused at 0:40 (as before)', () => {
+    const gate = evaluateProjectExportGate(projectWithMainAndPip(40, 12), 'free');
+    expect(gate.durationSeconds).toBe(40);
+    expect(gate.exceedsCap).toBe(true);
+    expect(gate.message).toContain('This project is 0:40 long');
+    expect(gate.indicator).toContain('this project is 0:40');
+  });
+
+  it('R36: 12s main + 40s PiP on Lifetime exports fine', () => {
+    const gate = evaluateProjectExportGate(projectWithMainAndPip(12, 40), 'lifetime');
+    expect(gate.durationSeconds).toBe(40);
+    expect(gate.exceedsCap).toBe(false);
+    expect(gate.message).toBeNull();
+  });
+
+  it('R36: a PiP-only project (no main item) still measures its video duration', () => {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const track = createTrack('video', 'Main Video', 0);
+    project = addTrack(project, track);
+    project = addItem(project, makeVideo({ trackId: track.id, startTime: 0, endTime: 40, trimEnd: 40, pip: { ...PIP_SETTINGS } }));
+    const gate = evaluateProjectExportGate(project, 'free');
+    expect(gate.durationSeconds).toBe(40);
+    expect(gate.exceedsCap).toBe(true);
+  });
+
+  it('audio-only project measures 0 (R35 exemption preserved under R36)', () => {
+    let project = createEmptyProject({ ownerUid: 'test-uid' });
+    const audioTrack = createTrack('audio', 'Music', 0);
+    project = addTrack(project, audioTrack);
+    project = addItem(project, makeAudio({ trackId: audioTrack.id, startTime: 0, endTime: 180 }));
+    const gate = evaluateProjectExportGate(project, 'free');
+    expect(gate.durationSeconds).toBe(0);
+    expect(gate.exceedsCap).toBe(false);
+    expect(gate.message).toBeNull();
   });
 
   it('measures the main track, not an over-long song under it (R26 semantics)', () => {

@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioLines, Camera, Clapperboard, PictureInPicture2 } from 'lucide-react';
 import { validateMediaFile } from '../../lib/media/validate';
 import { uploadMediaFile, type UploadProgressEvent } from '../../lib/media/upload';
@@ -9,6 +9,8 @@ import { generateTimelineId } from '../../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 import { CameraCapture, type CaptureDualResult, type CaptureResult } from './CameraCapture';
 import { TrimSelectModal } from './TrimSelectModal';
+import { PipAddButtons } from './PipAddButtons';
+import { claimPipRequest, RECORD_PIP_EVENT, UPLOAD_PIP_EVENT } from '../../lib/pipRequests';
 import { defaultSplitOrientation, softInTileWarning } from '../../lib/pairLayout';
 
 /**
@@ -115,6 +117,11 @@ interface MediaImportPanelProps {
 export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded, onPairAssetUploaded }: MediaImportPanelProps) {
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [showCamera, setShowCamera] = useState(false);
+  // R36 WS-1 — true while the camera is open for "Record PiP": every
+  // finished take then lands DIRECTLY as the PiP (see the CameraCapture
+  // wiring at the bottom), instead of offering the main/overlay choice.
+  const [cameraForPip, setCameraForPip] = useState(false);
+  const panelRootRef = useRef<HTMLDivElement>(null);
   const [pendingTrim, setPendingTrim] = useState<PendingTrimSelection | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Tweaks round — one hidden input per clear action (main / overlay /
@@ -388,6 +395,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   const startCaptureUpload = useCallback(
     (result: CaptureResult, purpose: UploadPurpose) => {
       setShowCamera(false);
+      setCameraForPip(false);
       const extension = result.kind === 'photo' ? 'jpg' : 'webm';
       const mimeType = result.kind === 'photo' ? 'image/jpeg' : (result.blob.type || 'video/webm');
       const file = new File([result.blob], `capture-${Date.now()}.${extension}`, { type: mimeType });
@@ -422,6 +430,63 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
     [startCaptureUpload, onOverlayAssetUploaded],
   );
 
+  /**
+   * R36 WS-1 — "Record PiP" landing: the take goes through the SAME
+   * overlay upload path as handleCaptureAsOverlay (purpose 'overlay' →
+   * EditorShell's addPipOverlay insert with the R24 camera defaults:
+   * rounded shape, pip.fit 'source', sound on), for video and photo
+   * alike — in PiP camera mode there is no main-clip choice to offer.
+   */
+  const handleCaptureForcedOverlay = useCallback(
+    (result: CaptureResult) => {
+      if (!onOverlayAssetUploaded) {
+        startCaptureUpload(result, 'main');
+        return;
+      }
+      startCaptureUpload(result, 'overlay');
+    },
+    [startCaptureUpload, onOverlayAssetUploaded],
+  );
+
+  const openRecordPipCamera = useCallback(() => {
+    setCameraForPip(true);
+    setShowCamera(true);
+  }, []);
+
+  const openMainCamera = useCallback(() => {
+    setCameraForPip(false);
+    setShowCamera(true);
+  }, []);
+
+  // R36 WS-1 — PiP requests from PipPanel / the timeline Overlay lane
+  // arrive as window events (lib/pipRequests, the R27 undo-toast
+  // pattern). This panel owns the camera and the overlay file input,
+  // so it is the only listener. It can be mounted more than once
+  // (desktop aside + mobile sheet render the same node): the first
+  // RENDERED instance claims each event object, hidden duplicates
+  // (a display:none aside) neither claim nor answer it.
+  useEffect(() => {
+    const isRendered = () => {
+      const el = panelRootRef.current;
+      if (!el || typeof el.getClientRects !== 'function') return true;
+      return el.getClientRects().length > 0;
+    };
+    const onRecordPip = (e: Event) => {
+      if (!isRendered() || !claimPipRequest(e)) return;
+      openRecordPipCamera();
+    };
+    const onUploadPip = (e: Event) => {
+      if (!isRendered() || !claimPipRequest(e)) return;
+      overlayInputRef.current?.click();
+    };
+    window.addEventListener(RECORD_PIP_EVENT, onRecordPip);
+    window.addEventListener(UPLOAD_PIP_EVENT, onUploadPip);
+    return () => {
+      window.removeEventListener(RECORD_PIP_EVENT, onRecordPip);
+      window.removeEventListener(UPLOAD_PIP_EVENT, onUploadPip);
+    };
+  }, [openRecordPipCamera]);
+
   const handleCaptureDual = useCallback(
     (result: CaptureDualResult) => {
       setShowCamera(false);
@@ -451,7 +516,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   );
 
   return (
-    <div className="flex flex-col gap-3">
+    <div ref={panelRootRef} className="flex flex-col gap-3">
       {/* Tweaks round — three unmistakable add actions. "Add Video /
           Image" is THE main-timeline action (gold, primary); "Add
           Overlay" and "Add Audio" sit beside it at the same size so a
@@ -480,8 +545,14 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
             <AudioLines size={17} /> Add Audio
           </button>
         </div>
+        {/* R36 WS-1 — the overlay surface's primary pair: Record PiP /
+            Upload PiP as equal actions. Both reuse the paths above —
+            Record PiP opens this panel's camera in PiP mode, Upload
+            PiP clicks the same overlay file input as "Add Overlay".
+            The main flow's quiet camera entry below is untouched. */}
+        <PipAddButtons onRecord={openRecordPipCamera} onUpload={() => overlayInputRef.current?.click()} />
         <button
-          onClick={() => setShowCamera(true)}
+          onClick={openMainCamera}
           className="min-h-10 px-3 rounded-lg text-white/60 hover:text-white hover:bg-white/5 text-xs font-bold flex items-center justify-center gap-1.5 transition"
         >
           <Camera size={14} /> Record with camera instead
@@ -639,10 +710,16 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
 
       {showCamera && (
         <CameraCapture
-          onCapture={handleCapture}
-          onCaptureAsOverlay={onOverlayAssetUploaded ? handleCaptureAsOverlay : undefined}
-          onCaptureDual={onDualAssetUploaded ? handleCaptureDual : undefined}
-          onClose={() => setShowCamera(false)}
+          onCapture={cameraForPip ? handleCaptureForcedOverlay : handleCapture}
+          onCaptureAsOverlay={
+            onOverlayAssetUploaded ? (cameraForPip ? handleCaptureForcedOverlay : handleCaptureAsOverlay) : undefined
+          }
+          onCaptureDual={!cameraForPip && onDualAssetUploaded ? handleCaptureDual : undefined}
+          overlayOnly={cameraForPip}
+          onClose={() => {
+            setShowCamera(false);
+            setCameraForPip(false);
+          }}
           canvasWidth={canvasWidth}
           canvasHeight={canvasHeight}
         />

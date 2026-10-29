@@ -406,6 +406,10 @@ export function applyFullTemplate(
   }
 
   // ── Placeholder texts, anchored to the (possibly new) reel timing. ──
+  // R36 consumer note: `getProjectDuration` follows the longest-video
+  // law automatically, so when there is no reel the CTA/outro anchors
+  // below land on the piece's real export end — including a tail a
+  // pre-existing PiP/overlay video creates — matching the exporters.
   const duration = getProjectDuration(next);
   const anchorBase = hasReel ? reelStart : 0;
   const endAnchor = hasReel ? reelEnd : duration;

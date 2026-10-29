@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { computeAudioGainAtTime, computeFadeOpacity, computeLoopedSourceTime, croppedCoverSourceRect, coverSourceRect, effectiveAudioEndTime, framingSlackPx, hasActiveFraming, interpolateTransform, pipBoxPx, resolveCropOffset, resolveCropZoom } from './compositor';
-import type { Transform } from '../../types/timeline';
+import { computeAudioGainAtTime, computeFadeOpacity, computeLoopedSourceTime, croppedCoverSourceRect, coverSourceRect, drawFrame, effectiveAudioEndTime, findHeldMainVisualItem, framingSlackPx, hasActiveFraming, interpolateTransform, pipBoxPx, resolveCropOffset, resolveCropZoom, videoSourceTimeForItem } from './compositor';
+import type { Project, Transform } from '../../types/timeline';
 
 /**
  * "Universal 30-second media standard" focused tests — spec item 9 ("Add
@@ -476,5 +476,195 @@ describe('R24 drawFrame — Flip mirrors the media draw transform', () => {
     drawFrame(rec.ctx, project, 0.5, { images: new Map([[asset.id, imgEl]]), videos: new Map() });
     expect(rec.drawImageCalls.length).toBeGreaterThan(0);
     expect(rec.scaleCalls).toContainEqual([-1, 1]);
+  });
+});
+
+/**
+ * R36 — hold-last-frame + audio anchoring to the new project end.
+ * Fixture style mirrors the recording fakes above: drawImage calls are
+ * recorded WITH the ctx.globalAlpha in force at that instant, so a
+ * held item's full-strength draw is asserted, not just its presence.
+ */
+function makeAlphaCtx() {
+  const draws: Array<{ src: unknown; alpha: number }> = [];
+  const gradient = { addColorStop: () => {} };
+  const ctx: Record<string, unknown> = {
+    globalAlpha: 1,
+    filter: '',
+    fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
+    font: '',
+    textAlign: '',
+    textBaseline: '',
+    shadowColor: '',
+    shadowBlur: 0,
+    shadowOffsetX: 0,
+    shadowOffsetY: 0,
+    globalCompositeOperation: 'source-over',
+    save: () => {},
+    restore: () => {},
+    clearRect: () => {},
+    fillRect: () => {},
+    fill: () => {},
+    stroke: () => {},
+    beginPath: () => {},
+    clip: () => {},
+    arc: () => {},
+    rect: () => {},
+    roundRect: () => {},
+    moveTo: () => {},
+    lineTo: () => {},
+    quadraticCurveTo: () => {},
+    bezierCurveTo: () => {},
+    closePath: () => {},
+    ellipse: () => {},
+    fillText: () => {},
+    strokeText: () => {},
+    translate: () => {},
+    rotate: () => {},
+    transform: () => {},
+    scale: () => {},
+    measureText: (t: string) => ({ width: t.length * 6 }),
+    createRadialGradient: () => gradient,
+    createLinearGradient: () => gradient,
+    drawImage: (src: unknown) => {
+      draws.push({ src, alpha: ctx.globalAlpha as number });
+    },
+  };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, draws };
+}
+
+function holdProject(mainEnd: number, pipEnd: number, mainKind: 'video' | 'image' = 'video'): Project {
+  const base = {
+    id: 'project-hold',
+    ownerUid: 'test-uid',
+    name: 'Hold',
+    schemaVersion: 1,
+    canvasWidth: 1080,
+    canvasHeight: 1920,
+    frameRate: 30,
+    createdAt: 1,
+    updatedAt: 1,
+    watermarkEnabled: false,
+    tracks: [
+      { id: 'track-video', type: 'video' as const, name: 'Main Video', order: 0, visible: true, locked: false },
+      { id: 'track-image', type: 'image' as const, name: 'Images', order: 1, visible: true, locked: false },
+    ],
+    mediaAssets: {},
+    items: [],
+  };
+  const mainItem =
+    mainKind === 'video'
+      ? {
+          id: 'item-main', type: 'video' as const, trackId: 'track-video', startTime: 0, endTime: mainEnd,
+          zIndex: 0, visible: true, mediaAssetId: 'main-vid',
+          position: { x: 50, y: 50 }, scale: 1, rotation: 0, opacity: 1,
+          trimStart: 0, trimEnd: mainEnd, speed: 1, reverse: false, volume: 1, muted: false,
+          fade: { fadeInDuration: 0, fadeOutDuration: 2 },
+        }
+      : {
+          id: 'item-main', type: 'image' as const, trackId: 'track-image', startTime: 0, endTime: mainEnd,
+          zIndex: 0, visible: true, mediaAssetId: 'main-img', role: 'photo' as const,
+          position: { x: 50, y: 50 }, scale: 4, rotation: 0, opacity: 1,
+        };
+  const pipItem = {
+    id: 'item-pip', type: 'video' as const, trackId: 'track-video', startTime: 0, endTime: pipEnd,
+    zIndex: 1, visible: true, mediaAssetId: 'pip-vid',
+    position: { x: 80, y: 80 }, scale: 0.3, rotation: 0, opacity: 1,
+    trimStart: 0, trimEnd: pipEnd, speed: 1, reverse: false, volume: 1, muted: true,
+    pip: { isPip: true, shape: 'rounded', borderWidth: 0, borderColor: '#000000', shadow: false },
+  };
+  return { ...base, items: [mainItem, pipItem] } as unknown as Project;
+}
+
+describe('R36 hold-last-frame — shared compositor', () => {
+  const mainEl = { videoWidth: 1280, videoHeight: 720 } as unknown as HTMLVideoElement;
+  const pipEl = { videoWidth: 640, videoHeight: 640 } as unknown as HTMLVideoElement;
+  const imgEl = { complete: true, naturalWidth: 800, naturalHeight: 600 } as unknown as HTMLImageElement;
+
+  it('12s main video + 40s PiP at t=20: the main item is drawn held (full strength) and the PiP is drawn playing', () => {
+    const project = holdProject(12, 40);
+    const mainItem = project.items.find((i) => i.id === 'item-main')!;
+    // The holder is the main item, and only in the held range.
+    expect(findHeldMainVisualItem(project, 20)?.id).toBe('item-main');
+    expect(findHeldMainVisualItem(project, 5)).toBeNull();
+    // Its media time clamps to its end (last frame), never runs past it.
+    if (mainItem.type === 'video') {
+      expect(videoSourceTimeForItem(mainItem, 20)).toBe(12);
+      expect(videoSourceTimeForItem(mainItem, 5)).toBe(5);
+    }
+    const { ctx, draws } = makeAlphaCtx();
+    drawFrame(ctx, project, 20, {
+      images: new Map(),
+      videos: new Map([['main-vid', mainEl], ['pip-vid', pipEl]]),
+    });
+    const mainDraw = draws.find((d) => d.src === mainEl);
+    const pipDraw = draws.find((d) => d.src === pipEl);
+    expect(mainDraw).toBeDefined();
+    // Full strength despite the item's 2s fade-out: the held draw must
+    // NOT run the exit/fade ramp (which would make it invisible).
+    expect(mainDraw!.alpha).toBeCloseTo(1, 5);
+    expect(pipDraw).toBeDefined();
+  });
+
+  it('at t=5 both the main and the PiP draw normally (no hold yet)', () => {
+    const project = holdProject(12, 40);
+    const { ctx, draws } = makeAlphaCtx();
+    drawFrame(ctx, project, 5, {
+      images: new Map(),
+      videos: new Map([['main-vid', mainEl], ['pip-vid', pipEl]]),
+    });
+    expect(draws.some((d) => d.src === mainEl)).toBe(true);
+    expect(draws.some((d) => d.src === pipEl)).toBe(true);
+  });
+
+  it('40s main + 12s PiP at t=20 does NOT draw the ended PiP (overlays never hold)', () => {
+    const project = holdProject(40, 12);
+    expect(findHeldMainVisualItem(project, 20)).toBeNull(); // the main layer is still active
+    const { ctx, draws } = makeAlphaCtx();
+    drawFrame(ctx, project, 20, {
+      images: new Map(),
+      videos: new Map([['main-vid', mainEl], ['pip-vid', pipEl]]),
+    });
+    expect(draws.some((d) => d.src === mainEl)).toBe(true);
+    expect(draws.some((d) => d.src === pipEl)).toBe(false);
+  });
+
+  it('image main holds: a 12s photo main + 40s PiP still draws the photo at t=20', () => {
+    const project = holdProject(12, 40, 'image');
+    expect(findHeldMainVisualItem(project, 20)?.id).toBe('item-main');
+    const { ctx, draws } = makeAlphaCtx();
+    drawFrame(ctx, project, 20, {
+      images: new Map([['main-img', imgEl]]),
+      videos: new Map([['pip-vid', pipEl]]),
+    });
+    expect(draws.some((d) => d.src === imgEl)).toBe(true);
+    expect(draws.some((d) => d.src === pipEl)).toBe(true);
+  });
+
+  it('sequential main clips are unaffected: a later main clip active in the tail means no hold', () => {
+    const project = holdProject(12, 40);
+    const second = {
+      ...(project.items[0] as object),
+      id: 'item-main-2', startTime: 12, endTime: 40, mediaAssetId: 'main-vid',
+    };
+    const seq = { ...project, items: [...project.items, second] } as unknown as Project;
+    expect(findHeldMainVisualItem(seq, 20)).toBeNull();
+  });
+});
+
+describe('R36 computeAudioGainAtTime — fades anchor to the NEW project end', () => {
+  const song = {
+    startTime: 0, endTime: 180, volume: 1, muted: false,
+    fade: { fadeInDuration: 0, fadeOutDuration: 2 },
+  };
+
+  it('with the project end at 40 (12s main + 40s PiP), the song is audible past the old main end and fades out ON 40', () => {
+    expect(computeAudioGainAtTime(song, 20, 40)).toBeCloseTo(1, 5); // past 12: silent under R26, audible under R36
+    expect(computeAudioGainAtTime(song, 38, 40)).toBeCloseTo(1, 5); // ramp starts at project end − 2s
+    expect(computeAudioGainAtTime(song, 39, 40)).toBeCloseTo(0.5, 5);
+    expect(computeAudioGainAtTime(song, 40, 40)).toBe(0);
+    expect(computeAudioGainAtTime(song, 100, 40)).toBe(0);
   });
 });

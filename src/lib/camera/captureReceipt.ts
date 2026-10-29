@@ -198,11 +198,28 @@ export interface FormattedCaptureReceipt {
 }
 
 /**
+ * R36 WS-4 — the receipt's plain smoothness verdict, from the SAME
+ * estimate and the SAME threshold as the drop advisory: a measured
+ * take under the advisory threshold earns "Smooth take"; a measured
+ * take over it earns null here because the advisory
+ * (`captureReceiptDropWarning`) already stands in its place; and a
+ * receipt that never measured drops earns null — no estimate, no
+ * verdict, never fabricated.
+ */
+export function captureReceiptSmoothnessVerdict(receipt: CaptureReceipt): string | null {
+  if (typeof receipt.droppedFramesEstimate !== 'number') return null;
+  return shouldWarnAboutDroppedFrames(receipt.droppedFramesEstimate, receipt.expectedFramesEstimate)
+    ? null
+    : 'Smooth take';
+}
+
+/**
  * Format a receipt for the review screen. The summary names the
  * achieved size by its short side ("1080p" for 1080×1920), the
  * achieved frame rate and the honest quality word; the plain
- * details line carries duration + file size. Unknown facts are
- * left out rather than guessed. The technical line is kept
+ * details line carries duration + file size plus, when the take was
+ * measured smooth, the plain "Smooth take" verdict. Unknown facts
+ * are left out rather than guessed. The technical line is kept
  * separate in `technicalDetails` for the expander.
  */
 export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureReceipt {
@@ -214,7 +231,11 @@ export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureR
   if (shortSide > 0) parts.push(`${qualityWordForShortSide(shortSide)} quality`);
   const summary = parts.length > 0 ? `Recorded: ${parts.join(' · ')}` : 'Recorded';
 
-  return { summary, details: formatPlainDetails(receipt), technicalDetails: formatTechnicalDetails(receipt) };
+  const plainDetails = formatPlainDetails(receipt);
+  const verdict = captureReceiptSmoothnessVerdict(receipt);
+  const details = verdict ? (plainDetails ? `${plainDetails} · ${verdict}` : verdict) : plainDetails;
+
+  return { summary, details, technicalDetails: formatTechnicalDetails(receipt) };
 }
 
 /**

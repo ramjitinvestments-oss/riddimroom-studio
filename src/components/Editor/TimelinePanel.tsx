@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Volume2, VolumeX, ZoomIn, ZoomOut } from 'lucide-react';
 import type { Project, TimelineItem, Track } from '../../types/timeline';
-import { getItemsForTrack, moveItem, trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode, updateItem } from '../../lib/timeline/utils';
+import { moveItem, trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode, updateItem } from '../../lib/timeline/utils';
 import { getAssetPoster } from '../../lib/media/thumbnails';
 import { useProject } from '../../context/ProjectContext';
 import {
   computeDragTarget,
   createDragSession,
   createSeekThrottler,
+  deriveTimelineRows,
   dragPreviewStyle,
   getGhostSplit,
   getPosterStrip,
@@ -19,6 +20,7 @@ import {
   type DragTarget,
   type TimelineDragMode,
 } from './timelinePanelLogic';
+import { PipAddButtons } from './PipAddButtons';
 
 interface TimelinePanelProps {
   project: Project;
@@ -222,6 +224,9 @@ const ClipRow = React.memo(function ClipRow({
  * max(project duration, max item end), so an over-long audio item stays
  * fully reachable; a project end line marks getProjectDuration, and the
  * part of an audio item past it renders ghosted.
+ * R36: the end line follows the longest-video law automatically (via
+ * getProjectEndSeconds → getProjectDuration) — in a PiP-longest project
+ * the line sits at the PiP's end and audio past that line ghosts.
  */
 export const TimelinePanel = React.memo(function TimelinePanel({ project, currentTime, onSeek, selectedItemId, onSelectItem }: TimelinePanelProps) {
   const { mutate } = useProject();
@@ -544,10 +549,51 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
     [mutate],
   );
 
-  const sortedTracks = [...project.tracks].sort((a, b) => a.order - b.order);
+  // R36 WS-2 — rows are DERIVED (timelinePanelLogic.deriveTimelineRows):
+  // track rows in track order with PiP / pair-second items pulled out
+  // into the labelled Overlay lane group above the main video row.
+  // Clips keep every interaction they had — ClipRow is unchanged and
+  // drag/trim still commit through moveItem/trimItemStart/trimItemEnd,
+  // which never change an item's track or pip status.
+  const laneRows = deriveTimelineRows(project);
   const selectedItem = selectedItemId ? project.items.find((i) => i.id === selectedItemId) : undefined;
   const canSplit = !!selectedItem && currentTime > selectedItem.startTime + 0.05 && currentTime < selectedItem.endTime - 0.05;
   const showEndLine = projectEnd > 0 && extent - projectEnd > 0.001;
+
+  // One clip element, shared by track rows and Overlay sub-lanes — the
+  // row an item is drawn in is presentation only (see the WS-2 audit
+  // in timelinePanelLogic); every prop and interaction is identical.
+  const renderClip = (item: TimelineItem, trackType: Track['type']) => {
+    // Clip label: the source asset's filename for media items, the
+    // content itself for text/captions.
+    const clipLabel =
+      item.type === 'text'
+        ? item.text
+        : item.type === 'caption'
+          ? item.words.map((w) => w.text).join(' ') || 'Caption'
+          : (project.mediaAssets[(item as { mediaAssetId: string }).mediaAssetId]?.fileName ?? item.type);
+    const posterUrl =
+      item.type === 'video' || item.type === 'image' ? posters.get(item.mediaAssetId) : undefined;
+    return (
+      <ClipRow
+        key={item.id}
+        item={item}
+        trackType={trackType}
+        extent={extent}
+        projectEnd={projectEnd}
+        selected={item.id === selectedItemId}
+        beingDragged={item.id === draggingItemId}
+        posterUrl={posterUrl}
+        clipLabel={clipLabel}
+        onClipClick={handleClipClick}
+        onMouseDragStart={handleMouseDragStart}
+        onTouchDragStart={handleTouchDragStart}
+        onToggleMute={handleToggleMute}
+      />
+    );
+  };
+  const trackTypeForItem = (item: TimelineItem): Track['type'] =>
+    project.tracks.find((t) => t.id === item.trackId)?.type ?? 'video';
 
   return (
     <div className="flex flex-col gap-1 bg-white/5 rounded-lg p-3">
@@ -598,14 +644,30 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
         <div className="flex gap-2 select-none" style={{ minWidth: `${Math.max(1, extent * pxPerSec)}px` }}>
           {/* Label column — plain vertical stack, same row height as the track-box column below so the two stay aligned. */}
           <div className="flex flex-col gap-1 shrink-0 w-16">
-            {sortedTracks.map((track) => (
-              <span
-                key={track.id}
-                className="h-11 lg:h-8 flex items-center text-[10px] text-white/40 uppercase tracking-wide truncate"
-              >
-                {track.name}
-              </span>
-            ))}
+            {laneRows.map((row, rowIndex) =>
+              row.kind === 'track' ? (
+                <span
+                  key={row.id}
+                  className="h-11 lg:h-8 flex items-center text-[10px] text-white/40 uppercase tracking-wide truncate"
+                >
+                  {row.track.name}
+                </span>
+              ) : row.kind === 'overlay' ? (
+                <span
+                  key={row.id}
+                  className="h-11 lg:h-8 flex items-center text-[10px] font-bold text-gold uppercase tracking-wide truncate"
+                >
+                  {rowIndex === laneRows.findIndex((r) => r.kind !== 'track') ? 'Overlay' : ''}
+                </span>
+              ) : (
+                <span
+                  key={row.id}
+                  className="h-12 flex items-center text-[10px] font-bold text-gold uppercase tracking-wide truncate"
+                >
+                  Overlay
+                </span>
+              ),
+            )}
           </div>
 
           {/* Track-box column — the one true coordinate space for clip position, scrub, and the playhead. */}
@@ -614,7 +676,12 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
             onClick={(e) => seekFromClientX(e.clientX)}
             onMouseDown={(e) => {
               // Background press = scrub start (clip presses stopPropagation before reaching here).
-              if (e.target === e.currentTarget || (e.target as HTMLElement).dataset?.trackRow !== undefined) {
+              const targetDataset = (e.target as HTMLElement).dataset;
+              if (
+                e.target === e.currentTarget ||
+                targetDataset?.trackRow !== undefined ||
+                targetDataset?.overlayLane !== undefined
+              ) {
                 beginScrub(e.clientX, { move: 'mousemove', up: 'mouseup' });
               }
             }}
@@ -641,43 +708,42 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
                 style={{ left: `${(projectEnd / extent) * 100}%` }}
               />
             )}
-            {sortedTracks.map((track) => {
-              const items = getItemsForTrack(project, track.id);
+            {laneRows.map((row) => {
+              if (row.kind === 'overlay-empty') {
+                // WS-1 + WS-2: the empty Overlay lane stays rendered
+                // (slim) with the Record PiP / Upload PiP pair inline —
+                // the discoverable PiP entry. The buttons dispatch the
+                // PiP request events MediaImportPanel listens for.
+                return (
+                  <div
+                    key={row.id}
+                    data-overlay-lane={row.id}
+                    className="relative h-12 bg-gold/5 border border-dashed border-gold/40 rounded flex items-center px-2"
+                  >
+                    <div className="flex-1 max-w-md">
+                      <PipAddButtons />
+                    </div>
+                  </div>
+                );
+              }
+              if (row.kind === 'overlay') {
+                return (
+                  <div
+                    key={row.id}
+                    data-overlay-lane={row.id}
+                    className="relative h-11 lg:h-8 bg-gold/10 border-l-2 border border-gold/40 rounded overflow-hidden"
+                  >
+                    {row.items.map((item) => renderClip(item, trackTypeForItem(item)))}
+                  </div>
+                );
+              }
               return (
-                <div key={track.id} data-track-row={track.id} className="relative h-11 lg:h-8 bg-white/5 rounded overflow-hidden">
-                  {items.map((item) => {
-                    // Clip label: the source asset's filename for media
-                    // items, the content itself for text/captions.
-                    const clipLabel =
-                      item.type === 'text'
-                        ? item.text
-                        : item.type === 'caption'
-                          ? item.words.map((w) => w.text).join(' ') || 'Caption'
-                          : (project.mediaAssets[(item as { mediaAssetId: string }).mediaAssetId]?.fileName ?? item.type);
-                    const posterUrl =
-                      item.type === 'video' || item.type === 'image' ? posters.get(item.mediaAssetId) : undefined;
-                    return (
-                      <ClipRow
-                        key={item.id}
-                        item={item}
-                        trackType={track.type}
-                        extent={extent}
-                        projectEnd={projectEnd}
-                        selected={item.id === selectedItemId}
-                        beingDragged={item.id === draggingItemId}
-                        posterUrl={posterUrl}
-                        clipLabel={clipLabel}
-                        onClipClick={handleClipClick}
-                        onMouseDragStart={handleMouseDragStart}
-                        onTouchDragStart={handleTouchDragStart}
-                        onToggleMute={handleToggleMute}
-                      />
-                    );
-                  })}
+                <div key={row.id} data-track-row={row.track.id} className="relative h-11 lg:h-8 bg-white/5 rounded overflow-hidden">
+                  {row.items.map((item) => renderClip(item, row.track.type))}
                 </div>
               );
             })}
-            {sortedTracks.length === 0 && <p className="text-xs text-white/30 py-4 text-center">No tracks yet.</p>}
+            {project.tracks.length === 0 && <p className="text-xs text-white/30 py-4 text-center">No tracks yet.</p>}
           </div>
         </div>
       </div>

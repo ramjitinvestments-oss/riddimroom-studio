@@ -5,8 +5,9 @@
  * perf-measured) without a DOM. TimelinePanel is the only production
  * consumer; everything here is deterministic given its inputs.
  */
-import type { Project, TimelineItem } from '../../types/timeline';
-import { getMaxItemEnd, getProjectDuration } from '../../lib/timeline/utils';
+import type { Project, TimelineItem, Track } from '../../types/timeline';
+import { getItemsForTrack, getMaxItemEnd, getProjectDuration } from '../../lib/timeline/utils';
+import { isPipItem } from '../../lib/pip';
 
 // ---------------------------------------------------------------------------
 // WS-A2 — extent, project end line, ghost split
@@ -15,7 +16,7 @@ import { getMaxItemEnd, getProjectDuration } from '../../lib/timeline/utils';
 /**
  * Scrollable timeline extent (seconds): the ruler/scroll area must reach
  * the farthest item end even when that item (an over-long song) extends
- * past the project duration, which R26 defines by the main track.
+ * past the project duration (R36: the longest-video law's duration).
  * `max(getProjectDuration, getMaxItemEnd)` — for ordinary projects the
  * two are equal and nothing changes.
  */
@@ -23,7 +24,12 @@ export function getTimelineExtent(project: Project): number {
   return Math.max(getProjectDuration(project), getMaxItemEnd(project));
 }
 
-/** The project end (seconds) — where the visible end line is drawn. */
+/**
+ * The project end (seconds) — where the visible end line is drawn.
+ * R36: this follows the new law automatically (it is
+ * `getProjectDuration`), so in a PiP-longest project the end line sits
+ * at the PiP's end and only audio past THAT line ghosts.
+ */
 export function getProjectEndSeconds(project: Project): number {
   return getProjectDuration(project);
 }
@@ -56,6 +62,116 @@ export function getGhostSplit(item: TimelineItem, projectEndSeconds: number): Gh
     ghostOffsetFraction: (ghostStartTime - item.startTime) / duration,
     fullyGhosted: ghostStartTime <= item.startTime,
   };
+}
+
+// ---------------------------------------------------------------------------
+// R36 WS-2 — the PiP "Overlay" lane (presentation + placement only)
+//
+// AUDIT CONCLUSION (what the model does today, verified 2026-10-29):
+// tracks are typed ('video' | 'image' | 'text' | 'caption' | 'audio')
+// and there is exactly ONE video track. A PiP is a VIDEO item with
+// `pip.isPip` set (lib/pip's addPipOverlay / isPipItem) sitting on that
+// same video track — the model has NO separate overlay track. A pair's
+// second item (R32 PairSettings, role 'second') likewise sits on its
+// ordinary track — the video track for a split tile or a camera PiP,
+// the image track for an imported image second. Before R36 the
+// timeline rendered one row per track, so PiPs and pair seconds were
+// drawn inside the main video row (or the image row), interleaved
+// with main clips.
+//
+// WHAT R36 CHANGED (this section + TimelinePanel's row rendering
+// only): the timeline now DERIVES a dedicated, labelled "Overlay"
+// lane group, presented above the main video row. Every PiP item and
+// every pair-second item is pulled out of its track row into the
+// Overlay group; overlapping overlay items stack as packed sub-lanes
+// (see packOverlaySubLanes). This is a pure derivation over the
+// existing model — no item's trackId, pip or pair fields are read
+// differently anywhere else, dragging still commits through the same
+// moveItem/trim helpers (which never touch trackId or pip), and the
+// compositor still draws by item geometry (position/scale/frameRect/
+// zIndex), never by lane — so preview = export is preserved by
+// construction. An empty Overlay group still yields one slim
+// 'overlay-empty' row so the lane (and its Record PiP / Upload PiP
+// entry) is always discoverable.
+// ---------------------------------------------------------------------------
+
+/**
+ * True when an item belongs in the Overlay lane: a PiP item, or the
+ * SECOND item of a pair (pair.role === 'second', video or image).
+ * A pair's MAIN item is not an overlay — it stays in its track row.
+ */
+export function isOverlayLaneItem(item: TimelineItem): boolean {
+  if (isPipItem(item)) return true;
+  return (item.type === 'video' || item.type === 'image') && item.pair?.role === 'second';
+}
+
+export interface OverlaySubLane {
+  /** Stable row id: 'overlay-0', 'overlay-1', … in packing order. */
+  id: string;
+  /** Items in this sub-lane, in start-time order, never overlapping. */
+  items: TimelineItem[];
+}
+
+/**
+ * Pack overlay items into sub-lanes: items are ordered by start time
+ * (ties: earlier end, then higher zIndex, then id, so the order is
+ * fully deterministic), and each item joins the FIRST sub-lane whose
+ * last item ends at or before it starts — non-overlapping PiPs share
+ * a sub-lane; overlapping PiPs stack in separate sub-lanes.
+ */
+export function packOverlaySubLanes(items: TimelineItem[]): OverlaySubLane[] {
+  const sorted = [...items].sort(
+    (a, b) =>
+      a.startTime - b.startTime || a.endTime - b.endTime || b.zIndex - a.zIndex || a.id.localeCompare(b.id),
+  );
+  const lanes: TimelineItem[][] = [];
+  for (const item of sorted) {
+    const lane = lanes.find((l) => l[l.length - 1].endTime <= item.startTime);
+    if (lane) lane.push(item);
+    else lanes.push([item]);
+  }
+  return lanes.map((laneItems, i) => ({ id: `overlay-${i}`, items: laneItems }));
+}
+
+/** One row of the timeline as TimelinePanel renders it, top to bottom. */
+export type TimelineLaneRow =
+  | { kind: 'overlay'; id: string; items: TimelineItem[] }
+  | { kind: 'overlay-empty'; id: 'overlay-empty'; items: TimelineItem[] }
+  | { kind: 'track'; id: string; track: Track; items: TimelineItem[] };
+
+/**
+ * Derive the timeline's rows from a project: one row per track (in
+ * track order) with overlay items REMOVED from their track rows, and
+ * the Overlay lane group (packed sub-lanes, or one empty row)
+ * inserted immediately above the first video track's row — above the
+ * main video row. With no video track the group goes first. Every
+ * project item appears in exactly one row.
+ */
+export function deriveTimelineRows(project: Project): TimelineLaneRow[] {
+  const tracks = [...project.tracks].sort((a, b) => a.order - b.order);
+  const overlayItems = project.items.filter(isOverlayLaneItem);
+  const subLanes = packOverlaySubLanes(overlayItems);
+  const overlayRows: TimelineLaneRow[] =
+    subLanes.length > 0
+      ? subLanes.map((lane) => ({ kind: 'overlay' as const, id: lane.id, items: lane.items }))
+      : [{ kind: 'overlay-empty' as const, id: 'overlay-empty' as const, items: [] }];
+
+  const rows: TimelineLaneRow[] = [];
+  let overlayInserted = false;
+  for (const track of tracks) {
+    if (!overlayInserted && track.type === 'video') {
+      rows.push(...overlayRows);
+      overlayInserted = true;
+    }
+    rows.push({
+      kind: 'track',
+      id: track.id,
+      track,
+      items: getItemsForTrack(project, track.id).filter((i) => !isOverlayLaneItem(i)),
+    });
+  }
+  if (!overlayInserted) rows.unshift(...overlayRows);
+  return rows;
 }
 
 // ---------------------------------------------------------------------------

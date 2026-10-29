@@ -290,6 +290,9 @@ export function buildPosterProject(
   const s = W / 1080;
   const margin = 75 * s;
   const maxWidthPx = W - 2 * margin;
+  // R36 consumer note: follows the longest-video law automatically —
+  // the poster's stage items span the project's real export duration,
+  // including a tail created by a longer PiP/overlay video.
   const duration =
     opts.durationSeconds ?? (getProjectDuration(project) > 0 ? getProjectDuration(project) : 5);
 
