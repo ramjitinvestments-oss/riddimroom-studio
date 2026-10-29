@@ -341,6 +341,17 @@ export interface PipSettings {
    * ±PIP_SYNC_NUDGE_MAX_FRAMES project frames). Absent = 0.
    */
   syncNudgeFrames?: number;
+  /**
+   * R32 Phase 3 — true when this PiP was placed as a camera recording
+   * (`addPipOverlay`'s camera path: the dual / two-step pair overlay,
+   * or a single camera recording sent to PiP). Persisted at placement
+   * so the pair-safe motion cap (`lib/templates/pairMotion`) can still
+   * recognise a camera pair when a template is applied long afterwards.
+   * Absent on PiPs placed before R32 Phase 3 and on uploaded overlays —
+   * for the older camera PiPs, `fit: 'source'` is the legacy signal
+   * (only camera placements ever set it).
+   */
+  fromCamera?: boolean;
   /** True when this video item is a PiP overlay (drawn on top of the main video). */
   isPip: boolean;
   /**
@@ -388,9 +399,82 @@ export interface FramingSettings {
   cropOffsetY?: number;
 }
 
+/**
+ * R32 Phase 4 — pair bookkeeping, carried by BOTH items of a pair
+ * (camera pair or imported pair — the tooling is source-agnostic).
+ * One shape for every pair: `pairId` groups the two items, `role`
+ * says which tile/overlay each item is, `layout` is the pair's
+ * current arrangement, and the divider/match/nudge fields are the
+ * pair-level state the Pair panel edits. Absent on every item placed
+ * before Phase 4 (and on all non-pair items) — legacy camera pairs
+ * are recognised by the Phase 3 pair-motion detection instead, and
+ * adopting a pair (switching its layout from the panel) writes this
+ * bookkeeping then. Bookkeeping only: it never changes how an item
+ * renders except through the ordinary item fields the pair helpers
+ * also write (`frameRect`, `position`, `scale`, `pip`, `colorGrade`,
+ * `volume`, `startTime`/`endTime`).
+ */
+export type PairLayout = 'pip' | 'split';
+export type PairOrientation = 'stacked' | 'side';
+export type PairDividerStyle = 'none' | 'white' | 'gold';
+
+export interface PairSettings {
+  pairId: string;
+  role: 'main' | 'second';
+  layout: PairLayout;
+  /** Split orientation. Absent = the format default (see pairLayout). */
+  orientation?: PairOrientation;
+  dividerStyle: PairDividerStyle;
+  /** Divider width in canvas px, 0-12. */
+  dividerWidthPx: number;
+  /**
+   * Sync-nudge bookkeeping for the SECOND item, mirroring
+   * `PipSettings.syncNudgeFrames`: the shift itself lives in
+   * startTime/endTime; this only clamps the cumulative total. On a
+   * PiP-layout pair the second item ALSO carries the same value in
+   * `pip.syncNudgeFrames` (the two are kept equal by the helpers).
+   */
+  syncNudgeFrames?: number;
+  /** Match clips (pair colour match) currently applied to the pair. */
+  matchOn?: boolean;
+  /**
+   * On the SECOND item only: its colour grade from BEFORE Match
+   * clips was applied (`null` = it had no grade), so turning Match
+   * off restores it exactly. Absent while match is off.
+   */
+  preMatchGrade?: ColorGradeSettings | null;
+}
+
+/**
+ * R32 Phase 4 — an explicit on-canvas box for an item, in percentages
+ * of the canvas (x/y = left/top edge, w/h = size). This is the ONE
+ * minimal compositor extension Phase 4 needed, and it is needed
+ * provably: a video item's box is `canvas × scale` on BOTH axes (or,
+ * for a source-fit PiP, the source's aspect at a chosen width), and
+ * an image item's box is a width plus the source/crop aspect — no
+ * combination of position/scale/fit expresses a half-canvas tile
+ * whose aspect is neither the canvas's nor the source's (a stacked
+ * tile on 1080×1920 is 1080×960, aspect 1.125, while the canvas is
+ * 0.5625 and a 16:9 source is 1.778). When `frameRect` is present
+ * the shared compositor draws the item into exactly that box (cover-
+ * cropped, with the item's cropZoom/cropOffset focal controls acting
+ * inside it, exactly as in any other box) in preview AND export;
+ * absent = every pre-Phase-4 rendering rule, unchanged.
+ */
+export interface FrameRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSettings, FramingSettings {
   type: 'video';
   mediaAssetId: string;
+  /** R32 Phase 4 — pair bookkeeping (see PairSettings). */
+  pair?: PairSettings;
+  /** R32 Phase 4 — explicit tile box for split pairs (see FrameRect). */
+  frameRect?: FrameRect;
   /** Playback speed multiplier. 1 = normal. */
   speed: number;
   reverse: boolean;
@@ -412,6 +496,10 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
 export interface ImageTimelineItem extends TimelineItemBase, Transform, FramingSettings {
   type: 'image';
   mediaAssetId: string;
+  /** R32 Phase 4 — pair bookkeeping (see PairSettings). */
+  pair?: PairSettings;
+  /** R32 Phase 4 — explicit tile box for split pairs (see FrameRect). */
+  frameRect?: FrameRect;
   /**
    * Covers PNG/JPG overlays, logos, watermarks, graphics, stickers, and
    * promotional artwork alike — a watermark is just an ImageTimelineItem on

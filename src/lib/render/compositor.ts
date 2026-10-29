@@ -46,6 +46,8 @@ import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
 import { cineInOut, lerp, returnBlend, smootherstep } from '../motion/easing';
 import { claimTextBox, type TextBox } from './textGuard';
 import { MAX_FADE_SECONDS } from '../media/constants';
+import { PAIR_DIVIDER_COLORS, dividerBandPx } from '../pairLayout';
+import type { FrameRect } from '../../types/timeline';
 
 export interface FrameAssets {
   /** Loaded <img> elements keyed by MediaAsset id, for `image` timeline items. */
@@ -1220,9 +1222,29 @@ export function paintPipGlow(
   c.restore();
 }
 
+/**
+ * R32 Phase 4 — the draw box for an item carrying an explicit
+ * `frameRect` (a split tile): the rect itself, in canvas pixels, and
+ * its centre. This is the ONLY place frameRect is interpreted, so
+ * preview and export (both drawFrame) can never disagree about a
+ * tile. Items without frameRect never reach this helper.
+ */
+export function frameRectBoxPx(
+  frameRect: FrameRect,
+  canvasWidth: number,
+  canvasHeight: number,
+): { w: number; h: number; centerX: number; centerY: number } {
+  return {
+    w: (frameRect.w / 100) * canvasWidth,
+    h: (frameRect.h / 100) * canvasHeight,
+    centerX: ((frameRect.x + frameRect.w / 2) / 100) * canvasWidth,
+    centerY: ((frameRect.y + frameRect.h / 2) / 100) * canvasHeight,
+  };
+}
+
 function drawVideoItem(
   ctx: CanvasRenderingContext2D,
-  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; flipX?: boolean; cropZoom?: number; cropOffsetX?: number; cropOffsetY?: number; pip?: PipDrawSettings },
+  item: { position: Transform['position']; scale: number; rotation: number; opacity: number; startTime: number; endTime: number; fade?: { fadeInDuration: number; fadeOutDuration: number }; animation?: { entrance?: AnimationPreset; exit?: AnimationPreset }; motion?: MotionSettings; endTransform?: EndTransformSettings; colorGrade?: ColorGradeSettings; crop?: CropSettings; flipX?: boolean; cropZoom?: number; cropOffsetX?: number; cropOffsetY?: number; pip?: PipDrawSettings; frameRect?: FrameRect },
   videoEl: HTMLVideoElement,
   canvasWidth: number,
   canvasHeight: number,
@@ -1231,13 +1253,22 @@ function drawVideoItem(
   // Keyframe-lite (Phase 2.3): the frame's effective transform — base
   // transform unless an end transform interpolates it across the item.
   const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
-  const centerX = (effective.position.x / 100) * canvasWidth;
-  const centerY = (effective.position.y / 100) * canvasHeight;
+  // R32 Phase 4: a split tile's box is its frameRect, centred in the
+  // tile (an endTransform glide, if any, still moves it from there).
+  const tileBox = item.frameRect ? frameRectBoxPx(item.frameRect, canvasWidth, canvasHeight) : null;
+  const centerX = tileBox
+    ? tileBox.centerX + ((effective.position.x - item.position.x) / 100) * canvasWidth
+    : (effective.position.x / 100) * canvasWidth;
+  const centerY = tileBox
+    ? tileBox.centerY + ((effective.position.y - item.position.y) / 100) * canvasHeight
+    : (effective.position.y / 100) * canvasHeight;
   // R24: a source-fit PiP's box height follows the source aspect (see
   // pipBoxPx); every other video keeps the canvas-aspect box.
-  const box = item.pip?.isPip
-    ? pipBoxPx(effective.scale, canvasWidth, canvasHeight, item.pip, videoEl.videoWidth, videoEl.videoHeight)
-    : { w: canvasWidth * effective.scale, h: canvasHeight * effective.scale };
+  const box = tileBox
+    ? { w: tileBox.w * (effective.scale / (item.scale || 1)), h: tileBox.h * (effective.scale / (item.scale || 1)) }
+    : item.pip?.isPip
+      ? pipBoxPx(effective.scale, canvasWidth, canvasHeight, item.pip, videoEl.videoWidth, videoEl.videoHeight)
+      : { w: canvasWidth * effective.scale, h: canvasHeight * effective.scale };
   const w = box.w;
   const h = box.h;
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
@@ -1340,8 +1371,14 @@ function drawImageItem(
 ) {
   // Keyframe-lite (Phase 2.3): same effective-transform treatment as video.
   const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
-  const centerX = (effective.position.x / 100) * canvasWidth;
-  const centerY = (effective.position.y / 100) * canvasHeight;
+  // R32 Phase 4: a split tile's box is its frameRect (see drawVideoItem).
+  const tileBox = item.frameRect ? frameRectBoxPx(item.frameRect, canvasWidth, canvasHeight) : null;
+  const centerX = tileBox
+    ? tileBox.centerX + ((effective.position.x - item.position.x) / 100) * canvasWidth
+    : (effective.position.x / 100) * canvasWidth;
+  const centerY = tileBox
+    ? tileBox.centerY + ((effective.position.y - item.position.y) / 100) * canvasHeight
+    : (effective.position.y / 100) * canvasHeight;
   const baseWidth = canvasWidth * 0.25 * effective.scale;
   // Crop window (preset frame crops / reframe picker): when present,
   // only the window is drawn and the box follows the WINDOW's aspect.
@@ -1352,8 +1389,8 @@ function drawImageItem(
     : img.naturalHeight > 0 && img.naturalWidth > 0
       ? img.naturalHeight / img.naturalWidth
       : 1;
-  const w = baseWidth;
-  const h = baseWidth * aspect;
+  const w = tileBox ? tileBox.w * (effective.scale / (item.scale || 1)) : baseWidth;
+  const h = tileBox ? tileBox.h * (effective.scale / (item.scale || 1)) : baseWidth * aspect;
   const transitionAdjustment = animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, timeSeconds - item.startTime, item.endTime - item.startTime, canvasWidth, canvasHeight);
   const adjustment = combineAdjustments(transitionAdjustment, motionAdjustment);
@@ -1363,6 +1400,12 @@ function drawImageItem(
   // aspect — at the box aspect the zoom-1 rect is exactly the window
   // above, so activating framing never jumps the framing at zoom 1.
   const framingActive = hasActiveFraming(item) && img.naturalWidth > 0 && img.naturalHeight > 0;
+  // R32 Phase 4: a split tile ALSO draws through the cover-crop path
+  // (even at zoom 1) — a tile's aspect is generally not the image's,
+  // and the plain draw below stretches the whole image into its box.
+  // Cover-cropping into the tile is what "fill the tile" means, with
+  // the item's crop window and focal fields honoured as usual.
+  const coverActive = framingActive || (!!tileBox && img.naturalWidth > 0 && img.naturalHeight > 0);
   applyTransformedDraw(
     ctx,
     (c) => {
@@ -1373,7 +1416,7 @@ function drawImageItem(
           c.save();
           c.scale(-1, 1);
         }
-        if (framingActive) {
+        if (coverActive) {
           const s = croppedCoverSourceRect(img.naturalWidth, img.naturalHeight, w, h, hasCrop ? crop : undefined, item);
           c.drawImage(img, s.sx, s.sy, s.sw, s.sh, -w / 2, -h / 2, w, h);
         } else if (hasCrop) {
@@ -1514,12 +1557,22 @@ export interface ItemBoundsPercent {
 }
 
 export function getItemBoundsPercent(
-  item: { position: Transform['position']; scale: number; pip?: { shape: string; fit?: 'cover' | 'source'; isPip: boolean } },
+  item: { position: Transform['position']; scale: number; pip?: { shape: string; fit?: 'cover' | 'source'; isPip: boolean }; frameRect?: FrameRect },
   itemType: 'video' | 'image' | 'text',
   canvasWidth: number,
   canvasHeight: number,
   opts: { naturalImageAspect?: number; textWidthPx?: number; textHeightPx?: number; naturalVideoAspect?: number } = {},
 ): ItemBoundsPercent {
+  // R32 Phase 4: a split tile's bounds ARE its frameRect — the same
+  // box drawVideoItem/drawImageItem draw into.
+  if (item.frameRect && itemType !== 'text') {
+    return {
+      leftPercent: item.frameRect.x,
+      topPercent: item.frameRect.y,
+      widthPercent: item.frameRect.w,
+      heightPercent: item.frameRect.h,
+    };
+  }
   let widthPx: number;
   let heightPx: number;
   if (itemType === 'video') {
@@ -1880,6 +1933,7 @@ function staticLayerSignature(item: ImageTimelineItem, img: HTMLImageElement, ca
     item.cropZoom ?? null,
     item.cropOffsetX ?? null,
     item.cropOffsetY ?? null,
+    item.frameRect ?? null,
   ]);
 }
 
@@ -2015,6 +2069,46 @@ export function drawFrame(ctx: CanvasRenderingContext2D, project: Project, timeS
         break; // nothing to draw
       default:
         break;
+    }
+  }
+
+  // R32 Phase 4 — split-pair divider: painted once per frame over
+  // the seam, from the pair bookkeeping the placement/panel wrote.
+  // It lives here (in drawFrame, after the items) so preview and
+  // export paint the identical band, and a pair whose members are
+  // both inactive at this instant paints nothing.
+  {
+    const activeIds = new Set(activeItems.filter((i) => i.visible).map((i) => i.id));
+    const pairCarrier = project.items.find(
+      (i) =>
+        (i.type === 'video' || i.type === 'image') &&
+        i.pair?.layout === 'split' &&
+        i.pair.dividerStyle !== 'none' &&
+        i.pair.dividerWidthPx > 0 &&
+        activeIds.has(i.id) &&
+        // Both tiles on screen — a lone surviving tile (e.g. the
+        // shorter of two videos has ended) gets no seam.
+        project.items.some(
+          (other) =>
+            other.id !== i.id &&
+            (other.type === 'video' || other.type === 'image') &&
+            other.pair?.pairId === i.pair?.pairId &&
+            activeIds.has(other.id),
+        ),
+    );
+    if (pairCarrier && (pairCarrier.type === 'video' || pairCarrier.type === 'image') && pairCarrier.pair) {
+      const band = dividerBandPx(
+        canvasWidth,
+        canvasHeight,
+        pairCarrier.pair.orientation ?? (canvasHeight >= canvasWidth ? 'stacked' : 'side'),
+        pairCarrier.pair.dividerWidthPx,
+      );
+      if (band.w > 0 && band.h > 0) {
+        ctx.save();
+        ctx.fillStyle = PAIR_DIVIDER_COLORS[pairCarrier.pair.dividerStyle as 'white' | 'gold'];
+        ctx.fillRect(band.x, band.y, band.w, band.h);
+        ctx.restore();
+      }
     }
   }
 

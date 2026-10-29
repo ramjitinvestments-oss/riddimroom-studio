@@ -9,6 +9,7 @@ import { generateTimelineId } from '../../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 import { CameraCapture, type CaptureDualResult, type CaptureResult } from './CameraCapture';
 import { TrimSelectModal } from './TrimSelectModal';
+import { defaultSplitOrientation, softInTileWarning } from '../../lib/pairLayout';
 
 /**
  * Phase 1 Step 4-5 (Capture + Upload).
@@ -82,6 +83,12 @@ interface UploadMeta {
   dualGroupId?: string;
   dualRole?: 'main' | 'front';
   startDeltaMs?: number;
+  /** R32 Phase 4 — the camera review's pair layout, carried through the dual group. */
+  dualLayout?: 'pip' | 'split';
+  /** R32 Phase 4 — imported-pair routing: both files share a group id; see `pairGroupsRef`. */
+  pairGroupId?: string;
+  pairRole?: 'a' | 'b';
+  pairLayout?: 'pip' | 'split';
 }
 
 interface PendingTrimSelection {
@@ -100,10 +107,12 @@ interface MediaImportPanelProps {
   /** "Add Overlay" uploads route here instead (PiP video / corner image overlay). Falls back to `onAssetUploaded` when not provided. */
   onOverlayAssetUploaded?: (asset: MediaAsset, options?: AssetUploadedOptions) => void;
   /** R29 — a finished dual-camera pair (rear main + front overlay) routes here once BOTH files have uploaded. */
-  onDualAssetUploaded?: (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number }) => void;
+  onDualAssetUploaded?: (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number; layout: 'pip' | 'split' }) => void;
+  /** R32 Phase 4 — a finished imported pair (two visual files added as a pair) routes here once BOTH files have uploaded. */
+  onPairAssetUploaded?: (assetA: MediaAsset, assetB: MediaAsset, options: { layout: 'pip' | 'split' }) => void;
 }
 
-export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded }: MediaImportPanelProps) {
+export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded, onPairAssetUploaded }: MediaImportPanelProps) {
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [showCamera, setShowCamera] = useState(false);
   const [pendingTrim, setPendingTrim] = useState<PendingTrimSelection | null>(null);
@@ -121,8 +130,22 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   // finish first); each pair is held here until BOTH assets exist, then
   // handed to `onDualAssetUploaded` exactly once.
   const dualGroupsRef = useRef<
-    Map<string, { main?: MediaAsset; front?: MediaAsset; startDeltaMs: number; fired: boolean }>
+    Map<string, { main?: MediaAsset; front?: MediaAsset; startDeltaMs: number; layout: 'pip' | 'split'; fired: boolean }>
   >(new Map());
+  // R32 Phase 4 — imported pairs use the same hold-until-both-land
+  // group mechanism as dual pairs: neither half is placed until both
+  // assets exist, then the pair is handed over exactly once.
+  const pairGroupsRef = useRef<
+    Map<string, { a?: MediaAsset; b?: MediaAsset; layout: 'pip' | 'split'; fired: boolean }>
+  >(new Map());
+  // R32 Phase 4 — exactly two visual files picked in one main import
+  // action are held here for the "Add as a pair" choice, with their
+  // probed sizes/durations for the receipt line.
+  const [pairCandidate, setPairCandidate] = useState<{
+    files: [File, File];
+    probes: Array<{ width?: number; height?: number; durationSeconds?: number } | null>;
+  } | null>(null);
+  const [pairLayoutChoice, setPairLayoutChoice] = useState<'pip' | 'split'>('split');
   // WS-S1 — uploads run through a bounded queue (at most
   // MAX_CONCURRENT_UPLOADS resumable uploads in flight at once) instead
   // of every picked file starting its upload immediately. Per-file
@@ -167,7 +190,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           if (meta?.dualGroupId && meta.dualRole && onDualAssetUploaded) {
             let group = dualGroupsRef.current.get(meta.dualGroupId);
             if (!group) {
-              group = { startDeltaMs: meta.startDeltaMs ?? 0, fired: false };
+              group = { startDeltaMs: meta.startDeltaMs ?? 0, layout: meta.dualLayout ?? 'pip', fired: false };
               dualGroupsRef.current.set(meta.dualGroupId, group);
             }
             if (meta.dualRole === 'main') group.main = asset;
@@ -177,8 +200,29 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
               const mainAsset = group.main;
               const frontAsset = group.front;
               const groupStartDeltaMs = group.startDeltaMs;
+              const groupLayout = group.layout;
               dualGroupsRef.current.delete(meta.dualGroupId);
-              onDualAssetUploaded(mainAsset, frontAsset, { startDeltaMs: groupStartDeltaMs });
+              onDualAssetUploaded(mainAsset, frontAsset, { startDeltaMs: groupStartDeltaMs, layout: groupLayout });
+            }
+            uploadMetaByUploadId.current.delete(uploadId);
+            return;
+          }
+          // R32 Phase 4 — imported pair: same hold-until-both rule.
+          if (meta?.pairGroupId && meta.pairRole && onPairAssetUploaded) {
+            let group = pairGroupsRef.current.get(meta.pairGroupId);
+            if (!group) {
+              group = { layout: meta.pairLayout ?? 'split', fired: false };
+              pairGroupsRef.current.set(meta.pairGroupId, group);
+            }
+            if (meta.pairRole === 'a') group.a = asset;
+            else group.b = asset;
+            if (group.a && group.b && !group.fired) {
+              group.fired = true;
+              const assetA = group.a;
+              const assetB = group.b;
+              const groupLayout = group.layout;
+              pairGroupsRef.current.delete(meta.pairGroupId);
+              onPairAssetUploaded(assetA, assetB, { layout: groupLayout });
             }
             uploadMetaByUploadId.current.delete(uploadId);
             return;
@@ -214,7 +258,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           );
         });
     },
-    [uid, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded],
+    [uid, onAssetUploaded, onOverlayAssetUploaded, onDualAssetUploaded, onPairAssetUploaded],
   );
 
   const startUpload = useCallback(
@@ -292,10 +336,54 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   const handleFiles = useCallback(
     (files: FileList | null, purpose: UploadPurpose) => {
       if (!files) return;
-      Array.from(files).forEach((file) => intakeFile(file, purpose));
+      const list = Array.from(files);
+      // R32 Phase 4 — exactly two visual files in ONE main import
+      // action: hold them for the "Add as a pair" choice (with a
+      // probed receipt) instead of placing them one by one.
+      if (purpose === 'main' && onPairAssetUploaded && list.length === 2) {
+        const kinds = list.map((f) => mediaKindForMimeType(f.type || ''));
+        if (kinds.every((k) => k === 'video' || k === 'image')) {
+          const pairFiles: [File, File] = [list[0], list[1]];
+          setPairCandidate({ files: pairFiles, probes: [null, null] });
+          pairFiles.forEach((file, idx) => {
+            probeMediaFileCached(file, file.type || '')
+              .then((probed) => {
+                setPairCandidate((current) =>
+                  current && current.files[idx] === file
+                    ? {
+                        files: current.files,
+                        probes: current.probes.map((p, i) => (i === idx ? probed : p)),
+                      }
+                    : current,
+                );
+              })
+              .catch(() => {});
+          });
+          return;
+        }
+      }
+      list.forEach((file) => intakeFile(file, purpose));
     },
-    [intakeFile],
+    [intakeFile, onPairAssetUploaded],
   );
+
+  /** R32 Phase 4 — confirm the held pair: both files upload under one pair group and land together. */
+  const confirmPairCandidate = useCallback(() => {
+    if (!pairCandidate) return;
+    const groupId = generateTimelineId('pair');
+    const [fileA, fileB] = pairCandidate.files;
+    setPairCandidate(null);
+    startUpload(fileA, { purpose: 'main', pairGroupId: groupId, pairRole: 'a', pairLayout: pairLayoutChoice });
+    startUpload(fileB, { purpose: 'main', pairGroupId: groupId, pairRole: 'b', pairLayout: pairLayoutChoice });
+  }, [pairCandidate, pairLayoutChoice, startUpload]);
+
+  /** R32 Phase 4 — the pair choice declined: the two files import normally, one by one. */
+  const declinePairCandidate = useCallback(() => {
+    if (!pairCandidate) return;
+    const files = pairCandidate.files;
+    setPairCandidate(null);
+    files.forEach((file) => intakeFile(file, 'main'));
+  }, [pairCandidate, intakeFile]);
 
   const startCaptureUpload = useCallback(
     (result: CaptureResult, purpose: UploadPurpose) => {
@@ -348,6 +436,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         dualGroupId: groupId,
         dualRole: 'main',
         startDeltaMs: result.startDeltaMs,
+        dualLayout: result.layout,
       });
       startUpload(makeFile(result.overlay.blob, 'front'), {
         isCameraCapture: true,
@@ -355,6 +444,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         dualGroupId: groupId,
         dualRole: 'front',
         startDeltaMs: result.startDeltaMs,
+        dualLayout: result.layout,
       });
     },
     [startUpload],
@@ -443,6 +533,75 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
       >
         Drag and drop video, image, or audio files here
       </div>
+
+      {/* R32 Phase 4 — the pair choice for exactly two visual files:
+          a receipt line per file (real size + duration from its own
+          metadata, plus the plain soft warning when a file is smaller
+          than the tile it would fill), a layout choice defaulting to
+          Split 50/50, then Add as a pair — or add them separately. */}
+      {pairCandidate && (
+        <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/10 px-3 py-2.5">
+          <p className="text-xs font-bold text-white">Add these two as a pair?</p>
+          <ul className="flex flex-col gap-1">
+            {pairCandidate.files.map((file, idx) => {
+              const probe = pairCandidate.probes[idx];
+              const receipt = probe
+                ? `${probe.width && probe.height ? `${probe.width}×${probe.height}` : 'size not known'}${
+                    typeof probe.durationSeconds === 'number' && Number.isFinite(probe.durationSeconds)
+                      ? ` · ${probe.durationSeconds.toFixed(1)}s`
+                      : ''
+                  }`
+                : 'reading size…';
+              const warning =
+                pairLayoutChoice === 'split' && probe
+                  ? softInTileWarning(probe, canvasWidth, canvasHeight, defaultSplitOrientation(canvasWidth, canvasHeight))
+                  : null;
+              return (
+                <li key={idx} className="text-[11px] text-white/70">
+                  <span className="block truncate">
+                    {file.name} — {receipt}
+                  </span>
+                  {warning && <span className="block text-amber-300">{warning}</span>}
+                </li>
+              );
+            })}
+          </ul>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
+            {(
+              [
+                { id: 'split', label: 'Split 50/50' },
+                { id: 'pip', label: 'Corner PiP' },
+              ] as Array<{ id: 'pip' | 'split'; label: string }>
+            ).map((choice) => (
+              <button
+                key={choice.id}
+                onClick={() => setPairLayoutChoice(choice.id)}
+                aria-pressed={pairLayoutChoice === choice.id}
+                className={`min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide transition ${
+                  pairLayoutChoice === choice.id ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
+              >
+                {choice.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={confirmPairCandidate}
+              className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide"
+            >
+              Add as a pair
+            </button>
+            <button
+              onClick={declinePairCandidate}
+              className="min-h-11 px-3 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide"
+            >
+              Add separately instead
+            </button>
+          </div>
+        </div>
+      )}
 
       {pending.length > 0 && (
         <ul className="flex flex-col gap-2">

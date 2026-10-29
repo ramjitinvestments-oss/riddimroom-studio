@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
+  RECORDER_MIME_LADDER,
   buildCaptureAttempts,
   dimensionsForShortSide,
   isLadderRetryableError,
   isPreviewMirrored,
+  pickRecorderMimeType,
   previewMirrorTransform,
   recorderBitratesForShortSide,
   recorderOptionsForTrackSettings,
@@ -120,6 +122,104 @@ describe('recorder bitrate tiers (WS-P1)', () => {
   it('passes a preferred mimeType through and omits it when not given', () => {
     expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080 }, 'video/webm;codecs=vp9,opus').mimeType).toBe('video/webm;codecs=vp9,opus');
     expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080 }).mimeType).toBeUndefined();
+  });
+});
+
+describe('fps-aware recorder bitrates (R32 Phase 1)', () => {
+  it('30fps values are EXACTLY the R24 table — 30fps behaviour is unchanged', () => {
+    expect(recorderBitratesForShortSide(2160, 30).videoBitsPerSecond).toBe(45_000_000);
+    expect(recorderBitratesForShortSide(1440, 30).videoBitsPerSecond).toBe(16_000_000);
+    expect(recorderBitratesForShortSide(1080, 30).videoBitsPerSecond).toBe(10_000_000);
+    expect(recorderBitratesForShortSide(720, 30).videoBitsPerSecond).toBe(10_000_000);
+  });
+
+  it('the default fps (argument omitted) is the 30fps table', () => {
+    expect(recorderBitratesForShortSide(2160).videoBitsPerSecond).toBe(45_000_000);
+    expect(recorderBitratesForShortSide(1080).videoBitsPerSecond).toBe(10_000_000);
+  });
+
+  it('at-or-below 30fps still returns the 30fps table', () => {
+    expect(recorderBitratesForShortSide(1080, 24).videoBitsPerSecond).toBe(10_000_000);
+    expect(recorderBitratesForShortSide(1080, 15).videoBitsPerSecond).toBe(10_000_000);
+  });
+
+  it('60fps is materially higher — roughly 1.6–2x the 30fps value in every tier', () => {
+    for (const [shortSide, at30, at60] of [
+      [2160, 45_000_000, 80_000_000],
+      [1440, 16_000_000, 28_000_000],
+      [1080, 10_000_000, 18_000_000],
+    ] as const) {
+      expect(recorderBitratesForShortSide(shortSide, 60).videoBitsPerSecond).toBe(at60);
+      const ratio = at60 / at30;
+      expect(ratio).toBeGreaterThanOrEqual(1.6);
+      expect(ratio).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('caps above 60fps at the 60fps value and interpolates between 30 and 60', () => {
+    expect(recorderBitratesForShortSide(1080, 120).videoBitsPerSecond).toBe(18_000_000);
+    const at45 = recorderBitratesForShortSide(1080, 45).videoBitsPerSecond;
+    expect(at45).toBeGreaterThan(10_000_000);
+    expect(at45).toBeLessThan(18_000_000);
+    expect(at45).toBe(14_000_000);
+  });
+
+  it('an unusable fps falls back to the 30fps table; audio stays 192k at any fps', () => {
+    expect(recorderBitratesForShortSide(1080, Number.NaN).videoBitsPerSecond).toBe(10_000_000);
+    expect(recorderBitratesForShortSide(1080, 0).videoBitsPerSecond).toBe(10_000_000);
+    expect(recorderBitratesForShortSide(2160, 60).audioBitsPerSecond).toBe(192_000);
+    expect(recorderBitratesForShortSide(2160, 60).tier).toBe('uhd');
+  });
+
+  it('recorderOptionsForTrackSettings uses the track-reported frame rate, with an explicit fps winning', () => {
+    expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080, frameRate: 60 }).videoBitsPerSecond).toBe(18_000_000);
+    expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080, frameRate: 30 }).videoBitsPerSecond).toBe(10_000_000);
+    expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080 }).videoBitsPerSecond).toBe(10_000_000);
+    expect(recorderOptionsForTrackSettings({ width: 1920, height: 1080, frameRate: 30 }, undefined, 60).videoBitsPerSecond).toBe(18_000_000);
+    expect(recorderOptionsForTrackSettings({ width: 3840, height: 2160, frameRate: 60 }).videoBitsPerSecond).toBe(80_000_000);
+  });
+});
+
+describe('codec ladder (R32 Phase 1)', () => {
+  it('the ladder order is MP4/H.264 first, then VP9, VP8, bare WebM, browser default', () => {
+    expect(RECORDER_MIME_LADDER).toEqual([
+      'video/mp4;codecs=avc1.640028,mp4a.40.2',
+      'video/mp4',
+      'video/webm;codecs=vp9,opus',
+      'video/webm;codecs=vp8,opus',
+      'video/webm',
+      '',
+    ]);
+  });
+
+  it('picks the FIRST supported type in ladder order', () => {
+    const everything = () => true;
+    expect(pickRecorderMimeType(everything)).toBe('video/mp4;codecs=avc1.640028,mp4a.40.2');
+    const noMp4 = (m: string) => !m.startsWith('video/mp4');
+    expect(pickRecorderMimeType(noMp4)).toBe('video/webm;codecs=vp9,opus');
+    const vp8Only = (m: string) => m === 'video/webm;codecs=vp8,opus';
+    expect(pickRecorderMimeType(vp8Only)).toBe('video/webm;codecs=vp8,opus');
+    const bareWebmOnly = (m: string) => m === 'video/webm';
+    expect(pickRecorderMimeType(bareWebmOnly)).toBe('video/webm');
+  });
+
+  it('prefers the specific H.264 string over bare mp4 when both are supported', () => {
+    const mp4Both = (m: string) => m.startsWith('video/mp4');
+    expect(pickRecorderMimeType(mp4Both)).toBe('video/mp4;codecs=avc1.640028,mp4a.40.2');
+    const bareMp4Only = (m: string) => m === 'video/mp4';
+    expect(pickRecorderMimeType(bareMp4Only)).toBe('video/mp4');
+  });
+
+  it('falls back to the browser default (empty string) when nothing is supported', () => {
+    expect(pickRecorderMimeType(() => false)).toBe('');
+  });
+
+  it('treats a throwing predicate as not-supported for that candidate and keeps walking', () => {
+    const throwing = (m: string) => {
+      if (m.startsWith('video/mp4')) throw new Error('nope');
+      return m.includes('vp9');
+    };
+    expect(pickRecorderMimeType(throwing)).toBe('video/webm;codecs=vp9,opus');
   });
 });
 

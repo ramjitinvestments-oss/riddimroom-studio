@@ -5,6 +5,19 @@ import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipShapeRefitZoom, p
 import { PipRingControls, PipShapeStrip } from './PipShapeControls';
 import { framingSlackPx, pipBoxPx, resolveCropOffset, resolveCropZoom } from '../../lib/render/compositor';
 import { updateItem } from '../../lib/timeline/utils';
+import {
+  applyPairBalance,
+  getPairContext,
+  pairSyncNudgePatch,
+  setPairDivider,
+  setPairLayout,
+  swapPairTiles,
+  PAIR_BALANCE_PRESETS,
+  type PairBalancePresetId,
+  type PairContext,
+} from '../../lib/pairLayout';
+import { applyPairMatch, removePairMatch, sampleAssetFrame } from '../../lib/pairColor';
+import type { PairDividerStyle, PairLayout, Project } from '../../types/timeline';
 import type { ImageTimelineItem, MediaAsset, TimelineItem, VideoTimelineItem } from '../../types/timeline';
 
 /**
@@ -25,6 +38,9 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
   const { project, mutate } = useProject();
   const [layoutId, setLayoutId] = useState<PipLayoutId>('bottom-right');
   const [error, setError] = useState<string | null>(null);
+  // R32 Phase 4 — Pair section state (hooks stay above the early return).
+  const [matchBusy, setMatchBusy] = useState(false);
+  const [matchError, setMatchError] = useState<string | null>(null);
 
   if (!project) return null;
   const videoAssets: MediaAsset[] = Object.values(project.mediaAssets).filter((a) => a.kind === 'video');
@@ -41,6 +57,57 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
   // R29 — the selected PiP's dual-camera sync nudge, in frames.
   const syncNudgeFrames = selectedPip?.pip?.syncNudgeFrames ?? 0;
 
+  // R32 Phase 4 — the Pair section: shown when the selected item
+  // belongs to a pair (Phase 4 bookkeeping, or a legacy camera pair
+  // recognised by the Phase 3 detection). Every control re-derives
+  // the pair context inside the mutate, so it always acts on the
+  // current project state.
+  const pairCtx: PairContext | null = item ? getPairContext(project, item) : null;
+  const withPair = (fn: (p: Project, ctx: PairContext) => Project) => {
+    if (!item) return;
+    mutate((p) => {
+      const current = p.items.find((i) => i.id === item.id);
+      const ctx = current ? getPairContext(p, current) : null;
+      return ctx ? fn(p, ctx) : p;
+    });
+  };
+  const handleMatchToggle = async (enabled: boolean) => {
+    if (!pairCtx) return;
+    setMatchError(null);
+    if (!enabled) {
+      withPair((p, ctx) => removePairMatch(p, ctx));
+      return;
+    }
+    const mainAsset = project.mediaAssets[pairCtx.main.mediaAssetId];
+    const secondAsset = project.mediaAssets[pairCtx.second.mediaAssetId];
+    if (!mainAsset || !secondAsset) return;
+    setMatchBusy(true);
+    try {
+      const [mainSample, secondSample] = await Promise.all([
+        sampleAssetFrame(mainAsset),
+        sampleAssetFrame(secondAsset),
+      ]);
+      if (!mainSample || !secondSample) {
+        setMatchError('Could not read both clips to match them. The clips are unchanged.');
+        return;
+      }
+      withPair((p, ctx) => {
+        // A legacy pair needs its bookkeeping before a match can be
+        // stored/restored — adopt it at its current layout first.
+        const adopted = ctx.legacy ? setPairLayout(p, ctx, ctx.layout) : p;
+        const current = adopted.items.find((i) => i.id === item?.id);
+        const fresh = current ? getPairContext(adopted, current) : null;
+        return fresh ? applyPairMatch(adopted, fresh, mainSample, secondSample) : adopted;
+      });
+    } finally {
+      setMatchBusy(false);
+    }
+  };
+  const pairNudgeFrames =
+    pairCtx?.second.pair?.syncNudgeFrames ??
+    (pairCtx?.second.type === 'video' ? pairCtx.second.pip?.syncNudgeFrames : undefined) ??
+    0;
+
   // R24 framing (Flip / crop-zoom / crop-pan): applies to the selected
   // PiP video AND to a selected image overlay — both carry the same
   // optional framing fields, and the shared compositor honours them in
@@ -50,7 +117,12 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
   // asset's dimensions are unknown the sliders stay enabled and the
   // compositor's clamping keeps the window in bounds regardless.
   const selectedImage: ImageTimelineItem | null = item && item.type === 'image' ? item : null;
-  const framable: VideoTimelineItem | ImageTimelineItem | null = selectedPip ?? selectedImage;
+  // R32 Phase 4 — a split tile video is not a PiP, but it carries the
+  // same framing fields and the compositor honours them inside its
+  // tile, so it is framable here too.
+  const selectedTileVideo: VideoTimelineItem | null =
+    item && item.type === 'video' && !isPipItem(item) && !!item.frameRect ? item : null;
+  const framable: VideoTimelineItem | ImageTimelineItem | null = selectedPip ?? selectedTileVideo ?? selectedImage;
   const patchFramable = (patch: Partial<VideoTimelineItem> & Partial<ImageTimelineItem>) => {
     if (!framable) return;
     mutate((p) => updateItem(p, framable.id, patch));
@@ -63,7 +135,11 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
   if (framable && srcW > 0 && srcH > 0) {
     let destW = 1;
     let destH = 1;
-    if (selectedPip?.pip?.shape === 'circle') {
+    if (framable.frameRect) {
+      // Split tile: the destination is the tile box itself.
+      destW = (framable.frameRect.w / 100) * project.canvasWidth;
+      destH = (framable.frameRect.h / 100) * project.canvasHeight;
+    } else if (selectedPip?.pip?.shape === 'circle') {
       destW = 1;
       destH = 1; // the circle's destination is a square
     } else if (selectedPip) {
@@ -177,6 +253,146 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             </span>
           </div>
           <p className="text-[10px] text-white/30 -mt-1">Dual-camera recordings can land a few frames off. If the overlay's lips move before you hear the words, tap +; after the words, tap −. Up to {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+        </div>
+      )}
+
+      {/* R32 Phase 4 — Pair section: layout, swap, divider, sound
+          balance and Match clips for the pair the selected item
+          belongs to (camera pair or imported pair alike). Switching
+          layout on a pair placed before Phase 4 writes its pair
+          bookkeeping first — that is the adoption step. */}
+      {pairCtx && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Pair</span>
+          <p className="text-[10px] text-white/30 -mt-1">
+            {pairCtx.layout === 'split'
+              ? 'These two clips are side by side as equal halves.'
+              : 'These two clips are paired: one full screen, one in the corner.'}{' '}
+            Pick a clip in the pair to frame it — zoom and pan under Framing below apply to the clip you selected.
+          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
+            {(
+              [
+                { id: 'pip', label: 'Corner PiP' },
+                { id: 'split', label: 'Split 50/50' },
+              ] as Array<{ id: PairLayout; label: string }>
+            ).map((choice) => (
+              <button
+                key={choice.id}
+                onClick={() => withPair((p, ctx) => setPairLayout(p, ctx, choice.id))}
+                aria-pressed={pairCtx.layout === choice.id}
+                className={`min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide transition ${
+                  pairCtx.layout === choice.id ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
+              >
+                {choice.label}
+              </button>
+            ))}
+          </div>
+          {(pairCtx.layout === 'split' || pairCtx.main.id === item?.id) && (
+            <button
+              onClick={() => withPair((p, ctx) => swapPairTiles(p, ctx))}
+              className="flex items-center justify-center gap-2 px-3 py-2 bg-white/10 hover:bg-white/20 border border-white/10 text-white rounded-lg text-xs font-bold uppercase min-h-11"
+            >
+              <ArrowLeftRight size={13} /> Swap sides
+            </button>
+          )}
+          {pairCtx.layout === 'split' && (
+            <>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Divider:</span>
+                {(
+                  [
+                    { id: 'none', label: 'None' },
+                    { id: 'white', label: 'White' },
+                    { id: 'gold', label: 'Gold' },
+                  ] as Array<{ id: PairDividerStyle; label: string }>
+                ).map((choice) => (
+                  <button
+                    key={choice.id}
+                    onClick={() => withPair((p, ctx) => setPairDivider(p, ctx, choice.id, ctx.dividerWidthPx))}
+                    aria-pressed={pairCtx.dividerStyle === choice.id}
+                    className={`min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide transition ${
+                      pairCtx.dividerStyle === choice.id ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
+                    }`}
+                  >
+                    {choice.label}
+                  </button>
+                ))}
+              </div>
+              <label className="flex flex-col gap-1 text-xs text-white/60">
+                Divider width ({pairCtx.dividerWidthPx}px)
+                <input
+                  type="range"
+                  min={0}
+                  max={12}
+                  step={1}
+                  value={pairCtx.dividerWidthPx}
+                  disabled={pairCtx.dividerStyle === 'none'}
+                  onChange={(e) => withPair((p, ctx) => setPairDivider(p, ctx, ctx.dividerStyle, Number(e.target.value)))}
+                  className="disabled:opacity-30"
+                />
+              </label>
+            </>
+          )}
+          {(pairCtx.main.type === 'video' || pairCtx.second.type === 'video') && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Sound balance:</span>
+              {(Object.keys(PAIR_BALANCE_PRESETS) as PairBalancePresetId[]).map((presetId) => (
+                <button
+                  key={presetId}
+                  onClick={() => withPair((p, ctx) => applyPairBalance(p, ctx, presetId))}
+                  className="min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 text-white transition"
+                >
+                  {PAIR_BALANCE_PRESETS[presetId].label}
+                </button>
+              ))}
+            </div>
+          )}
+          <label className="flex items-center gap-2 text-xs text-white/60">
+            <input
+              type="checkbox"
+              checked={pairCtx.matchOn}
+              disabled={matchBusy}
+              onChange={(e) => void handleMatchToggle(e.target.checked)}
+            />
+            Match clips — pull the second clip's colour toward the first
+          </label>
+          {matchBusy && <p className="text-[10px] text-white/30 -mt-1">Reading both clips…</p>}
+          {matchError && <p className="text-xs text-red-400">{matchError}</p>}
+          {/* Line up the sound for a split pair: the second tile is
+              not a PiP, so the pair nudge lives here. (For a Corner
+              PiP pair, the same control above still serves the
+              overlay — unchanged.) */}
+          {pairCtx.layout === 'split' && pairCtx.second.type === 'video' && (
+            <>
+              <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Line up the sound</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() =>
+                    withPair((p, ctx) => updateItem(p, ctx.second.id, pairSyncNudgePatch(ctx.second, -1, p.frameRate)))
+                  }
+                  className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
+                >
+                  − 1 frame
+                </button>
+                <button
+                  onClick={() =>
+                    withPair((p, ctx) => updateItem(p, ctx.second.id, pairSyncNudgePatch(ctx.second, 1, p.frameRate)))
+                  }
+                  className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
+                >
+                  + 1 frame
+                </button>
+                <span className="text-xs text-white/60">
+                  {pairNudgeFrames === 0
+                    ? 'In sync'
+                    : `${pairNudgeFrames > 0 ? '+' : ''}${pairNudgeFrames} frame${Math.abs(pairNudgeFrames) === 1 ? '' : 's'}`}
+                </span>
+              </div>
+            </>
+          )}
         </div>
       )}
 

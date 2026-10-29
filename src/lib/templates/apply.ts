@@ -60,6 +60,7 @@ import {
 import { addTextItem } from '../timeline/insert';
 import { resolveSourceDuration } from '../timeline/trimWindow';
 import { isPipItem } from '../pip';
+import { cameraPairItemIds, pairSafeMotionForType, pairSafeTransition } from './pairMotion';
 import { getGradePreset } from '../grades';
 import { MAX_FADE_SECONDS } from '../media/constants';
 import type { StudioTemplate } from '../templates';
@@ -196,6 +197,10 @@ export function applyFullTemplate(
   options: ApplyFullTemplateOptions = {},
 ): ApplyFullTemplateResult {
   const slots = template.slots ?? [];
+  // R32 Phase 3 — camera-pair membership is read from the INCOMING
+  // project, before the slot pass re-packs timing (after a re-pack,
+  // overlap alone can point a PiP at the wrong "main" clip).
+  const pairIds = cameraPairItemIds(project);
   let next = applyCaptionStyle(project, template.captionStyleId);
 
   // ── v9 FRAME: optionally switch the canvas to the template's frame
@@ -307,15 +312,25 @@ export function applyFullTemplate(
   const frameDims = frame ? frameCanvasDims(frame.aspect) : null;
   const frameAspectNumber = frameDims ? frameDims.width / frameDims.height : 0;
   const framedItems: ShortenedClipInfo[] = [];
+  // R32 Phase 3 — camera-pair members (main clip + its camera PiP,
+  // identified above from the incoming project) are motion-capped:
+  // gentle motion only, fade-class transitions only (see
+  // lib/templates/pairMotion for the rules + maths).
   for (const item of next.items) {
     if (item.type === 'video' || item.type === 'image' || item.type === 'text') {
+      const isPairItem = pairIds.has(item.id);
+      const transition = isPairItem ? pairSafeTransition(template.transition) : template.transition;
       const patch: Record<string, unknown> = {
-        animation: { entrance: template.transition as never, exit: template.transition as never, intensity: 1 },
+        animation: { entrance: transition as never, exit: transition as never, intensity: 1 },
       };
       if (item.type === 'video' || item.type === 'image') {
         const plan = planById.get(item.id);
         const motion = plan ? plan.motion : template.motion;
-        patch.motion = motion === 'none' ? { type: 'none' } : { type: motion as never, intensity: 1 };
+        patch.motion = isPairItem
+          ? pairSafeMotionForType(motion)
+          : motion === 'none'
+            ? { type: 'none' }
+            : { type: motion as never, intensity: 1 };
         if (grade) patch.colorGrade = { ...grade.grade };
         // Frame crop: main-stage media only — PiP overlays keep their
         // own framing by design. Needs the source's real dimensions;
@@ -465,20 +480,30 @@ export function applyHookToProject(project: Project, template: StudioTemplate, a
   const start = Math.max(0, atTime);
   const hookEnd = start + template.durationSeconds;
 
+  // R32 Phase 3 — camera-pair members under the hook are motion-
+  // capped exactly as in a full-template apply (see pairMotion).
+  const pairIds = cameraPairItemIds(next);
+
   // Motion effect on media playing underneath the hook window.
   if (template.motion && template.motion !== 'none') {
     for (const item of next.items) {
       if ((item.type === 'video' || item.type === 'image') && item.startTime < hookEnd && item.endTime > start) {
-        next = updateItem(next, item.id, { motion: { type: template.motion as never, intensity: 1 } });
+        next = updateItem(next, item.id, {
+          motion: pairIds.has(item.id)
+            ? pairSafeMotionForType(template.motion)
+            : { type: template.motion as never, intensity: 1 },
+        });
       }
     }
   }
 
   // PiP glide: the first PiP item on screen during the hook gets the
   // hook's end transform (it animates there across its own span).
+  // A camera-pair PiP is skipped — the glide would move/resize a
+  // recorded face, which is what the pair-safe cap exists to stop.
   if (template.pipEndTransform) {
     const pip = next.items.find((i) => isPipItem(i) && i.startTime < hookEnd && i.endTime > start);
-    if (pip) {
+    if (pip && !pairIds.has(pip.id)) {
       next = updateItem(next, pip.id, { endTransform: template.pipEndTransform });
     }
   }

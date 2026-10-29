@@ -27,8 +27,17 @@ import type {
 import { addItem, addMediaAsset, generateTimelineId, getItemsForTrack, getTracksByType, updateItem } from './utils';
 import { resolveProjectCaptionOverlaps } from '../captions/timing';
 import { MAX_MEDIA_SECONDS } from '../media/constants';
-import { addPipOverlay } from '../pip';
+import { addPipOverlay, pipSyncNudgePatch } from '../pip';
 import { dualAlignmentTrims } from '../camera/dualCapture';
+import {
+  applyPairBalance,
+  applyPairLayout,
+  getPairContext,
+  pairSyncNudgePatch,
+  suggestedNudgeFrames,
+  type PairBalancePresetId,
+} from '../pairLayout';
+import type { PairLayout, PairOrientation } from '../../types/timeline';
 
 const DEFAULT_IMAGE_DURATION_SECONDS = 5;
 
@@ -422,6 +431,16 @@ export interface AppendDualCaptureOptions {
   startDeltaMs: number;
   /** Timeline position for the main clip; defaults to right after the last video item, like appendMediaToTimeline. */
   atTime?: number;
+  /**
+   * R32 Phase 4 — pair layout chosen in the camera review. 'pip'
+   * (default) is exactly the R29–R31 placement; 'split' places both
+   * clips as equal tiles (see `lib/pairLayout.ts`).
+   */
+  layout?: PairLayout;
+  /** Split orientation; defaults by project format. */
+  orientation?: PairOrientation;
+  /** Optional audio balance preset applied at placement time. */
+  balancePreset?: PairBalancePresetId;
 }
 
 /**
@@ -446,19 +465,215 @@ export function appendDualCaptureToTimeline(
 ): Project {
   const { rearTrimStartSeconds, frontTrimStartSeconds } = dualAlignmentTrims(options.startDeltaMs);
   const existingIds = new Set(project.items.map((i) => i.id));
-  const next = appendMediaToTimeline(project, mainAsset, {
+  const withMain = appendMediaToTimeline(project, mainAsset, {
     atTime: options.atTime,
     trimStart: rearTrimStartSeconds > 0 ? rearTrimStartSeconds : undefined,
   });
-  const mainItem = next.items.find(
+  const mainItem = withMain.items.find(
     (i): i is VideoTimelineItem => !existingIds.has(i.id) && i.type === 'video',
   );
-  if (!mainItem) return next;
-  return addPipOverlay(next, overlayAsset, {
+  if (!mainItem) return withMain;
+  const layout = options.layout ?? 'pip';
+  // R32 Phase 4 — the placement-time sync suggestion (camera pairs
+  // only; import pairs have no anchors and start at 0). Computed
+  // from the two files' real durations + the measured start delta.
+  const suggestion = suggestedNudgeFrames(
+    safeDuration(mainAsset.durationSeconds, mainItem.endTime - mainItem.startTime),
+    safeDuration(overlayAsset.durationSeconds, 5),
+    options.startDeltaMs,
+    project.frameRate,
+  );
+
+  if (layout === 'split') {
+    // Both clips as equal tiles: the front clip is placed as a plain
+    // video item at the main clip's start (same alignment trims),
+    // then the pair layout stamps the bookkeeping + tile geometry.
+    // Divider default: white 4px — a thin light line reads premium
+    // on mixed bright/dark footage and guarantees the seam is
+    // findable at a glance; gold is one tap away in the Pair panel.
+    let next = addMediaAsset(withMain, overlayAsset);
+    const track = firstTrackOfType(next, 'video');
+    const fullDuration = safeDuration(overlayAsset.durationSeconds, 5);
+    const trimStart = Math.max(0, Math.min(frontTrimStartSeconds, fullDuration));
+    const duration = Math.min(fullDuration - trimStart, MAX_MEDIA_SECONDS);
+    const secondItem: VideoTimelineItem = {
+      id: generateTimelineId('item'),
+      type: 'video',
+      trackId: track.id,
+      startTime: mainItem.startTime,
+      endTime: mainItem.startTime + duration,
+      zIndex: nextZIndex(next),
+      visible: true,
+      mediaAssetId: overlayAsset.id,
+      position: { x: 50, y: 50 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      trimStart,
+      trimEnd: trimStart + duration,
+      speed: 1,
+      reverse: false,
+      volume: 1,
+      muted: false,
+    };
+    next = addItem(next, secondItem);
+    next = applyPairLayout(next, mainItem.id, secondItem.id, {
+      layout: 'split',
+      orientation: options.orientation,
+      dividerStyle: 'white',
+      dividerWidthPx: 4,
+    });
+    if (suggestion !== 0) {
+      const second = next.items.find((i) => i.id === secondItem.id);
+      if (second && (second.type === 'video' || second.type === 'image')) {
+        next = updateItem(next, second.id, pairSyncNudgePatch(second, suggestion, project.frameRate));
+      }
+    }
+    if (options.balancePreset) {
+      const ctx = getPairContext(next, next.items.find((i) => i.id === mainItem.id)!);
+      if (ctx) next = applyPairBalance(next, ctx, options.balancePreset);
+    }
+    return next;
+  }
+
+  // Corner PiP — the R29–R31 placement, unchanged, plus the pair
+  // bookkeeping stamp (geometry untouched by the stamp) and the
+  // suggested initial nudge.
+  let next = addPipOverlay(withMain, overlayAsset, {
     layoutId: 'bottom-right',
     atTime: mainItem.startTime,
     trimStart: frontTrimStartSeconds > 0 ? frontTrimStartSeconds : undefined,
     fromCamera: true,
     muted: false,
   });
+  const pipItem = next.items.find(
+    (i): i is VideoTimelineItem => i.type === 'video' && i.mediaAssetId === overlayAsset.id && !existingIds.has(i.id),
+  );
+  if (!pipItem) return next;
+  next = applyPairLayout(next, mainItem.id, pipItem.id, { layout: 'pip' });
+  if (suggestion !== 0) {
+    const pip = next.items.find((i): i is VideoTimelineItem => i.id === pipItem.id);
+    if (pip) {
+      const patch = pipSyncNudgePatch(pip, suggestion, project.frameRate);
+      // Keep the pair bookkeeping's counter equal to the PiP counter.
+      const pairPatch =
+        pip.pair && patch.pip ? { pair: { ...pip.pair, syncNudgeFrames: patch.pip.syncNudgeFrames ?? 0 } } : {};
+      next = updateItem(next, pip.id, { ...patch, ...pairPatch });
+    }
+  }
+  if (options.balancePreset) {
+    const mainNow = next.items.find((i) => i.id === mainItem.id);
+    const ctx = mainNow ? getPairContext(next, mainNow) : null;
+    if (ctx) next = applyPairBalance(next, ctx, options.balancePreset);
+  }
+  return next;
+}
+
+export interface PlaceImportPairOptions {
+  layout: PairLayout;
+  /** Split orientation; defaults by project format. */
+  orientation?: PairOrientation;
+  /** Timeline start for both items; defaults to right after the project's current visual content. */
+  atTime?: number;
+  /** Audio balance preset applied at placement time (only when the caller passes one). */
+  balancePreset?: PairBalancePresetId;
+}
+
+/**
+ * R32 Phase 4 — place two IMPORTED visual assets (video/image in any
+ * combination) as a pair at the same start: Corner PiP or Split
+ * 50/50, with the same pair bookkeeping a camera pair gets.
+ * Durations: a video+image pair lasts the video's duration (the
+ * image holds); two images use the image default (5s); two videos
+ * each keep their own duration but start together. Both videos keep
+ * their audio fields (a PiP-layout second starts muted, like every
+ * uploaded overlay; a split second starts audible, like a camera
+ * pair's) — a balance preset is applied only when the caller passes
+ * one. No sync suggestion: imports have no recorded anchors.
+ */
+export function placeImportPair(
+  project: Project,
+  assetA: MediaAsset,
+  assetB: MediaAsset,
+  options: PlaceImportPairOptions,
+): Project {
+  if (assetA.kind === 'audio' || assetB.kind === 'audio') {
+    throw new Error('Only video and image files can be added as a pair.');
+  }
+  const startTime =
+    options.atTime ??
+    project.items
+      .filter((i) => i.type === 'video' || i.type === 'image')
+      .reduce((max, i) => Math.max(max, i.endTime), 0);
+  const durationFor = (asset: MediaAsset, partner: MediaAsset): number => {
+    if (asset.kind === 'video') {
+      return Math.min(safeDuration(asset.durationSeconds, 5), MAX_MEDIA_SECONDS);
+    }
+    // Image: holds for the partner video's duration, else the default.
+    if (partner.kind === 'video') {
+      return Math.min(safeDuration(partner.durationSeconds, 5), MAX_MEDIA_SECONDS);
+    }
+    return DEFAULT_IMAGE_DURATION_SECONDS;
+  };
+
+  let next = addMediaAsset(project, assetA);
+  next = addMediaAsset(next, assetB);
+  const makeItem = (asset: MediaAsset, partner: MediaAsset, isSecond: boolean): VideoTimelineItem | ImageTimelineItem => {
+    const duration = durationFor(asset, partner);
+    const zIndex = nextZIndex(next);
+    if (asset.kind === 'video') {
+      const track = firstTrackOfType(next, 'video');
+      return {
+        id: generateTimelineId('item'),
+        type: 'video',
+        trackId: track.id,
+        startTime,
+        endTime: startTime + duration,
+        zIndex,
+        visible: true,
+        mediaAssetId: asset.id,
+        position: { x: 50, y: 50 },
+        scale: 1,
+        rotation: 0,
+        opacity: 1,
+        trimStart: 0,
+        trimEnd: duration,
+        speed: 1,
+        reverse: false,
+        volume: 1,
+        muted: isSecond && options.layout === 'pip',
+      };
+    }
+    const track = firstTrackOfType(next, 'image');
+    return {
+      id: generateTimelineId('item'),
+      type: 'image',
+      trackId: track.id,
+      startTime,
+      endTime: startTime + duration,
+      zIndex,
+      visible: true,
+      mediaAssetId: asset.id,
+      role: 'photo',
+      position: { x: 50, y: 50 },
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+    };
+  };
+  const itemA = makeItem(assetA, assetB, false);
+  next = addItem(next, itemA);
+  const itemB = makeItem(assetB, assetA, true);
+  next = addItem(next, itemB);
+  next = applyPairLayout(next, itemA.id, itemB.id, {
+    layout: options.layout,
+    orientation: options.orientation,
+    ...(options.layout === 'split' ? { dividerStyle: 'white' as const, dividerWidthPx: 4 } : {}),
+  });
+  if (options.balancePreset) {
+    const aNow = next.items.find((i) => i.id === itemA.id);
+    const ctx = aNow ? getPairContext(next, aNow) : null;
+    if (ctx) next = applyPairBalance(next, ctx, options.balancePreset);
+  }
+  return normalizeVisualZOrder(next);
 }

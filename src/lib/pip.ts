@@ -129,7 +129,10 @@ export function addPipOverlay(project: Project, asset: MediaAsset, options: AddP
       isPip: true,
       // Camera items carry the source-aspect fit explicitly; every
       // other PiP omits the field and keeps the legacy cover framing.
-      ...(isCamera ? { fit: 'source' as const } : {}),
+      // R32 Phase 3: camera items ALSO carry the persisted fromCamera
+      // flag, so a camera pair stays recognisable to the pair-safe
+      // motion cap when templates are applied later.
+      ...(isCamera ? { fit: 'source' as const, fromCamera: true as const } : {}),
     },
   };
   return addItem(next, item);

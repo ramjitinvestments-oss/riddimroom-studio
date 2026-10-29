@@ -4,13 +4,77 @@ import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
   buildCaptureAttempts,
   isLadderRetryableError,
+  pickRecorderMimeType,
   previewMirrorTransform,
   recorderOptionsForTrackSettings,
   zoomCapabilityFromCapabilities,
+  type CaptureFacingMode,
   type CaptureFpsChoice,
   type CaptureQualityChoice,
   type ZoomCapability,
 } from '../../lib/camera/captureQuality';
+import {
+  createFrameDropTracker,
+  type FrameDropEstimate,
+  type FrameDropTracker,
+} from '../../lib/camera/frameDrops';
+import {
+  buildCaptureReceipt,
+  captureReceiptDropWarning,
+  formatCaptureReceipt,
+  type CaptureReceipt,
+} from '../../lib/camera/captureReceipt';
+import {
+  assessMotion,
+  coachStateForLevel,
+  createZoomRamp,
+  gyroSampleFromRotationRate,
+  horizonTiltDegrees,
+  isStillEnough,
+  isZoomRampDone,
+  levelBubbleOffsetPx,
+  loadSteadyStartEnabled,
+  meanAbsFrameDiff,
+  retargetZoomRamp,
+  saveSteadyStartEnabled,
+  zoomRampValueAt,
+  type FrameSampleInput,
+  type GyroSample,
+  type MotionCoachState,
+  type MotionLevel,
+  type ZoomRamp,
+} from '../../lib/camera/motionCoach';
+import {
+  deviceProfileForFacing,
+  loadDeviceProfiles,
+  saveDeviceProfile,
+  shortSideClassFor,
+  type DeviceProfileStorage,
+} from '../../lib/camera/deviceProfile';
+import {
+  buildContinuityPlan,
+  buildLockPlan,
+  buildUnlockPlan,
+  cameraControlCapsFromTrack,
+  clampExposureCompensation,
+  exposureLockNote,
+  extractContinuityProfile,
+  formatLockedChip,
+  lockableSystems,
+  lockedSystemsFromSettings,
+  normalisedTapPoint,
+  type CameraControlCaps,
+  type ContinuityProfile,
+  type LockableSystem,
+} from '../../lib/camera/cameraControls';
+import {
+  LIGHT_GRID_COLS,
+  LIGHT_GRID_ROWS,
+  analyzeLightSample,
+  lightAdvice,
+  lightStateLabel,
+  type LightMeterResult,
+} from '../../lib/camera/lightMeter';
 import {
   DUAL_MIC_UNAVAILABLE_MESSAGE,
   DUAL_UNAVAILABLE_MESSAGE,
@@ -113,15 +177,76 @@ import {
  * drives playback second, anchoring the delta on the playback
  * element's 'playing' event, so the (normally negative) delta trims
  * the front take's head downstream exactly like dual's does.
+ *
+ * R32 Phase 1 (capture profile & honest receipt): recorder bitrates
+ * are fps-aware (the 30fps table is unchanged); the recorder codec
+ * comes from a support ladder (MP4 first where the platform supports
+ * it) or this phone's saved proven choice; recordings are measured
+ * with a frame-drop tracker where the browser supports it and every
+ * review screen shows the honest receipt (actual size/fps/codec/
+ * measured bitrate) built by `lib/camera/captureReceipt`; successful
+ * recordings save a coarsely-keyed device profile (facing + size
+ * class, never a device id) that later sessions prefer unless the
+ * user picks a frame rate themselves; the two-step flow locks step
+ * 1's quality + fps choices for step 2; and "Test my camera" runs a
+ * guided 10-second test that shows the receipt, saves the profile
+ * and discards the take.
+ *
+ * R32 Phase 2 (premium viewfinder & locks): after a stream starts, a
+ * short warm-up settle (~800ms, a cancellable timer — the preview is
+ * never blocked) gates the Phase 2 controls: they appear only for
+ * what the live track's capabilities actually expose (see
+ * `lib/camera/cameraControls`). Tap-to-focus via pointsOfInterest
+ * with a brief ring at the tap; a Lock button that pins each offered
+ * system (focus / exposure / white balance) to manual AT ITS CURRENT
+ * settings and only claims the lock after `getSettings()` reads the
+ * mode back as manual — the chip names exactly what locked, and an
+ * exposure that couldn't join gets one plain note; an exposure
+ * compensation slider inside its capability range; a Torch toggle
+ * on the rear camera where offered; a front "Selfie light" (a bright
+ * warm frame glow — DOM only, it adds no real light); a light meter
+ * sampling the preview into a tiny canvas at ~4Hz with zebra stripes
+ * over clipping cells and plain advice that NEVER changes the user's
+ * quality/fps choice; and two-pass colour continuity — step 1's
+ * negotiated colour/exposure profile is snapshotted after warm-up
+ * and re-applied, clamped to the front track's ranges, at step 2.
+ * On devices exposing none of this (desktop, iOS), nothing renders.
+ *
+ * R32 Phase 3 (smooth-motion kit): all decision logic is the pure
+ * `lib/camera/motionCoach` module; this component owns the sensors.
+ * A "Steady start" toggle (default on, saved on this phone) holds a
+ * Record press (single, dual via the shared startRecording path, and
+ * two-step step 1 + step 2) behind a 3-2-1 countdown that finishes
+ * early once the phone reads still enough, finishes anyway at zero
+ * and never hard-blocks; Skip starts at once; with the toggle off
+ * the start is immediate and unchanged. (The guided camera test
+ * keeps its own direct start — it is not a Record press.) While
+ * recording, a motion sampler (~4Hz, gyro primary, preview
+ * frame-difference fallback) drives the coach pill — Smooth / Slow
+ * down / Too shaky, and no pill when there is no signal. A Level
+ * toggle shows a horizon line + bubble from DeviceOrientation
+ * (permission is requested only from that tap, where the platform
+ * requires it; the toggle defaults on only where no prompt is
+ * needed). The zoom slider now applies through an eased ~300ms ramp
+ * instead of jumping. Review screens add the dropped-frame advisory
+ * from the Phase 1 receipt when the measured drops pass the
+ * threshold (see `lib/camera/frameDrops`).
  */
 
-export type CaptureResult = { kind: 'photo'; blob: Blob } | { kind: 'video'; blob: Blob };
+export type CaptureResult =
+  | { kind: 'photo'; blob: Blob }
+  // R32 Phase 1 — a finished video carries its honest capture receipt
+  // (actual size/fps/codec/measured bitrate, dropped frames when
+  // measured) for any caller that wants to show or store it.
+  | { kind: 'video'; blob: Blob; receipt?: CaptureReceipt };
 
 export interface CaptureDualResult {
   main: CaptureResult;
   overlay: CaptureResult;
   /** Measured start delta between the two recorders (front start − rear start) in ms, on one performance.now() anchor. */
   startDeltaMs: number;
+  /** R32 Phase 4 — layout chosen on the review screen: Corner PiP (the R29–R31 default) or Split 50/50. */
+  layout: 'pip' | 'split';
 }
 
 interface CameraCaptureProps {
@@ -210,6 +335,89 @@ function formatClock(totalSeconds: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+/* ------------------------------------------------------------------ */
+/* R32 Phase 1 — device profile storage + receipt display helpers      */
+/* ------------------------------------------------------------------ */
+
+function browserLocalStorage(): DeviceProfileStorage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remember the settings that just worked on this phone (facing + size
+ * class + fps + recorder mime), so a later session can prefer them.
+ * Coarsely keyed in the lib module — no device ids are ever stored.
+ */
+function saveProvenProfile(
+  facing: CaptureFacingMode,
+  settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
+  mimeType: string,
+  fallbackFps: number,
+): void {
+  const width = settings?.width ?? 0;
+  const height = settings?.height ?? 0;
+  const shortSide = width > 0 && height > 0 ? Math.min(width, height) : 0;
+  saveDeviceProfile(browserLocalStorage(), {
+    facing,
+    shortSideClass: shortSideClassFor(shortSide),
+    fps:
+      typeof settings?.frameRate === 'number' && settings.frameRate > 0
+        ? Math.round(settings.frameRate)
+        : fallbackFps,
+    mimeType: mimeType ?? '',
+  });
+}
+
+/** The proven recorder mime for a facing, when one is saved. */
+function provenMimeFor(facing: CaptureFacingMode): string | undefined {
+  const profile = deviceProfileForFacing(loadDeviceProfiles(browserLocalStorage()), facing);
+  return profile?.mimeType ? profile.mimeType : undefined;
+}
+
+/**
+ * The two receipt lines on a review screen: what was actually
+ * recorded (size, frame rate, honest quality word) over the smaller
+ * details line (codec, measured bitrate, dropped frames when
+ * measured). The strings themselves come from the lib formatter.
+ */
+function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: string }) {
+  const { summary, details } = formatCaptureReceipt(receipt);
+  // R32 Phase 3 — dropped-frame review warning: advisory only, and
+  // only when the tracker actually measured drops past the threshold.
+  const dropWarning = captureReceiptDropWarning(receipt);
+  return (
+    <div className="flex flex-col items-center gap-0.5 text-center">
+      {label && (
+        <p className="text-[10px] font-bold uppercase tracking-wide text-white/40">{label}</p>
+      )}
+      <p className="text-xs text-white/80">{summary}</p>
+      <p className="text-[11px] text-white/50">{details}</p>
+      {dropWarning && <p className="text-[11px] text-amber-300">{dropWarning}</p>}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* R32 Phase 3 — level indicator platform helpers                      */
+/* ------------------------------------------------------------------ */
+
+/** True when the platform exposes DeviceOrientation at all (the Level toggle renders only then). */
+function deviceOrientationAvailable(): boolean {
+  return typeof window !== 'undefined' && 'DeviceOrientationEvent' in window;
+}
+
+/** True on platforms (iOS) where orientation access needs an explicit permission request from a user tap. */
+function orientationPermissionNeeded(): boolean {
+  return (
+    typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof (DeviceOrientationEvent as unknown as { requestPermission?: unknown }).requestPermission === 'function'
+  );
+}
+
 export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -237,7 +445,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // handed off the instant the recorder stops (the previous behavior —
   // no chance to review, retake, or pick the overlay track). `url` is an
   // object URL for the preview <video>, revoked when the state clears.
-  const [pendingVideo, setPendingVideo] = useState<{ blob: Blob; url: string } | null>(null);
+  const [pendingVideo, setPendingVideo] = useState<{ blob: Blob; url: string; receipt: CaptureReceipt } | null>(null);
 
   useEffect(() => {
     if (!pendingVideo) return;
@@ -264,12 +472,17 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // recording proceeds WITHOUT sound and the user is told up front.
   const [dualMicMissing, setDualMicMissing] = useState(false);
   const [dualCamCount, setDualCamCount] = useState(0);
+  // R32 Phase 4 — the dual review's layout choice; Corner PiP is the
+  // default, exactly as pairs have always been placed.
+  const [dualLayout, setDualLayout] = useState<'pip' | 'split'>('pip');
   const [pendingDual, setPendingDual] = useState<{
     mainBlob: Blob;
     mainUrl: string;
     frontBlob: Blob;
     frontUrl: string;
     startDeltaMs: number;
+    mainReceipt: CaptureReceipt;
+    frontReceipt: CaptureReceipt;
   } | null>(null);
 
   useEffect(() => {
@@ -304,6 +517,105 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   // for the same blob: the pendingVideo effect revokes its URL when
   // the review clears, and the retained copy must survive that.
   const step1UrlRef = useRef<string | null>(null);
+  // R32 Phase 1 — capture-profile state. Ref mirrors of the user's
+  // choices for use inside recorder callbacks (created in one phase,
+  // fired in another), the two-step profile lock, the step-1 receipt
+  // (carried into the step-2 review), and the camera-test mode flags.
+  const facingModeRef = useRef(facingMode);
+  useEffect(() => {
+    facingModeRef.current = facingMode;
+  }, [facingMode]);
+  const qualityChoiceRef = useRef(qualityChoice);
+  useEffect(() => {
+    qualityChoiceRef.current = qualityChoice;
+  }, [qualityChoice]);
+  const fpsChoiceRef = useRef(fpsChoice);
+  useEffect(() => {
+    fpsChoiceRef.current = fpsChoice;
+  }, [fpsChoice]);
+  /** True once the user taps an fps chip this session — a saved device profile never overrides an explicit choice. */
+  const userFpsChoiceRef = useRef(false);
+  /** Two-step lock: the quality + fps captured when step 1 started recording; step 2 must reuse them. */
+  const twoPassLockRef = useRef<{ quality: CaptureQualityChoice; fps: CaptureFpsChoice } | null>(null);
+  /** The step-1 take's receipt, carried into the step-2 (pendingDual) review. */
+  const step1ReceiptRef = useRef<CaptureReceipt | null>(null);
+  /** "Test my camera" mode: the next single recording is a 10s test — measured, profiled, then discarded. */
+  const testModeRef = useRef(false);
+  const [isTestingCamera, setIsTestingCamera] = useState(false);
+  const [testReceipt, setTestReceipt] = useState<CaptureReceipt | null>(null);
+
+  // R32 Phase 2 — premium viewfinder state. Everything here stays
+  // null/false/empty until a stream's warm-up reads real capabilities,
+  // so on devices exposing nothing (desktop, iOS) no Phase 2 control
+  // ever renders.
+  /** The live track's Phase 2 capability model; null until warm-up (and on tracks exposing nothing usable it is the all-absent model). */
+  const [controlCaps, setControlCaps] = useState<CameraControlCaps | null>(null);
+  /** True once the current stream's warm-up settle has run. */
+  const [warmedUp, setWarmedUp] = useState(false);
+  /** The tap-to-focus ring position (0..1 fractions of the preview box); null = no ring. */
+  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
+  const [focusRingFading, setFocusRingFading] = useState(false);
+  /** Systems the read-back PROVED locked — the chip names exactly these. */
+  const [lockedSystems, setLockedSystems] = useState<LockableSystem[]>([]);
+  /** The one-time "exposure can't lock" note for the current lock; null otherwise. */
+  const [lockNote, setLockNote] = useState<string | null>(null);
+  const [exposureCompValue, setExposureCompValue] = useState(0);
+  const [torchOn, setTorchOn] = useState(false);
+  const [selfieLight, setSelfieLight] = useState(false);
+  /** The latest light-meter reading; null until the sampler's first pass. */
+  const [lightResult, setLightResult] = useState<LightMeterResult | null>(null);
+  const warmupTimerRef = useRef<number | null>(null);
+  const focusRingTimersRef = useRef<number[]>([]);
+  const lastCompApplyRef = useRef(0);
+  /** Two-pass colour continuity: step 1's negotiated colour/exposure profile, re-applied (clamped) at step 2. */
+  const continuityProfileRef = useRef<ContinuityProfile | null>(null);
+
+  // R32 Phase 3 — smooth-motion kit state. The decision logic is the
+  // pure module in `lib/camera/motionCoach`; this component owns the
+  // sensors and the timers only.
+  /** Steady-start toggle: default ON, persisted in localStorage (pure (de)serialisation in the lib module). */
+  const [steadyStartEnabled, setSteadyStartEnabled] = useState<boolean>(() =>
+    loadSteadyStartEnabled(browserLocalStorage()),
+  );
+  /** True while the steady-start countdown overlay is up (the pending recorder start sits in a ref). */
+  const [countdownActive, setCountdownActive] = useState(false);
+  /** The countdown's displayed number (3, then 2, then 1). */
+  const [countdownDisplay, setCountdownDisplay] = useState(3);
+  /** The recorder start waiting on the countdown — single, dual (via startRecording) or step-2. */
+  const countdownPendingRef = useRef<(() => void) | null>(null);
+  /** Rolling motion-level history, written by the motion sampler; the countdown decision reads it. */
+  const levelHistoryRef = useRef<MotionLevel[]>([]);
+  /** The live motion-coach pill state while recording; null = no pill (no signal, or not recording). */
+  const [coachState, setCoachState] = useState<MotionCoachState | null>(null);
+  /** Level indicator on/off. Default ON only where enabling it needs no permission prompt on this platform. */
+  const [levelEnabled, setLevelEnabled] = useState<boolean>(
+    () => deviceOrientationAvailable() && !orientationPermissionNeeded(),
+  );
+  /** Latest horizon tilt in degrees; null = no orientation signal yet. */
+  const [horizonTilt, setHorizonTilt] = useState<number | null>(null);
+  /** Rolling sensor buffers for the motion sampler (gyro primary, frame-diff fallback). */
+  const motionBufferRef = useRef<{ gyro: GyroSample[]; diffs: number[]; lastFrame: FrameSampleInput | null }>({
+    gyro: [],
+    diffs: [],
+    lastFrame: null,
+  });
+  /** The live smooth-zoom ramp (animation-frame handle + ramp state); null = no ramp running. */
+  const zoomRampRef = useRef<{ ramp: ZoomRamp; raf: number } | null>(null);
+  /** The zoom value most recently APPLIED to the track — a new ramp starts (or retargets) from here. */
+  const zoomAppliedRef = useRef(1);
+
+  // R32 Phase 1 — prefer this phone's proven frame rate for the
+  // current facing when the session starts (or the camera flips),
+  // unless the user has already picked a frame rate this session.
+  useEffect(() => {
+    if (userFpsChoiceRef.current) return;
+    if (twoPassPhase !== 'off') return;
+    const profile = deviceProfileForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode);
+    if (profile && (profile.fps === 30 || profile.fps === 60) && profile.fps !== fpsChoice) {
+      setFpsChoice(profile.fps as CaptureFpsChoice);
+    }
+  }, [facingMode, fpsChoice, twoPassPhase]);
+
   const step2PlaybackRef = useRef<HTMLVideoElement>(null);
   const step2ChunksRef = useRef<Blob[]>([]);
   const step2AnchorsRef = useRef<{
@@ -327,6 +639,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   /** Leave the two-pass flow entirely: machine to 'off' + retained URL dropped. */
   const exitTwoPass = useCallback(() => {
     dropStep1Url();
+    twoPassLockRef.current = null;
+    step1ReceiptRef.current = null;
+    continuityProfileRef.current = null;
     dispatchTwoPass({ type: 'exit' });
   }, [dropStep1Url, dispatchTwoPass]);
 
@@ -340,9 +655,36 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     frontStreamRef.current?.getTracks().forEach((track) => track.stop());
     frontStreamRef.current = null;
     setZoomCapability(null);
+    // R32 Phase 2 — a stopped stream takes every Phase 2 control
+    // state with it: locks die with their track, the torch is off
+    // (its track is gone), warm-up must re-run for the next stream.
+    if (warmupTimerRef.current !== null) {
+      window.clearTimeout(warmupTimerRef.current);
+      warmupTimerRef.current = null;
+    }
+    focusRingTimersRef.current.forEach((t) => window.clearTimeout(t));
+    focusRingTimersRef.current = [];
+    setControlCaps(null);
+    setWarmedUp(false);
+    setFocusPoint(null);
+    setFocusRingFading(false);
+    setLockedSystems([]);
+    setLockNote(null);
+    setTorchOn(false);
+    setLightResult(null);
+    // R32 Phase 3 — a stopped stream also stops the zoom ramp (its
+    // track is gone), any pending steady-start countdown (its start
+    // must never fire into a dead stream) and the coach pill.
+    if (zoomRampRef.current) {
+      cancelAnimationFrame(zoomRampRef.current.raf);
+      zoomRampRef.current = null;
+    }
+    countdownPendingRef.current = null;
+    setCountdownActive(false);
+    setCoachState(null);
   }, []);
 
-  const startStream = useCallback(async () => {
+  const startStream = useCallback(async (override?: { quality: CaptureQualityChoice; fps: CaptureFpsChoice }) => {
     setError(null);
     setIsReady(false);
     stopStream();
@@ -350,6 +692,17 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       setError('Camera capture is not supported in this browser. Use file upload instead.');
       return;
     }
+    // R32 Phase 1 — two-step profile lock: while step 2 is live (or
+    // its review is up), the stream is acquired with STEP 1's quality
+    // + frame-rate choices, so the pair matches by construction; chip
+    // changes mid-flow are ignored here (and the chips are disabled
+    // in step 2 besides). `override` covers the one call made in the
+    // same tick as the step-1 → step-2 transition, before the phase
+    // ref has caught up.
+    const phaseAtStart = twoPassPhaseRef.current;
+    const lock =
+      override ??
+      (phaseAtStart === 'step2-live' || phaseAtStart === 'step2-review' ? twoPassLockRef.current : null);
     // R24 WS-P1: walk the constraint ladder in order. A rung that the
     // device rejects as over-constrained / not found falls through to
     // the next rung; the final rung is the pre-R24 permissive ideal-1080
@@ -359,8 +712,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       canvasWidth,
       canvasHeight,
       facingMode,
-      quality: qualityChoice,
-      frameRate: fpsChoice,
+      quality: lock?.quality ?? qualityChoice,
+      frameRate: lock?.fps ?? fpsChoice,
     });
     let stream: MediaStream | null = null;
     let lastError: unknown = null;
@@ -395,11 +748,59 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       setZoomCapability(capability);
       if (capability) {
         const settings = track.getSettings?.() as { zoom?: number } | undefined;
-        setZoomValue(typeof settings?.zoom === 'number' ? settings.zoom : capability.min);
+        const applied = typeof settings?.zoom === 'number' ? settings.zoom : capability.min;
+        setZoomValue(applied);
+        zoomAppliedRef.current = applied;
       }
     } catch {
       setZoomCapability(null);
     }
+    // R32 Phase 2 — warm-up: let auto focus / exposure / white
+    // balance settle (~800ms) before reading the capabilities and
+    // settings the locks, receipt-adjacent state and two-pass
+    // continuity depend on. A cancellable timer only — the preview
+    // is already live and Record is never blocked on it; stopStream
+    // (or the next startStream) cancels a stale timer, and the
+    // stream-identity check guards the race regardless.
+    const streamAtStart = stream;
+    warmupTimerRef.current = window.setTimeout(() => {
+      warmupTimerRef.current = null;
+      if (streamRef.current !== streamAtStart) return;
+      try {
+        const track = streamAtStart.getVideoTracks()[0];
+        if (!track) return;
+        const caps = cameraControlCapsFromTrack(
+          track.getCapabilities ? track.getCapabilities() : null,
+          typeof navigator !== 'undefined' && navigator.mediaDevices?.getSupportedConstraints
+            ? navigator.mediaDevices.getSupportedConstraints()
+            : null,
+        );
+        setControlCaps(caps);
+        const settings = (track.getSettings?.() ?? {}) as Record<string, unknown>;
+        if (typeof settings.exposureCompensation === 'number') {
+          setExposureCompValue(settings.exposureCompensation);
+        }
+        // R32 Phase 2 — two-pass colour continuity. Step 1: snapshot
+        // the negotiated colour/exposure profile. Step 2: re-apply
+        // step 1's targets, clamped to THIS (front) track's ranges —
+        // best-effort, failures ignored, and never shown as a lock.
+        const phase = twoPassPhaseRef.current;
+        if (phase === 'step1-live') {
+          continuityProfileRef.current = extractContinuityProfile(settings);
+        } else if (phase === 'step2-live' && continuityProfileRef.current) {
+          const plan = buildContinuityPlan(continuityProfileRef.current, caps);
+          for (const constraints of plan) {
+            void track
+              .applyConstraints({ advanced: [constraints as MediaTrackConstraintSet] })
+              .catch(() => {});
+          }
+        }
+      } catch {
+        // Capabilities are a nice-to-have layer; a failure here just
+        // leaves the Phase 2 controls absent for this stream.
+      }
+      setWarmedUp(true);
+    }, 800);
     setIsReady(true);
   }, [canvasWidth, canvasHeight, facingMode, qualityChoice, fpsChoice, stopStream]);
 
@@ -442,10 +843,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    */
   const enterTwoPass = useCallback(
     (viaDualFallback: boolean) => {
-      if (!onCaptureDual) return;
+      if (!onCaptureDual || countdownActive) return;
       setDualNotice(null);
       setDualDetails(null);
       dropStep1Url();
+      twoPassLockRef.current = null;
+      step1ReceiptRef.current = null;
       dispatchTwoPass({ type: 'enter', viaDualFallback });
       if (facingMode !== 'environment') {
         setFacingMode('environment');
@@ -453,7 +856,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         void startStream();
       }
     },
-    [onCaptureDual, dropStep1Url, dispatchTwoPass, facingMode, startStream],
+    [onCaptureDual, countdownActive, dropStep1Url, dispatchTwoPass, facingMode, startStream],
   );
 
   /**
@@ -470,7 +873,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    * it records silently and says so.
    */
   const enterDualMode = useCallback(async () => {
-    if (!onCaptureDual) return;
+    if (!onCaptureDual || countdownActive) return;
     setDualNotice(null);
     setDualDetails(null);
     setDualMicMissing(false);
@@ -514,7 +917,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     } finally {
       setDualBusy(false);
     }
-  }, [onCaptureDual, stopStream, canvasWidth, canvasHeight, startStream]);
+  }, [onCaptureDual, countdownActive, stopStream, canvasWidth, canvasHeight, startStream]);
 
   // R29 — attach the front stream to its corner preview once dual mode
   // renders it.
@@ -577,46 +980,249 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    * R24 WS-P4a: drive the camera's real zoom. A failed applyConstraints
    * (device busy, value raced a re-acquire, …) must never kill the
    * stream — the slider simply doesn't take effect.
+   *
+   * R32 Phase 3 — the apply is now an EASED RAMP (~300ms, the pure
+   * maths in `lib/camera/motionCoach`): each animation frame applies
+   * the eased value between the currently-applied zoom and the
+   * slider's target, so the view glides instead of jumping. A new
+   * slider input mid-ramp retargets from the current animated value.
+   * A rejected apply stops the ramp silently — the same swallowed
+   * failure behaviour as the direct call it replaces.
    */
   const applyZoom = useCallback((value: number) => {
     setZoomValue(value);
     const track = streamRef.current?.getVideoTracks()[0];
     if (!track?.applyConstraints) return;
-    void track
-      .applyConstraints({ advanced: [{ zoom: value } as MediaTrackConstraintSet] })
-      .catch(() => {});
+    const now = performance.now();
+    const ramp = zoomRampRef.current
+      ? retargetZoomRamp(zoomRampRef.current.ramp, value, now)
+      : createZoomRamp(zoomAppliedRef.current, value, now);
+    if (zoomRampRef.current) cancelAnimationFrame(zoomRampRef.current.raf);
+    const state: { ramp: ZoomRamp; raf: number } = { ramp, raf: 0 };
+    zoomRampRef.current = state;
+    const step = () => {
+      if (zoomRampRef.current !== state) return;
+      const v = zoomRampValueAt(state.ramp, performance.now());
+      zoomAppliedRef.current = v;
+      void track
+        .applyConstraints({ advanced: [{ zoom: v } as MediaTrackConstraintSet] })
+        .catch(() => {
+          // Stop the ramp silently (pre-Phase-3 behaviour: a failed
+          // zoom apply is swallowed, the stream is never touched).
+          if (zoomRampRef.current === state) zoomRampRef.current = null;
+        });
+      if (zoomRampRef.current !== state) return;
+      if (isZoomRampDone(state.ramp, performance.now())) {
+        zoomRampRef.current = null;
+        return;
+      }
+      state.raf = requestAnimationFrame(step);
+    };
+    state.raf = requestAnimationFrame(step);
   }, []);
+
+  /**
+   * R32 Phase 2 — tap-to-focus: a tap on the preview element itself
+   * (controls are separate elements, so they never reach this
+   * handler) asks the track to focus/expose at that point, where
+   * pointsOfInterest is offered. Coordinates are normalised against
+   * the preview box, x flipped for the mirrored front preview so the
+   * tapped point is the focused point. A gold ring marks the tap for
+   * ~600ms (fading over the last stretch). Best-effort: a rejected
+   * apply just means no ring.
+   */
+  const handlePreviewTap = useCallback(
+    (e: React.MouseEvent<HTMLVideoElement>) => {
+      if (!controlCaps?.pointsOfInterest || !isReady || pendingVideo || pendingDual) return;
+      const track = streamRef.current?.getVideoTracks()[0];
+      if (!track?.applyConstraints) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const mirrored = facingMode === 'user' && !dualMode;
+      // The ring marks the point as SEEN on screen; the constraint
+      // gets the same tap in image space (x flipped when mirrored).
+      const seenPoint = normalisedTapPoint(e.clientX, e.clientY, rect, false);
+      const point = normalisedTapPoint(e.clientX, e.clientY, rect, mirrored);
+      void track
+        .applyConstraints({ advanced: [{ pointsOfInterest: [{ x: point.x, y: point.y }] } as MediaTrackConstraintSet] })
+        .then(() => {
+          focusRingTimersRef.current.forEach((t) => window.clearTimeout(t));
+          setFocusPoint(seenPoint);
+          setFocusRingFading(false);
+          focusRingTimersRef.current = [
+            window.setTimeout(() => setFocusRingFading(true), 450),
+            window.setTimeout(() => setFocusPoint(null), 620),
+          ];
+        })
+        .catch(() => {});
+    },
+    [controlCaps, isReady, pendingVideo, pendingDual, facingMode, dualMode],
+  );
+
+  /**
+   * R32 Phase 2 — the Lock toggle. Lock: apply each offered system's
+   * manual plan (pinned at its current settings) INDEPENDENTLY — one
+   * system's rejection never blocks the others — then read the
+   * settings back and claim ONLY the systems that now read 'manual'.
+   * Unlock: hand each locked system back to 'continuous' and clear
+   * the chip + note.
+   */
+  const toggleLock = useCallback(async () => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track?.applyConstraints || !controlCaps) return;
+    if (lockedSystems.length > 0) {
+      for (const step of buildUnlockPlan(lockedSystems)) {
+        try {
+          await track.applyConstraints({ advanced: [step.constraints as MediaTrackConstraintSet] });
+        } catch {
+          // Best-effort per system — the stream is likely gone anyway.
+        }
+      }
+      setLockedSystems([]);
+      setLockNote(null);
+      return;
+    }
+    const plan = buildLockPlan(controlCaps, track.getSettings?.() ?? {});
+    for (const step of plan) {
+      try {
+        await track.applyConstraints({ advanced: [step.constraints as MediaTrackConstraintSet] });
+      } catch {
+        // This system refused — the read-back below simply won't claim it.
+      }
+    }
+    const locked = lockedSystemsFromSettings(
+      track.getSettings?.() ?? {},
+      plan.map((s) => s.system),
+    );
+    setLockedSystems(locked);
+    setLockNote(exposureLockNote(controlCaps, locked));
+  }, [controlCaps, lockedSystems]);
+
+  /**
+   * R32 Phase 2 — exposure compensation slider: the value is clamped
+   * to the capability range/step by the pure helper; applies are
+   * throttled while dragging and always land on release.
+   */
+  const applyExposureCompensation = useCallback(
+    (rawValue: number, force = false) => {
+      const range = controlCaps?.exposure?.compensationRange;
+      if (!range) return;
+      const value = clampExposureCompensation(rawValue, range);
+      setExposureCompValue(value);
+      const now = performance.now();
+      if (!force && now - lastCompApplyRef.current < 120) return;
+      lastCompApplyRef.current = now;
+      const track = streamRef.current?.getVideoTracks()[0];
+      if (!track?.applyConstraints) return;
+      void track
+        .applyConstraints({ advanced: [{ exposureCompensation: value } as MediaTrackConstraintSet] })
+        .catch(() => {});
+    },
+    [controlCaps],
+  );
+
+  /**
+   * R32 Phase 2 — torch toggle (rear camera, only where the track
+   * offers it). State flips only when the apply succeeds; any stream
+   * change resets it via stopStream (the track — and its light — is
+   * gone).
+   */
+  const toggleTorch = useCallback(() => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track?.applyConstraints || !controlCaps?.torch) return;
+    const next = !torchOn;
+    void track
+      .applyConstraints({ advanced: [{ torch: next } as MediaTrackConstraintSet] })
+      .then(() => setTorchOn(next))
+      .catch(() => {});
+  }, [controlCaps, torchOn]);
 
   /**
    * The MediaRecorder creation fallback chain, shared by single and
    * dual recording: tier options with the preferred codec → tier
    * options without mimeType → bare. On total failure it sets the same
    * error message the single path always used and returns null.
+   *
+   * R32 Phase 1 — the preferred codec now comes from the codec ladder
+   * in `captureQuality` (MP4/H.264 first where supported — hardware
+   * encode on Android — then VP9, VP8, bare WebM), or from this
+   * phone's saved proven mime for the facing when one exists
+   * (`preferredMimeType`, tried first). Bitrates are fps-aware via
+   * the track's reported settings (see `recorderOptionsForTrackSettings`).
    */
-  const createRecorder = useCallback((stream: MediaStream): MediaRecorder | null => {
+  const createRecorder = useCallback((stream: MediaStream, preferredMimeType?: string): MediaRecorder | null => {
     // R24 WS-P1: bitrate by the tier the device ACTUALLY negotiated
     // (the video track's reported settings), not the browser default.
     const trackSettings = stream.getVideoTracks()[0]?.getSettings?.();
-    try {
-      return new MediaRecorder(
-        stream,
-        recorderOptionsForTrackSettings(trackSettings, 'video/webm;codecs=vp9,opus'),
-      );
-    } catch {
+    const isSupported = (mime: string): boolean => {
       try {
-        // Same tier bitrates without the preferred mimeType, in case
-        // the codec string (not the options) is what the browser rejects.
-        return new MediaRecorder(stream, recorderOptionsForTrackSettings(trackSettings));
+        return typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function'
+          ? MediaRecorder.isTypeSupported(mime)
+          : false;
       } catch {
-        try {
-          return new MediaRecorder(stream);
-        } catch (err: any) {
-          setError(`This browser cannot record video: ${err?.message || err}`);
-          return null;
-        }
+        return false;
+      }
+    };
+    const ladderMime = pickRecorderMimeType(isSupported);
+    const candidates: Array<string | undefined> = [];
+    if (preferredMimeType && isSupported(preferredMimeType)) candidates.push(preferredMimeType);
+    const ladderCandidate = ladderMime === '' ? undefined : ladderMime;
+    if (!candidates.includes(ladderCandidate)) candidates.push(ladderCandidate);
+    if (!candidates.includes(undefined)) candidates.push(undefined);
+    for (const mimeType of candidates) {
+      try {
+        return new MediaRecorder(stream, recorderOptionsForTrackSettings(trackSettings, mimeType));
+      } catch {
+        // This codec/options combination is what the browser rejects —
+        // fall through to the next candidate, exactly as the old
+        // fixed chain fell through from VP9 to no-mimeType to bare.
       }
     }
+    try {
+      return new MediaRecorder(stream);
+    } catch (err: any) {
+      setError(`This browser cannot record video: ${err?.message || err}`);
+      return null;
+    }
   }, []);
+
+  /**
+   * R32 Phase 1 — start measuring presented vs expected frames on the
+   * element that displays `stream`, for the recording about to start.
+   * The tracker reports null at stop when the browser has no
+   * frame-callback support — the receipt then omits the estimate.
+   */
+  const beginFrameDropTracking = useCallback(
+    (video: HTMLVideoElement | null, stream: MediaStream): FrameDropTracker | null => {
+      if (!video) return null;
+      const settings = stream.getVideoTracks()[0]?.getSettings?.() as { frameRate?: number } | undefined;
+      const nominalFps =
+        typeof settings?.frameRate === 'number' && settings.frameRate > 0 ? settings.frameRate : fpsChoiceRef.current;
+      const tracker = createFrameDropTracker({ nominalFps });
+      tracker.start(video);
+      return tracker;
+    },
+    [],
+  );
+
+  /** R32 Phase 1 — build the honest receipt for one finished recording. */
+  const receiptForRecording = useCallback(
+    (
+      settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
+      mimeType: string,
+      blob: Blob,
+      startedAtMs: number,
+      frameDropEstimate: FrameDropEstimate | null,
+    ): CaptureReceipt =>
+      buildCaptureReceipt({
+        trackSettings: settings ?? null,
+        mimeType,
+        blobSize: blob.size,
+        durationSeconds: Math.max(0, (performance.now() - startedAtMs) / 1000),
+        droppedFramesEstimate: frameDropEstimate?.droppedFramesEstimate ?? null,
+        expectedFramesEstimate: frameDropEstimate?.expectedFrames ?? null,
+      }),
+    [],
+  );
 
   /**
    * R29 — record BOTH cameras at once. The mic is on the rear stream
@@ -636,7 +1242,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   const startDualRecording = useCallback(async () => {
     if (!dualMode || !isReady || !streamRef.current || !frontStreamRef.current) return;
     await tryRaiseRearResolution(streamRef.current, canvasWidth, canvasHeight);
-    const rearRecorder = createRecorder(streamRef.current);
+    // R32 Phase 1 — settings snapshots for the receipts, taken AFTER
+    // the best-effort raise so they describe the streams as recorded.
+    const rearSettings = streamRef.current.getVideoTracks()[0]?.getSettings?.() ?? null;
+    const frontSettings = frontStreamRef.current.getVideoTracks()[0]?.getSettings?.() ?? null;
+    const rearRecorder = createRecorder(streamRef.current, provenMimeFor('environment'));
     if (!rearRecorder) return;
     const frontRecorder = createRecorder(frontStreamRef.current);
     if (!frontRecorder) return;
@@ -648,11 +1258,22 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     frontRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) dualChunksRef.current.front.push(e.data);
     };
+    // R32 Phase 1 — frame-drop measurement on the REAR recording (the
+    // main picture), via its live preview element. Local to this
+    // recording; stopped in handleDualStop.
+    let rearTracker: FrameDropTracker | null = null;
     const handleDualStop = () => {
       dualStoppedRef.current += 1;
       if (dualStoppedRef.current < 2) return;
       const mainBlob = new Blob(dualChunksRef.current.rear, { type: rearRecorder.mimeType || 'video/webm' });
       const frontBlob = new Blob(dualChunksRef.current.front, { type: frontRecorder.mimeType || 'video/webm' });
+      const rearEstimate = rearTracker?.stop() ?? null;
+      rearTracker = null;
+      const rearStartMs = dualStartRef.current?.rearStartMs ?? performance.now();
+      const frontStartMs = dualStartRef.current?.frontStartMs ?? rearStartMs;
+      const mainReceipt = receiptForRecording(rearSettings, rearRecorder.mimeType, mainBlob, rearStartMs, rearEstimate);
+      const frontReceipt = receiptForRecording(frontSettings, frontRecorder.mimeType, frontBlob, frontStartMs, null);
+      saveProvenProfile('environment', rearSettings, rearRecorder.mimeType, fpsChoiceRef.current);
       stopStream();
       setPendingDual({
         mainBlob,
@@ -660,6 +1281,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         frontBlob,
         frontUrl: URL.createObjectURL(frontBlob),
         startDeltaMs: dualStartRef.current ? dualStartRef.current.frontStartMs - dualStartRef.current.rearStartMs : 0,
+        mainReceipt,
+        frontReceipt,
       });
       dualStartRef.current = null;
       frontRecorderRef.current = null;
@@ -672,12 +1295,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     const rearStartMs = performance.now();
     frontRecorder.start();
     const frontStartMs = performance.now();
+    rearTracker = beginFrameDropTracking(videoRef.current, streamRef.current);
     dualStartRef.current = { anchorMs, rearStartMs, frontStartMs };
     recorderRef.current = rearRecorder;
     frontRecorderRef.current = frontRecorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [dualMode, isReady, createRecorder, stopStream, canvasWidth, canvasHeight]);
+  }, [dualMode, isReady, createRecorder, stopStream, canvasWidth, canvasHeight, beginFrameDropTracking, receiptForRecording]);
 
   const startRecording = useCallback(() => {
     const stream = streamRef.current;
@@ -686,14 +1310,46 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       void startDualRecording();
       return;
     }
+    // R32 Phase 1 — two-step profile lock: when step 1 starts, pin
+    // the choices in force so step 2 reuses exactly them.
+    if (twoPassPhaseRef.current === 'step1-live') {
+      twoPassLockRef.current = { quality: qualityChoiceRef.current, fps: fpsChoiceRef.current };
+    }
     chunksRef.current = [];
-    const recorder = createRecorder(stream);
-    if (!recorder) return;
+    const settingsSnapshot = stream.getVideoTracks()[0]?.getSettings?.() ?? null;
+    const recorder = createRecorder(stream, provenMimeFor(facingModeRef.current));
+    if (!recorder) {
+      // A failed start must not leave a camera test armed.
+      testModeRef.current = false;
+      setIsTestingCamera(false);
+      return;
+    }
+    let tracker: FrameDropTracker | null = null;
+    let startedAtMs = 0;
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunksRef.current.push(e.data);
     };
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'video/webm' });
+      // R32 Phase 1 — the honest receipt for this recording, and the
+      // proven-settings save (a recording that finished is proof the
+      // settings work on this phone).
+      const estimate = tracker?.stop() ?? null;
+      tracker = null;
+      const receipt = receiptForRecording(settingsSnapshot, recorder.mimeType, blob, startedAtMs, estimate);
+      saveProvenProfile(facingModeRef.current, settingsSnapshot, recorder.mimeType, fpsChoiceRef.current);
+      // R32 Phase 1 — "Test my camera": the test take is measured and
+      // profiled above, then DISCARDED — it never reaches a review
+      // state, the timeline or the project. The live camera restarts
+      // behind the results card.
+      if (testModeRef.current) {
+        testModeRef.current = false;
+        setIsTestingCamera(false);
+        setTestReceipt(receipt);
+        stopStream();
+        void startStream();
+        return;
+      }
       // R31 — in two-pass step 1 this same stop also feeds the flow:
       // the blob becomes the machine's main take, and the flow retains
       // its OWN object URL for it in `step1UrlRef` (separate from the
@@ -702,6 +1358,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       if (twoPassPhaseRef.current === 'step1-live') {
         dropStep1Url();
         step1UrlRef.current = URL.createObjectURL(blob);
+        step1ReceiptRef.current = receipt;
         dispatchTwoPass({ type: 'step1-recorded', blob });
       }
       // Hold for the review state (see `pendingVideo`) instead of handing
@@ -709,13 +1366,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       // camera doesn't need to stay hot for a decision, and the review
       // <video> replaces the live preview in the same frame.
       stopStream();
-      setPendingVideo({ blob, url: URL.createObjectURL(blob) });
+      setPendingVideo({ blob, url: URL.createObjectURL(blob), receipt });
     };
     recorder.start();
+    startedAtMs = performance.now();
+    tracker = beginFrameDropTracking(videoRef.current, stream);
     recorderRef.current = recorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass]);
+  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
@@ -742,7 +1401,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     if (facingMode !== 'user') {
       setFacingMode('user');
     } else {
-      void startStream();
+      // R32 Phase 1 — pass step 1's locked choices explicitly: this
+      // call happens in the same tick as the phase transition, before
+      // the phase ref inside startStream has caught up.
+      void startStream(twoPassLockRef.current ?? undefined);
     }
   }, [dispatchTwoPass, facingMode, startStream]);
 
@@ -770,9 +1432,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     const mainBlob = twoPass.mainBlob;
     const mainUrl = step1UrlRef.current;
     if (!stream || !isReady || !mainBlob || !mainUrl) return;
-    const recorder = createRecorder(stream);
+    // R32 Phase 1 — step 2 records on the FRONT camera with step 1's
+    // locked profile; its proven mime (when saved) is the front one.
+    const settingsSnapshot = stream.getVideoTracks()[0]?.getSettings?.() ?? null;
+    const recorder = createRecorder(stream, provenMimeFor('user'));
     if (!recorder) return;
     step2ChunksRef.current = [];
+    // R32 Phase 1 — frame-drop measurement on the element that shows
+    // the front stream in step 2 (the corner preview).
+    let tracker: FrameDropTracker | null = null;
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) step2ChunksRef.current.push(e.data);
     };
@@ -783,15 +1451,27 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       const playbackStartMs = anchors?.playbackAnchorMs ?? anchors?.fallbackAnchorMs ?? recorderStartMs;
       const startDeltaMs = twoPassStartDeltaMs(playbackStartMs, recorderStartMs);
       step2AnchorsRef.current = null;
+      // R32 Phase 1 — receipts for the pair review: step 2's own, and
+      // step 1's carried over (rebuilt bare only in the impossible
+      // case the step-1 receipt is missing — size/fps then honestly
+      // read as unknown rather than invented).
+      const estimate = tracker?.stop() ?? null;
+      tracker = null;
+      const frontReceipt = receiptForRecording(settingsSnapshot, recorder.mimeType, frontBlob, recorderStartMs, estimate);
+      const mainReceipt =
+        step1ReceiptRef.current ??
+        buildCaptureReceipt({ trackSettings: null, mimeType: mainBlob.type, blobSize: mainBlob.size, durationSeconds: 0 });
+      saveProvenProfile('user', settingsSnapshot, recorder.mimeType, fpsChoiceRef.current);
       // Transfer the retained step-1 URL into pendingDual: clearing
       // the ref hands ownership to the pendingDual effect, which
       // revokes it when the review clears.
       step1UrlRef.current = null;
       dispatchTwoPass({ type: 'step2-recorded', blob: frontBlob, startDeltaMs });
       stopStream();
-      setPendingDual({ mainBlob, mainUrl, frontBlob, frontUrl: URL.createObjectURL(frontBlob), startDeltaMs });
+      setPendingDual({ mainBlob, mainUrl, frontBlob, frontUrl: URL.createObjectURL(frontBlob), startDeltaMs, mainReceipt, frontReceipt });
     };
     recorder.start();
+    tracker = beginFrameDropTracking(frontVideoRef.current, stream);
     const recorderStartMs = performance.now();
     recorderRef.current = recorder;
     const anchors: { recorderStartMs: number; playbackAnchorMs: number | null; fallbackAnchorMs: number } = {
@@ -812,13 +1492,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     }
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob]);
+  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob, beginFrameDropTracking, receiptForRecording]);
 
   /** Review-state confirm: hand the SAME CaptureResult to the normal path or the overlay path, per the user's pick. */
   const confirmPendingVideo = useCallback(
     (asOverlay: boolean) => {
       if (!pendingVideo) return;
-      const result: CaptureResult = { kind: 'video', blob: pendingVideo.blob };
+      const result: CaptureResult = { kind: 'video', blob: pendingVideo.blob, receipt: pendingVideo.receipt };
       setPendingVideo(null);
       if (asOverlay && onCaptureAsOverlay) onCaptureAsOverlay(result);
       else onCapture(result);
@@ -836,13 +1516,14 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   const confirmDual = useCallback(() => {
     if (!pendingDual || !onCaptureDual) return;
     const payload: CaptureDualResult = {
-      main: { kind: 'video', blob: pendingDual.mainBlob },
-      overlay: { kind: 'video', blob: pendingDual.frontBlob },
+      main: { kind: 'video', blob: pendingDual.mainBlob, receipt: pendingDual.mainReceipt },
+      overlay: { kind: 'video', blob: pendingDual.frontBlob, receipt: pendingDual.frontReceipt },
       startDeltaMs: pendingDual.startDeltaMs,
+      layout: dualLayout,
     };
     setPendingDual(null);
     onCaptureDual(payload);
-  }, [pendingDual, onCaptureDual]);
+  }, [pendingDual, onCaptureDual, dualLayout]);
 
   /** R29 dual review discard: drop both recordings and re-probe back into dual mode. */
   const discardDual = useCallback(() => {
@@ -892,6 +1573,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
    */
   const startOverTwoPass = useCallback(() => {
     dropStep1Url();
+    step1ReceiptRef.current = null;
     dispatchTwoPass({ type: 'start-over' });
     setPendingDual(null);
     if (facingMode !== 'environment') {
@@ -900,6 +1582,28 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       void startStream();
     }
   }, [dropStep1Url, dispatchTwoPass, facingMode, startStream]);
+
+  /**
+   * R32 Phase 1 — "Test my camera": a guided 10-second test on the
+   * current camera through the NORMAL single recorder (test mode
+   * flags its stop: measure + save the proven profile, show the
+   * receipt card, discard the take). Nothing is added anywhere.
+   */
+  const startCameraTest = useCallback(() => {
+    if (!isReady || isRecording || countdownActive || dualMode || twoPassPhase !== 'off' || pendingVideo || pendingDual) return;
+    setTestReceipt(null);
+    testModeRef.current = true;
+    setIsTestingCamera(true);
+    startRecording();
+  }, [isReady, isRecording, countdownActive, dualMode, twoPassPhase, pendingVideo, pendingDual, startRecording]);
+
+  // The test auto-stops at 10 seconds (the normal 10-minute cap
+  // effect below still applies to every other recording).
+  useEffect(() => {
+    if (isTestingCamera && isRecording && recordSeconds >= 10) {
+      stopRecording();
+    }
+  }, [isTestingCamera, isRecording, recordSeconds, stopRecording]);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -916,7 +1620,246 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     }
   }, [isRecording, recordSeconds, stopRecording]);
 
+  // R32 Phase 2 — light meter sampler: draw the live preview into a
+  // tiny (<= 96px wide) offscreen canvas at ~4Hz and analyse it with
+  // the pure meter. Runs only while a single-camera stream is live
+  // and warmed up — never during review, dual mode or two-pass step
+  // 2 (whose main frame is playback, not the camera) — and stops
+  // with the stream. It only ever ADVISES; it never touches the
+  // user's quality/fps choices.
+  useEffect(() => {
+    if (!warmedUp || !isReady || dualMode || isStep2Phase || pendingVideo || pendingDual || error) return;
+    let cancelled = false;
+    const canvas = document.createElement('canvas');
+    const sample = () => {
+      const video = videoRef.current;
+      if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) return;
+      const width = 96;
+      const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      try {
+        ctx.drawImage(video, 0, 0, width, height);
+        const image = ctx.getImageData(0, 0, width, height);
+        if (!cancelled) {
+          setLightResult(analyzeLightSample({ data: image.data, width, height, format: 'rgba' }));
+        }
+      } catch {
+        // A frame that can't be read (stream mid-swap) is skipped —
+        // the next tick samples again.
+      }
+    };
+    sample();
+    const interval = window.setInterval(sample, 250);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [warmedUp, isReady, dualMode, isStep2Phase, pendingVideo, pendingDual, error]);
+
+  // R32 Phase 3 — motion sampler: while the steady-start countdown
+  // is up OR a recording is running, sample motion at ~4Hz. Gyro is
+  // primary (DeviceMotion rotationRate, accumulated into a rolling
+  // window); the frame-difference estimate (successive tiny preview
+  // frames, light-meter style) is the fallback when no gyro answers.
+  // All decisions are the pure module's; this effect only collects.
+  // Note the sampler never prompts for motion permission — where a
+  // platform gates motion events behind one, the gyro simply stays
+  // silent and the frame-diff fallback carries the coach.
+  useEffect(() => {
+    if (!countdownActive && !isRecording) return;
+    const buffer = motionBufferRef.current;
+    buffer.gyro = [];
+    buffer.diffs = [];
+    buffer.lastFrame = null;
+    levelHistoryRef.current = [];
+    const onMotion = (e: DeviceMotionEvent) => {
+      const sample = gyroSampleFromRotationRate(e.rotationRate);
+      if (sample) {
+        buffer.gyro.push(sample);
+        if (buffer.gyro.length > 12) buffer.gyro.shift();
+      }
+    };
+    window.addEventListener('devicemotion', onMotion);
+    const canvas = document.createElement('canvas');
+    const tick = () => {
+      const video = dualMode
+        ? videoRef.current
+        : twoPassPhase === 'step2-live'
+          ? frontVideoRef.current
+          : videoRef.current;
+      if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+        const width = 48;
+        const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+          try {
+            ctx.drawImage(video, 0, 0, width, height);
+            const image = ctx.getImageData(0, 0, width, height);
+            const frame: FrameSampleInput = { data: image.data, width, height, format: 'rgba' };
+            if (buffer.lastFrame) {
+              const diff = meanAbsFrameDiff(buffer.lastFrame, frame);
+              if (diff !== null) {
+                buffer.diffs.push(diff);
+                if (buffer.diffs.length > 12) buffer.diffs.shift();
+              }
+            }
+            buffer.lastFrame = frame;
+          } catch {
+            // A frame that can't be read (stream mid-swap) is skipped.
+          }
+        }
+      }
+      const { level } = assessMotion({ gyroSamples: buffer.gyro, frameDiffs: buffer.diffs });
+      levelHistoryRef.current = [...levelHistoryRef.current.slice(-39), level];
+    };
+    tick();
+    const interval = window.setInterval(tick, 250);
+    return () => {
+      window.removeEventListener('devicemotion', onMotion);
+      window.clearInterval(interval);
+    };
+  }, [countdownActive, isRecording, dualMode, twoPassPhase]);
+
+  // R32 Phase 3 — the coach pill follows the sampler's level while
+  // recording (single, dual and step-2 alike — all share this
+  // recording state); it clears the moment recording stops.
+  useEffect(() => {
+    if (!isRecording) {
+      setCoachState(null);
+      return;
+    }
+    const interval = window.setInterval(() => {
+      const { level } = assessMotion({
+        gyroSamples: motionBufferRef.current.gyro,
+        frameDiffs: motionBufferRef.current.diffs,
+      });
+      setCoachState(coachStateForLevel(level));
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [isRecording]);
+
+  /**
+   * R32 Phase 3 — finish the steady-start countdown: run the pending
+   * recorder start EXACTLY as it would have run without the countdown
+   * (the existing start functions and their timestamps are untouched —
+   * the countdown happens entirely before them). Also the Skip action.
+   */
+  const completeCountdown = useCallback(() => {
+    const start = countdownPendingRef.current;
+    countdownPendingRef.current = null;
+    setCountdownActive(false);
+    start?.();
+  }, []);
+
+  // R32 Phase 3 — the countdown itself: 3-2-1 over three seconds,
+  // finishing EARLY the moment the pure steady decision says the
+  // phone is still enough, and finishing anyway when the count
+  // completes — it never hard-blocks a recording.
+  useEffect(() => {
+    if (!countdownActive) return;
+    setCountdownDisplay(3);
+    const startedAt = performance.now();
+    const interval = window.setInterval(() => {
+      const elapsed = performance.now() - startedAt;
+      setCountdownDisplay(Math.max(1, 3 - Math.floor(elapsed / 1000)));
+      if (elapsed >= 3000 || isStillEnough(levelHistoryRef.current)) {
+        completeCountdown();
+      }
+    }, 150);
+    return () => window.clearInterval(interval);
+  }, [countdownActive, completeCountdown]);
+
+  /**
+   * R32 Phase 3 — the Record press, routed through steady-start:
+   * with the toggle OFF (or a countdown already running) the start
+   * function runs immediately, byte-identical to before; with it ON
+   * the start is held behind the countdown overlay.
+   */
+  const beginWithSteadyStart = useCallback(
+    (startFn: () => void) => {
+      if (countdownActive) return;
+      if (!steadyStartEnabled) {
+        startFn();
+        return;
+      }
+      levelHistoryRef.current = [];
+      countdownPendingRef.current = startFn;
+      setCountdownActive(true);
+    },
+    [countdownActive, steadyStartEnabled],
+  );
+
+  // R32 Phase 3 — level indicator listener: DeviceOrientation
+  // beta/gamma → the pure horizon-tilt conversion. The listener only
+  // exists while the Level toggle is on.
+  useEffect(() => {
+    if (!levelEnabled) return;
+    const onOrientation = (e: DeviceOrientationEvent) => {
+      setHorizonTilt(horizonTiltDegrees(e.beta, e.gamma));
+    };
+    window.addEventListener('deviceorientation', onOrientation);
+    return () => {
+      window.removeEventListener('deviceorientation', onOrientation);
+      setHorizonTilt(null);
+    };
+  }, [levelEnabled]);
+
+  /**
+   * R32 Phase 3 — the Level toggle. Where the platform requires a
+   * permission request (iOS), it is made HERE — from this explicit
+   * tap, never automatically; a refusal simply leaves the toggle off.
+   * Where no permission API exists, the toggle just enables the
+   * listener.
+   */
+  const toggleLevel = useCallback(async () => {
+    if (levelEnabled) {
+      setLevelEnabled(false);
+      return;
+    }
+    if (orientationPermissionNeeded()) {
+      try {
+        const result = await (
+          DeviceOrientationEvent as unknown as { requestPermission: () => Promise<string> }
+        ).requestPermission();
+        if (result !== 'granted') return;
+      } catch {
+        return;
+      }
+    }
+    setLevelEnabled(true);
+  }, [levelEnabled]);
+
+  /** R32 Phase 3 — the steady-start toggle, persisted to localStorage. */
+  const toggleSteadyStart = useCallback(() => {
+    setSteadyStartEnabled((prev) => {
+      const next = !prev;
+      saveSteadyStartEnabled(browserLocalStorage(), next);
+      return next;
+    });
+  }, []);
+
   const nearLimit = recordSeconds >= MAX_MEDIA_SECONDS - 5;
+
+  // R32 Phase 2 — derived viewfinder values. The lock button renders
+  // only when at least one system offers a manual mode; the chip
+  // text comes from the pure formatter (exactly the proved locks);
+  // the meter advice is computed in context (demanding capture =
+  // a 4K-class quality choice or 60fps) and never changes a choice.
+  const phase2Lockable = controlCaps ? lockableSystems(controlCaps) : [];
+  const lockedChip = formatLockedChip(lockedSystems);
+  const meterAdvice =
+    lightResult && !isStep2Phase
+      ? lightAdvice(lightResult, {
+          demandingCapture: qualityChoice !== 'hd' || fpsChoice === 60,
+          torchAvailable: facingMode === 'environment' && controlCaps?.torch === true,
+        })
+      : null;
+  const zebraOn = !isStep2Phase && !pendingVideo && !pendingDual && (lightResult?.zebraCells.some(Boolean) ?? false);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/95 flex flex-col items-center justify-center gap-4 p-6">
@@ -931,6 +1874,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           ref={videoRef}
           muted
           playsInline
+          onClick={handlePreviewTap}
           className="w-full h-full object-cover"
           style={{
             transform: dualMode ? 'none' : previewMirrorTransform(facingMode),
@@ -973,6 +1917,127 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
                 Headroom
               </span>
             </div>
+          </div>
+        )}
+        {/* R32 Phase 2 — zebra stripes: DOM cells over the preview
+            where the light meter's grid says highlights are clipping.
+            Pointer-events none, and like the guides they can never
+            appear in a recording (the stream is captured, not the DOM). */}
+        {zebraOn && lightResult && (
+          <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+            {lightResult.zebraCells.map((flagged, i) =>
+              flagged ? (
+                <div
+                  key={i}
+                  className="absolute"
+                  style={{
+                    left: `${((i % LIGHT_GRID_COLS) / LIGHT_GRID_COLS) * 100}%`,
+                    top: `${(Math.floor(i / LIGHT_GRID_COLS) / LIGHT_GRID_ROWS) * 100}%`,
+                    width: `${100 / LIGHT_GRID_COLS}%`,
+                    height: `${100 / LIGHT_GRID_ROWS}%`,
+                    background:
+                      'repeating-linear-gradient(45deg, rgba(255,70,70,0.4) 0 4px, rgba(255,70,70,0.08) 4px 8px)',
+                  }}
+                />
+              ) : null,
+            )}
+          </div>
+        )}
+        {/* R32 Phase 2 — tap-to-focus ring: a brief marker at the tap
+            point, fading out over ~600ms. DOM only. */}
+        {focusPoint && (
+          <div
+            className={`absolute w-14 h-14 rounded-full border-2 border-gold pointer-events-none transition-opacity duration-200 ${
+              focusRingFading ? 'opacity-0' : 'opacity-100'
+            }`}
+            style={{
+              left: `${focusPoint.x * 100}%`,
+              top: `${focusPoint.y * 100}%`,
+              transform: 'translate(-50%, -50%)',
+            }}
+            aria-hidden="true"
+          />
+        )}
+        {/* R32 Phase 2 — selfie light: a bright warm frame glow around
+            the front preview. Pure DOM light from the screen itself —
+            it adds no hardware light and never enters a recording. */}
+        {selfieLight && facingMode === 'user' && !dualMode && !isStep2Phase && !pendingVideo && !pendingDual && !error && (
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              boxShadow:
+                'inset 0 0 0 10px rgba(255, 216, 155, 0.95), inset 0 0 90px 28px rgba(255, 196, 120, 0.5)',
+            }}
+            aria-hidden="true"
+          />
+        )}
+        {/* R32 Phase 2 — light meter pill (top-right; the REC badge
+            owns top-left). Live single-camera view only. */}
+        {lightResult && !isStep2Phase && !pendingVideo && !pendingDual && !error && (
+          <div className="absolute top-3 right-3 text-[10px] font-bold uppercase tracking-wide text-white bg-black/50 rounded px-2 py-1 pointer-events-none">
+            {lightStateLabel(lightResult.state)}
+          </div>
+        )}
+        {/* R32 Phase 3 — level indicator: a horizon line that stays
+            with the real horizon (counter-rotated by the tilt) plus a
+            bubble in a track at the top. DOM only, pointer-events
+            none — like the guides, it can never enter a recording. */}
+        {levelEnabled && horizonTilt !== null && !pendingVideo && !pendingDual && !error && (
+          <>
+            <div
+              className="absolute left-1/2 top-1/2 pointer-events-none"
+              style={{ transform: 'translate(-50%, -50%)' }}
+              aria-hidden="true"
+            >
+              <div
+                className={`w-28 h-0.5 rounded ${Math.abs(horizonTilt) <= 2 ? 'bg-emerald-400/90' : 'bg-white/70'}`}
+                style={{ transform: `rotate(${-horizonTilt}deg)` }}
+              />
+            </div>
+            <div
+              className="absolute top-3 left-1/2 -translate-x-1/2 w-24 h-4 rounded-full bg-black/45 pointer-events-none"
+              aria-hidden="true"
+            >
+              <div className="absolute top-1/2 left-1/2 w-px h-2 bg-white/50" style={{ transform: 'translate(-50%, -50%)' }} />
+              <div
+                className={`absolute top-1/2 left-1/2 w-2.5 h-2.5 rounded-full ${Math.abs(horizonTilt) <= 2 ? 'bg-emerald-400' : 'bg-gold'}`}
+                style={{ transform: `translate(calc(-50% + ${levelBubbleOffsetPx(horizonTilt, 40)}px), -50%)` }}
+              />
+            </div>
+          </>
+        )}
+        {/* R32 Phase 3 — motion coach pill while recording: Smooth /
+            Slow down / Too shaky from the live motion level. No pill
+            at all when there is no motion signal to judge by. */}
+        {isRecording && coachState && (
+          <div
+            className={`absolute bottom-3 left-3 text-[10px] font-bold uppercase tracking-wide text-white rounded px-2 py-1 pointer-events-none ${
+              coachState.tone === 'good'
+                ? 'bg-emerald-600/85'
+                : coachState.tone === 'warn'
+                  ? 'bg-amber-600/90'
+                  : 'bg-red-600/90'
+            }`}
+          >
+            {coachState.text}
+          </div>
+        )}
+        {/* R32 Phase 3 — steady-start countdown overlay: the count
+            finishes early once the phone is still enough, finishes
+            anyway at zero, and Skip starts right away. It never
+            hard-blocks the recording behind it. */}
+        {countdownActive && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/50">
+            <span className="text-6xl font-black text-white tabular-nums">{countdownDisplay}</span>
+            <p className="text-[11px] font-bold uppercase tracking-wide text-white/80 text-center px-6">
+              Hold still — recording starts when you are steady
+            </p>
+            <button
+              onClick={completeCountdown}
+              className="min-h-9 px-3.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold uppercase tracking-wide transition"
+            >
+              Skip
+            </button>
           </div>
         )}
         {isRecording && (
@@ -1077,6 +2142,31 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               ? 'Recorded in two steps — your main video with you over it, already lined up.'
               : 'Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay — already lined up.'}
           </p>
+          <ReceiptLines receipt={pendingDual.mainReceipt} label="Main camera" />
+          <ReceiptLines receipt={pendingDual.frontReceipt} label="Front camera" />
+          {/* R32 Phase 4 — layout choice for the pair: Corner PiP
+              (the usual overlay) or Split 50/50 (both clips as equal
+              halves). Carried into the placement by Add both. */}
+          <div className="flex items-center gap-2 flex-wrap justify-center">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
+            {(
+              [
+                { id: 'pip', label: 'Corner PiP' },
+                { id: 'split', label: 'Split 50/50' },
+              ] as Array<{ id: 'pip' | 'split'; label: string }>
+            ).map((choice) => (
+              <button
+                key={choice.id}
+                onClick={() => setDualLayout(choice.id)}
+                aria-pressed={dualLayout === choice.id}
+                className={`min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide transition ${
+                  dualLayout === choice.id ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
+                }`}
+              >
+                {choice.label}
+              </button>
+            ))}
+          </div>
           <div className="flex items-center gap-2.5 flex-wrap justify-center">
             <button
               onClick={twoPassPhase === 'step2-review' ? confirmDualTwoPass : confirmDual}
@@ -1116,6 +2206,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             <p className="text-xs text-white/60 text-center">
               That&apos;s your main video. Next, you&apos;ll record yourself over it.
             </p>
+            <ReceiptLines receipt={pendingVideo.receipt} />
             <div className="flex items-center gap-2.5 flex-wrap justify-center">
               <button
                 onClick={keepStep1}
@@ -1126,6 +2217,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               <button
                 onClick={() => {
                   dropStep1Url();
+                  step1ReceiptRef.current = null;
                   dispatchTwoPass({ type: 'retake-step1' });
                   discardPendingVideo();
                 }}
@@ -1150,6 +2242,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             <p className="text-xs text-white/60 text-center">
               Your recording is ready. Add it as your main clip — or as a talking-head overlay on top of your main video.
             </p>
+            <ReceiptLines receipt={pendingVideo.receipt} />
             <div className="flex items-center gap-2.5 flex-wrap justify-center">
               <button
                 onClick={() => confirmPendingVideo(false)}
@@ -1231,7 +2324,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
               <button
                 key={chip.id}
                 onClick={() => setQualityChoice(chip.id)}
-                disabled={isRecording || dualMode}
+                disabled={isRecording || dualMode || isStep2Phase}
                 aria-pressed={qualityChoice === chip.id}
                 className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
                   qualityChoice === chip.id ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
@@ -1245,8 +2338,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             {([60, 30] as CaptureFpsChoice[]).map((fps) => (
               <button
                 key={fps}
-                onClick={() => setFpsChoice(fps)}
-                disabled={isRecording || dualMode}
+                onClick={() => {
+                  // An explicit pick this session beats any saved
+                  // device profile from here on.
+                  userFpsChoiceRef.current = true;
+                  setFpsChoice(fps);
+                }}
+                disabled={isRecording || dualMode || isStep2Phase}
                 aria-pressed={fpsChoice === fps}
                 className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
                   fpsChoice === fps ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
@@ -1266,7 +2364,62 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           >
             Guides
           </button>
+          {/* R32 Phase 3: steady-start toggle — default on, saved on
+              this phone. Off = Record starts at once, as before. */}
+          <button
+            onClick={toggleSteadyStart}
+            aria-pressed={steadyStartEnabled}
+            className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+              steadyStartEnabled ? 'bg-white/20 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'
+            }`}
+          >
+            Steady start
+          </button>
+          {/* R32 Phase 3: level toggle — renders only where the
+              platform exposes orientation at all. On phones that ask
+              permission first, the tap itself asks. */}
+          {deviceOrientationAvailable() && (
+            <button
+              onClick={() => void toggleLevel()}
+              aria-pressed={levelEnabled}
+              className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                levelEnabled ? 'bg-white/20 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'
+              }`}
+            >
+              Level
+            </button>
+          )}
+          {/* R32 Phase 1 — guided 10-second camera test. Single mode
+              only: it runs the normal single recorder in test mode. */}
+          {!dualMode && twoPassPhase === 'off' && !isRecording && (
+            <button
+              onClick={startCameraTest}
+              disabled={!isReady}
+              className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-40 transition"
+            >
+              Test my camera
+            </button>
+          )}
         </div>
+        {isTestingCamera && isRecording && (
+          <div className="max-w-md w-full rounded-lg bg-white/5 border border-white/15 px-3 py-2 text-[11px] text-white/80 text-center">
+            Recording a 10-second test… move and pan slowly
+          </div>
+        )}
+        {testReceipt && !isRecording && (
+          <div className="flex flex-col items-center gap-1.5 max-w-md w-full rounded-lg bg-white/5 border border-white/15 px-3 py-2.5">
+            <ReceiptLines receipt={testReceipt} />
+            <p className="text-[11px] text-white/50 text-center">
+              This test was not added to your project. These settings are saved for this camera.
+            </p>
+            <button
+              onClick={() => setTestReceipt(null)}
+              className="min-h-8 px-2.5 flex items-center justify-center rounded-md bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold"
+            >
+              Done
+            </button>
+          </div>
+        )}
         {/* R24 WS-P4a: real camera zoom — rendered ONLY when the live
             track exposes a zoom capability (silent absence otherwise). */}
         {zoomCapability && (
@@ -1285,6 +2438,82 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             />
             <span className="text-[11px] font-bold tabular-nums w-9 text-right">{zoomValue.toFixed(1)}×</span>
           </label>
+        )}
+        {/* R32 Phase 2 — light meter advice, in context. Advisory
+            only: it never changes the quality/fps chips above. */}
+        {warmedUp && !dualMode && meterAdvice && (
+          <p className="max-w-md w-full text-center text-[11px] text-white/70">{meterAdvice}</p>
+        )}
+        {/* R32 Phase 2 — premium viewfinder controls. Every control
+            below is capability-gated: it renders only when the live
+            track exposed the matching capability at warm-up. */}
+        {warmedUp && !dualMode && !isStep2Phase && controlCaps && (
+          <div className="flex flex-col items-center gap-2 w-full">
+            <div className="flex items-center gap-2 flex-wrap justify-center">
+              {phase2Lockable.length > 0 && (
+                <button
+                  onClick={() => void toggleLock()}
+                  aria-pressed={lockedSystems.length > 0}
+                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                    lockedSystems.length > 0
+                      ? 'bg-gold text-black'
+                      : 'bg-white/5 text-white/70 hover:bg-white/10'
+                  }`}
+                >
+                  {lockedSystems.length > 0 ? 'Unlock' : 'Lock'}
+                </button>
+              )}
+              {lockedChip && (
+                <span className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg bg-gold/15 text-gold">
+                  {lockedChip}
+                </span>
+              )}
+              {facingMode === 'environment' && controlCaps.torch && (
+                <button
+                  onClick={toggleTorch}
+                  aria-pressed={torchOn}
+                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                    torchOn ? 'bg-gold text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'
+                  }`}
+                >
+                  Torch
+                </button>
+              )}
+              {facingMode === 'user' && !isStep2Phase && (
+                <button
+                  onClick={() => setSelfieLight((v) => !v)}
+                  aria-pressed={selfieLight}
+                  title="A bright frame that lights your face from the screen"
+                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                    selfieLight ? 'bg-gold text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'
+                  }`}
+                >
+                  Selfie light
+                </button>
+              )}
+            </div>
+            {lockNote && <p className="text-[11px] text-amber-200/90 text-center">{lockNote}</p>}
+            {controlCaps.exposure?.compensationRange && (
+              <label className="flex items-center gap-2 w-full max-w-xs text-white/70">
+                <span className="text-[11px] font-bold uppercase tracking-wide">Brightness</span>
+                <input
+                  type="range"
+                  min={controlCaps.exposure.compensationRange.min}
+                  max={controlCaps.exposure.compensationRange.max}
+                  step={controlCaps.exposure.compensationRange.step ?? 0.1}
+                  value={exposureCompValue}
+                  onChange={(e) => applyExposureCompensation(Number(e.target.value))}
+                  onPointerUp={(e) => applyExposureCompensation(Number((e.target as HTMLInputElement).value), true)}
+                  onBlur={(e) => applyExposureCompensation(Number(e.target.value), true)}
+                  className="flex-1 accent-amber-400"
+                  aria-label="Exposure compensation"
+                />
+                <span className="text-[11px] font-bold tabular-nums w-9 text-right">
+                  {exposureCompValue > 0 ? `+${exposureCompValue}` : `${exposureCompValue}`}
+                </span>
+              </label>
+            )}
+          </div>
         )}
       <div className="flex items-center gap-3 flex-wrap justify-center">
         {dualMode ? (
@@ -1332,7 +2561,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         </button>
         {!isRecording ? (
           <button
-            onClick={twoPassPhase === 'step2-live' ? startStep2Recording : startRecording}
+            onClick={() =>
+              beginWithSteadyStart(twoPassPhase === 'step2-live' ? startStep2Recording : startRecording)
+            }
             disabled={!isReady}
             className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >

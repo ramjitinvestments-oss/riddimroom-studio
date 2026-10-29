@@ -21,7 +21,7 @@ import { EffectsPanel } from './EffectsPanel';
 import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
-import { appendDualCaptureToTimeline, appendMediaToTimeline } from '../../lib/timeline/insert';
+import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair } from '../../lib/timeline/insert';
 import { addPipOverlay } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
@@ -229,9 +229,23 @@ function EditorInner({ uid }: { uid: string }) {
   // as its PiP overlay in one mutate (one undo step), already lined up
   // by the measured recorder start delta.
   const handleDualAssetUploaded = useCallback(
-    (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number }) => {
+    (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number; layout: 'pip' | 'split' }) => {
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
-      mutate((p) => appendDualCaptureToTimeline(p, main, overlay, { startDeltaMs: options.startDeltaMs }));
+      mutate((p) =>
+        appendDualCaptureToTimeline(p, main, overlay, { startDeltaMs: options.startDeltaMs, layout: options.layout }),
+      );
+      if (wasEmpty) setStep(2);
+    },
+    [mutate],
+  );
+
+  // R32 Phase 4 — a finished imported pair (MediaImportPanel pair
+  // routing): two visual files placed together as Corner PiP or
+  // Split 50/50 in one mutate (one undo step).
+  const handlePairAssetUploaded = useCallback(
+    (assetA: MediaAsset, assetB: MediaAsset, options: { layout: 'pip' | 'split' }) => {
+      const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      mutate((p) => placeImportPair(p, assetA, assetB, { layout: options.layout }));
       if (wasEmpty) setStep(2);
     },
     [mutate],
@@ -377,6 +391,7 @@ function EditorInner({ uid }: { uid: string }) {
           onAssetUploaded={handleAssetUploaded}
           onOverlayAssetUploaded={handleOverlayAssetUploaded}
           onDualAssetUploaded={handleDualAssetUploaded}
+          onPairAssetUploaded={handlePairAssetUploaded}
         />
       </section>
 
@@ -437,6 +452,7 @@ function EditorInner({ uid }: { uid: string }) {
           onAssetUploaded={handleAssetUploaded}
           onOverlayAssetUploaded={handleOverlayAssetUploaded}
           onDualAssetUploaded={handleDualAssetUploaded}
+          onPairAssetUploaded={handlePairAssetUploaded}
         />
       </PanelGroup>
 

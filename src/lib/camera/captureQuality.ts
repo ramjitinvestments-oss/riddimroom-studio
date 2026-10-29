@@ -122,38 +122,114 @@ export function isLadderRetryableError(err: unknown): boolean {
 
 export type RecorderBitrateTier = 'uhd' | 'qhd' | 'hd';
 
-/** Recorder bitrates for one achieved tier (R24 WS-P1). */
-export function recorderBitratesForShortSide(shortSide: number): {
+/**
+ * Recorder bitrate table (R32 Phase 1 — fps-aware).
+ *
+ * `at30` is the EXACT R24 table, keyed by resolution short side only;
+ * at 30fps (and below, and for any unusable fps value) the returned
+ * values are byte-identical to R24, so 30fps behaviour never moves.
+ * `at60` is the same tier at 60fps: roughly 1.75–1.8× the 30fps value
+ * — 60fps carries twice the frames but inter-frame redundancy means
+ * twice the bitrate is waste; ~1.75× is the sane premium point, and
+ * the absolute values double as caps (nothing is offered above them).
+ * Between 30 and 60 the bitrate interpolates linearly; above 60 it
+ * stays at the 60fps cap.
+ */
+const RECORDER_BITRATE_TABLE: Record<RecorderBitrateTier, { at30: number; at60: number }> = {
+  uhd: { at30: 45_000_000, at60: 80_000_000 },
+  qhd: { at30: 16_000_000, at60: 28_000_000 },
+  hd: { at30: 10_000_000, at60: 18_000_000 },
+};
+
+export function recorderTierForShortSide(shortSide: number): RecorderBitrateTier {
+  if (shortSide > 1440) return 'uhd';
+  if (shortSide > 1080) return 'qhd';
+  return 'hd';
+}
+
+/** Recorder bitrates for one achieved tier at one frame rate. */
+export function recorderBitratesForShortSide(
+  shortSide: number,
+  fps: number = 30,
+): {
   tier: RecorderBitrateTier;
   videoBitsPerSecond: number;
   audioBitsPerSecond: number;
 } {
-  if (shortSide > 1440) {
-    return { tier: 'uhd', videoBitsPerSecond: 45_000_000, audioBitsPerSecond: CAPTURE_AUDIO_BITS_PER_SECOND };
-  }
-  if (shortSide > 1080) {
-    return { tier: 'qhd', videoBitsPerSecond: 16_000_000, audioBitsPerSecond: CAPTURE_AUDIO_BITS_PER_SECOND };
-  }
-  return { tier: 'hd', videoBitsPerSecond: 10_000_000, audioBitsPerSecond: CAPTURE_AUDIO_BITS_PER_SECOND };
+  const tier = recorderTierForShortSide(shortSide);
+  const { at30, at60 } = RECORDER_BITRATE_TABLE[tier];
+  const usableFps = typeof fps === 'number' && Number.isFinite(fps) && fps > 0 ? fps : 30;
+  const t = Math.min(Math.max((usableFps - 30) / 30, 0), 1);
+  const videoBitsPerSecond = Math.round(at30 + (at60 - at30) * t);
+  return { tier, videoBitsPerSecond, audioBitsPerSecond: CAPTURE_AUDIO_BITS_PER_SECOND };
 }
 
 /**
  * MediaRecorder options for the stream actually negotiated. The tier
  * comes from the video track's reported settings (`getSettings()`),
  * i.e. what the device really gave us — not what we asked for. Unknown
- * dimensions (no settings yet) fall back to the HD tier.
+ * dimensions (no settings yet) fall back to the HD tier. The frame
+ * rate likewise comes from the track's reported `frameRate` when the
+ * settings carry one; an explicit `fps` argument wins over both.
  */
 export function recorderOptionsForTrackSettings(
-  settings: { width?: number; height?: number } | null | undefined,
+  settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
   mimeType?: string,
+  fps?: number,
 ): MediaRecorderOptions {
   const width = settings?.width ?? 0;
   const height = settings?.height ?? 0;
   const shortSide = width > 0 && height > 0 ? Math.min(width, height) : 0;
-  const { videoBitsPerSecond, audioBitsPerSecond } = recorderBitratesForShortSide(shortSide);
+  const effectiveFps = fps ?? (typeof settings?.frameRate === 'number' ? settings.frameRate : undefined);
+  const { videoBitsPerSecond, audioBitsPerSecond } = recorderBitratesForShortSide(shortSide, effectiveFps);
   const options: MediaRecorderOptions = { videoBitsPerSecond, audioBitsPerSecond };
   if (mimeType) options.mimeType = mimeType;
   return options;
+}
+
+/* ------------------------------------------------------------------ */
+/* Codec ladder (R32 Phase 1)                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The MediaRecorder mimeType preference ladder, in try-order.
+ *
+ * MP4/H.264 comes FIRST: on Android (the owner's device class) H.264
+ * is encoded in hardware, which means smoother capture and fewer
+ * dropped frames at the same resolution than a software VP9 encode
+ * competing with the camera pipeline for CPU. VP9 WebM follows (best
+ * WebM quality where the device can sustain it), then VP8 WebM (the
+ * widely-supported software fallback), then bare WebM, then `''` —
+ * the browser's own default, used when nothing above is supported.
+ */
+export const RECORDER_MIME_LADDER: readonly string[] = [
+  'video/mp4;codecs=avc1.640028,mp4a.40.2',
+  'video/mp4',
+  'video/webm;codecs=vp9,opus',
+  'video/webm;codecs=vp8,opus',
+  'video/webm',
+  '',
+];
+
+/**
+ * Pick the best recorder mimeType the platform supports, walking
+ * `RECORDER_MIME_LADDER` in order. `isTypeSupported` is injected so
+ * the ladder is unit-testable with a fake predicate. A predicate that
+ * throws on a candidate counts as "not supported" for that candidate.
+ * Returns `''` (browser default) when no explicit type is supported.
+ */
+export function pickRecorderMimeType(isTypeSupported: (mimeType: string) => boolean): string {
+  for (const candidate of RECORDER_MIME_LADDER) {
+    if (candidate === '') return '';
+    let supported = false;
+    try {
+      supported = isTypeSupported(candidate);
+    } catch {
+      supported = false;
+    }
+    if (supported) return candidate;
+  }
+  return '';
 }
 
 /**
