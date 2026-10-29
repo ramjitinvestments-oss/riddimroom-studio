@@ -47,6 +47,7 @@ import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
 import { resolveExportSettings } from '../lib/export/quality';
 import { buildSocialPosts, buildSoundGuide, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
+import { evaluateProjectExportGate } from '../lib/projectDurationGate';
 import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { loadArtworkFixes, saveArtworkFixes } from '../lib/promo/fixes';
 import type { SnapCorrection } from '../lib/promo/snap';
@@ -1538,8 +1539,21 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       const renderer = createExportRenderer(engine);
       await ensureFontsLoaded([fontFamily]);
       let quotaHit = false;
+      let capHit = false;
       for (const { entry, project } of built) {
         if (controller.signal.aborted) break;
+        // R35: the tier duration gate runs before the quota check and
+        // before any rendering — a refused piece is marked on its
+        // result card with the gate's plain message, consumes no
+        // daily quota, and never reaches the renderer.
+        const gate = evaluateProjectExportGate(project, tier);
+        if (gate.exceedsCap) {
+          capHit = true;
+          entry.status = 'failed';
+          entry.error = gate.message ?? undefined;
+          setCampaignResults([...results]);
+          continue;
+        }
         if (!canExportToday(uid, tier)) {
           quotaHit = true;
           break;
@@ -1581,6 +1595,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
             ? 'The render queue stopped early — pieces above are saved as projects; open any of them to export.'
             : "Today's free export limit stopped the render queue — nothing is lost: every piece is saved above as its own project, ready to open and export. Lifetime removes the daily limit.",
         );
+      } else if (capHit) {
+        setCampaignNote('Some pieces were not rendered because they are longer than your plan allows — every piece is saved above as its own project, ready to open and trim.');
       } else if (results.length > 0 && results.every((r) => r.status === 'done')) {
         setCampaignNote('Campaign complete — every piece rendered, each with its post written under it.');
       }

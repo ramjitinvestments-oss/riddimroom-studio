@@ -135,7 +135,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
           <span className="px-3 py-1.5 rounded-full bg-white/10 border border-white/10 text-xs font-bold">
             Plan: {tier === 'lifetime' ? 'Lifetime' : 'Free'}
           </span>
-          <span className="text-xs text-white/40">Free (Basic): short projects · 3 exports a day · 2 transcription sessions a day · watermark on · Lifetime: Unlimited exports · no watermark · longer projects · 10 transcriptions a day</span>
+          <span className="text-xs text-white/40">Free (Basic): projects up to 30 seconds · 3 exports a day · 2 transcription sessions a day · watermark on · Lifetime: projects up to 10 minutes · Unlimited exports · no watermark · 10 transcriptions a day</span>
         </div>
         <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6 text-xs text-white/60 space-y-1">
           <p className="font-bold text-white text-sm">How it works</p>

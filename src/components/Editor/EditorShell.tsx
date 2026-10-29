@@ -24,6 +24,8 @@ import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair } from '../../lib/timeline/insert';
 import { addPipOverlay } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
+import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
+import { useLicenseTier } from '../../hooks/useLicenseTier';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 
 /**
@@ -83,6 +85,11 @@ function EditorInner({ uid }: { uid: string }) {
     projectLimitWarning,
     dismissProjectLimitWarning,
   } = useProject();
+  // R35: proactive tier-cap line for Free users (the export gate's
+  // indicator) — visible on every step, before the Export step's own
+  // copy, so an over-cap project is never a surprise at export time.
+  const { tier } = useLicenseTier();
+  const durationGate = project ? evaluateProjectExportGate(project, tier) : null;
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -572,6 +579,12 @@ function EditorInner({ uid }: { uid: string }) {
             <X size={14} strokeWidth={3} />
           </button>
         </div>
+      )}
+
+      {tier === 'free' && durationGate && (
+        <p className={`px-3 sm:px-4 py-1.5 text-[11px] border-b border-white/10 shrink-0 ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/40'}`}>
+          {durationGate.indicator}
+        </p>
       )}
 
       {/* v1 3-step stepper — one clear action per screen */}

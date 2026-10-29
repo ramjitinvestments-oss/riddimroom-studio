@@ -170,9 +170,8 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
           </button>
         </div>
         <p className="text-xs text-white/40 mb-6">
-          Allow access switches a signup on with the free plan (short projects, a few exports a
-          day, watermark on). Premium lifts the limits — unlimited exports, no watermark, longer
-          projects. Switching access off returns them to the pending screen — their projects are
+          Allow access switches a signup on with the free plan (projects up to 30 seconds, 3 exports a
+          day, watermark on). Premium lifts the limits — projects up to 10 minutes, unlimited exports, no watermark. Switching access off returns them to the pending screen — their projects are
           kept. The export is the marketing list for the Riddim List.
         </p>
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getPlanLimits, canExportToday, exportsRemainingToday, recordExport, getExportsToday, exportCounterKey, resolveEffectiveTier } from './licensing';
+import { getPlanLimits, maxProjectSecondsFor, canExportToday, exportsRemainingToday, recordExport, getExportsToday, exportCounterKey, resolveEffectiveTier } from './licensing';
 
 describe('licensing plan limits', () => {
   it('free is limited, lifetime is generous', () => {
@@ -9,6 +9,13 @@ describe('licensing plan limits', () => {
     expect(getPlanLimits('lifetime').maxProjectSeconds).toBe(600);
     expect(getPlanLimits('lifetime').dailyTranscriptions).toBe(10);
     expect(getPlanLimits('lifetime').watermark).toBe(false);
+  });
+
+  it('maxProjectSecondsFor is the one derivation the export gate consumes (R35)', () => {
+    expect(maxProjectSecondsFor('free')).toBe(30);
+    expect(maxProjectSecondsFor('lifetime')).toBe(600);
+    expect(maxProjectSecondsFor('free')).toBe(getPlanLimits('free').maxProjectSeconds);
+    expect(maxProjectSecondsFor('lifetime')).toBe(getPlanLimits('lifetime').maxProjectSeconds);
   });
 });
 

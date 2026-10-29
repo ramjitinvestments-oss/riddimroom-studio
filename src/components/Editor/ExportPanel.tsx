@@ -16,6 +16,7 @@ import {
   type ExportResolutionId,
 } from '../../lib/export/quality';
 import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
+import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { buildProducerReport, type LoudnessReading } from '../../lib/export/producerReport';
 import { ensureFontsLoaded, fontsUsedInProject } from '../../lib/fonts';
@@ -114,6 +115,10 @@ export function ExportPanel() {
   const { tier } = useLicenseTier();
   const remaining = user ? exportsRemainingToday(user.uid, tier) : 0;
   const canExport = user ? canExportToday(user.uid, tier) : false;
+  // R35: the tier duration gate (Free 30s / Lifetime 600s, main-track
+  // measure) — evaluated on every render for the proactive line below
+  // and again inside handleExport before any encoding work starts.
+  const durationGate = project ? evaluateProjectExportGate(project, tier) : null;
 
   // Export quality picker (Phase 2.1). Defaults reproduce the pre-picker
   // behavior exactly: native project resolution, the project's own frame
@@ -125,15 +130,24 @@ export function ExportPanel() {
   const [qualityTier, setQualityTier] = useState<ExportQualityTier>('high');
 
   const handleExport = useCallback(async () => {
-    // Premium faces must be resident before the first frame draws,
-    // or text silently falls back to Arial in the exported file.
-    if (project) await ensureFontsLoaded(fontsUsedInProject(project));
     if (!project || busy) return; // guards against duplicate/overlapping exports
+    // R35: the duration gate runs FIRST — before fonts, quota checks
+    // and any encoding work. A refused export is not an export: it
+    // never reaches recordExport, so it consumes no daily quota.
+    const gate = evaluateProjectExportGate(project, tier);
+    if (gate.exceedsCap) {
+      setError(gate.message);
+      setStatus('error');
+      return;
+    }
     if (user && !canExportToday(user.uid, tier)) {
       setError(`Daily export limit reached (${tier === 'lifetime' ? 'lifetime' : 'free'} plan). Upgrade to Lifetime for more exports.`);
       setStatus('error');
       return;
     }
+    // Premium faces must be resident before the first frame draws,
+    // or text silently falls back to Arial in the exported file.
+    await ensureFontsLoaded(fontsUsedInProject(project));
     setStatus('rendering');
     setError(null);
     setSavedFileName(null);
@@ -320,6 +334,11 @@ export function ExportPanel() {
           : 'Sign in to export.'}
         {project.watermarkEnabled !== false ? ' · Watermark on (free).' : ' · No watermark.'}
       </p>
+      {durationGate && (tier === 'free' || durationGate.exceedsCap) && (
+        <p className={`text-[11px] ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/40'}`}>
+          {durationGate.indicator}
+        </p>
+      )}
 
       {/* v9: the three export pickers as dropdowns — one row each. */}
       <label className="flex flex-col gap-1">
@@ -380,7 +399,7 @@ export function ExportPanel() {
       {!busy && (
         <button
           onClick={handleExport}
-          disabled={busy || !canExport}
+          disabled={busy || !canExport || !!durationGate?.exceedsCap}
           className="w-full min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black disabled:opacity-50"
         >
           Export video (MP4)
