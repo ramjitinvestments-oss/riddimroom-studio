@@ -34,7 +34,21 @@ function RouteLoading() {
  */
 function AppShell() {
   const { currentPath, navigateTo } = useRouter();
-  const { currentUser, userProfile, isAuthLoading, isAccountDisabled } = useAuth();
+  const { currentUser, userProfile, isAuthLoading, isAccountDisabled, signOut } = useAuth();
+
+  // UX-02: leaving the restricted screen below. AuthContext's signOut does
+  // not clear isAccountDisabled, and the gate itself already signed the
+  // user out when it set that flag — so after signing out, load the login
+  // page fresh; that is what actually returns the user to a working screen.
+  const handleRestrictedSignOut = async () => {
+    try {
+      await signOut();
+    } catch {
+      // Best effort only — the fresh load below still returns to sign-in.
+    } finally {
+      window.location.assign('/login');
+    }
+  };
 
   // Redirect unauthenticated users to /login; redirect authenticated users
   // away from /login — same behavior as riddimroom-caption's two
@@ -51,13 +65,35 @@ function AppShell() {
     }
   }, [isAuthLoading, currentUser, currentPath, navigateTo]);
 
+  // UX-02: when the profile is available and says the account is only
+  // pending, the user belongs on the pending screen — never on the
+  // restricted screen below, whose wording is for other states.
+  if (currentUser && userProfile && userProfile.status === 'pending' && !userProfile.isAdmin) {
+    return <PendingScreen />;
+  }
+
   if (isAccountDisabled) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 px-6 text-center bg-[#070707] text-white">
         <h1 className="text-lg font-black uppercase">Account access restricted</h1>
         <p className="text-sm text-white/50 max-w-sm">
-          Your account is currently pending, suspended, or denied. Contact an administrator for access.
+          This account can&rsquo;t use RiddimRoom Studio right now. Try again to re-check your
+          access, or sign out and sign in with a different account.
         </p>
+        <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-3 min-h-11 inline-flex items-center justify-center bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide rounded-lg"
+          >
+            Try again
+          </button>
+          <button
+            onClick={handleRestrictedSignOut}
+            className="px-4 py-3 min-h-11 inline-flex items-center justify-center bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold uppercase tracking-wide rounded-lg"
+          >
+            Sign out
+          </button>
+        </div>
       </div>
     );
   }

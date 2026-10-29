@@ -109,7 +109,7 @@ export function BackgroundRemovalButton({
             isRemovedSelected ? 'bg-purple-500/40 text-purple-100' : 'text-white/40 hover:text-white/70'
           }`}
         >
-          {status === 'working' ? `${Math.round(progress * 100)}%` : 'Background Removed'}
+          {status === 'working' ? `Removing background… ${Math.round(progress * 100)}%` : 'Background Removed'}
         </button>
       </span>
       {error && (

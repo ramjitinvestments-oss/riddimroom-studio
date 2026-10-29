@@ -379,13 +379,15 @@ function provenMimeFor(facing: CaptureFacingMode): string | undefined {
 }
 
 /**
- * The two receipt lines on a review screen: what was actually
- * recorded (size, frame rate, honest quality word) over the smaller
- * details line (codec, measured bitrate, dropped frames when
- * measured). The strings themselves come from the lib formatter.
+ * The receipt on a review screen: the plain summary (what was
+ * actually recorded — size, frame rate, honest quality word) over
+ * the plain details line (duration + file size). The technical
+ * line sits behind a "Details" expander, collapsed by default.
+ * The strings themselves come from the lib formatter.
  */
 function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: string }) {
-  const { summary, details } = formatCaptureReceipt(receipt);
+  const { summary, details, technicalDetails } = formatCaptureReceipt(receipt);
+  const [showDetails, setShowDetails] = useState(false);
   // R32 Phase 3 — dropped-frame review warning: advisory only, and
   // only when the tracker actually measured drops past the threshold.
   const dropWarning = captureReceiptDropWarning(receipt);
@@ -395,8 +397,21 @@ function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: str
         <p className="text-[10px] font-bold uppercase tracking-wide text-white/40">{label}</p>
       )}
       <p className="text-xs text-white/80">{summary}</p>
-      <p className="text-[11px] text-white/50">{details}</p>
+      {details && <p className="text-[11px] text-white/50">{details}</p>}
       {dropWarning && <p className="text-[11px] text-amber-300">{dropWarning}</p>}
+      {technicalDetails && (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowDetails((v) => !v)}
+            aria-expanded={showDetails}
+            className="text-[11px] font-bold text-white/50 hover:text-gold"
+          >
+            Details
+          </button>
+          {showDetails && <p className="text-[11px] text-white/50">{technicalDetails}</p>}
+        </>
+      )}
     </div>
   );
 }
@@ -462,9 +477,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
   const dualStoppedRef = useRef(0);
   const [dualMode, setDualMode] = useState(false);
   const [dualNotice, setDualNotice] = useState<string | null>(null);
-  // R30 — the failed probe's plain-words diagnosis, shown as the
-  // banner's small "Details:" line (and logged to the console).
+  // R30 — the failed probe's diagnosis, kept as data (and logged to
+  // the console). R34 — the banner now hides it behind a "Why?"
+  // expander, collapsed by default.
   const [dualDetails, setDualDetails] = useState<string | null>(null);
+  const [dualWhyOpen, setDualWhyOpen] = useState(false);
   // R30 — true while the dual probe is running (both cameras can take
   // a few seconds to open + settle): the button disables and relabels.
   const [dualBusy, setDualBusy] = useState(false);
@@ -846,6 +863,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
       if (!onCaptureDual || countdownActive) return;
       setDualNotice(null);
       setDualDetails(null);
+      setDualWhyOpen(false);
       dropStep1Url();
       twoPassLockRef.current = null;
       step1ReceiptRef.current = null;
@@ -876,6 +894,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
     if (!onCaptureDual || countdownActive) return;
     setDualNotice(null);
     setDualDetails(null);
+    setDualWhyOpen(false);
     setDualMicMissing(false);
     setDualBusy(true);
     stopStream();
@@ -899,6 +918,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
         console.warn(`[RiddimRoom Studio] Dual camera unavailable — ${result.details}`);
         setDualNotice(DUAL_UNAVAILABLE_MESSAGE);
         setDualDetails(result.details);
+        setDualWhyOpen(false);
         void startStream();
         return;
       }
@@ -2284,29 +2304,42 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
           </div>
         )}
         {dualNotice && (
-          <div className="flex items-center gap-2 max-w-md w-full rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-200">
-            <span className="flex-1">
-              {dualNotice}
-              {dualDetails && <span className="block mt-0.5 text-amber-200/70">Details: {dualDetails}</span>}
-            </span>
+          <div className="flex flex-col gap-2 max-w-md w-full rounded-lg bg-amber-500/15 border border-amber-500/30 px-3 py-2.5 text-amber-200">
+            <div className="flex items-start gap-2">
+              <p className="flex-1 text-xs font-bold text-amber-100">{dualNotice}</p>
+              <button
+                onClick={() => {
+                  setDualNotice(null);
+                  setDualDetails(null);
+                  setDualWhyOpen(false);
+                }}
+                aria-label="Dismiss"
+                className="shrink-0 min-h-8 min-w-8 flex items-center justify-center text-amber-200/70 hover:text-amber-100"
+              >
+                ×
+              </button>
+            </div>
             {onCaptureDual && twoPassPhase === 'off' && (
               <button
                 onClick={() => enterTwoPass(true)}
-                className="shrink-0 min-h-8 px-2.5 flex items-center justify-center rounded-md bg-amber-400/20 hover:bg-amber-400/30 text-amber-100 text-[11px] font-bold"
+                className="w-full min-h-11 px-3 flex items-center justify-center rounded-md bg-amber-400 hover:bg-amber-300 text-black text-xs font-bold uppercase tracking-wide"
               >
                 Record in two steps instead
               </button>
             )}
-            <button
-              onClick={() => {
-                setDualNotice(null);
-                setDualDetails(null);
-              }}
-              aria-label="Dismiss"
-              className="shrink-0 min-h-8 min-w-8 flex items-center justify-center text-amber-200/70 hover:text-amber-100"
-            >
-              ×
-            </button>
+            {dualDetails && (
+              <div className="flex flex-col items-start gap-1">
+                <button
+                  type="button"
+                  onClick={() => setDualWhyOpen((v) => !v)}
+                  aria-expanded={dualWhyOpen}
+                  className="text-[11px] font-bold text-amber-200/80 hover:text-amber-100"
+                >
+                  Why?
+                </button>
+                {dualWhyOpen && <p className="text-[11px] text-amber-200/70">{dualDetails}</p>}
+              </div>
+            )}
           </div>
         )}
         {/* R24 WS-P1: quality + frame-rate chips. Changing a chip
@@ -2460,7 +2493,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
                       : 'bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
-                  {lockedSystems.length > 0 ? 'Unlock' : 'Lock'}
+                  {lockedSystems.length > 0 ? 'Unlock' : 'Lock focus & light'}
                 </button>
               )}
               {lockedChip && (
@@ -2476,7 +2509,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
                     torchOn ? 'bg-gold text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
-                  Torch
+                  Flashlight
                 </button>
               )}
               {facingMode === 'user' && !isStep2Phase && (
@@ -2492,7 +2525,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
                 </button>
               )}
             </div>
-            {lockNote && <p className="text-[11px] text-amber-200/90 text-center">{lockNote}</p>}
+            {lockNote && (
+              <p className="text-[11px] text-amber-200/90 text-center">
+                {lockNote} — it will keep adjusting as light changes
+              </p>
+            )}
             {controlCaps.exposure?.compensationRange && (
               <label className="flex items-center gap-2 w-full max-w-xs text-white/70">
                 <span className="text-[11px] font-bold uppercase tracking-wide">Brightness</span>
@@ -2539,7 +2576,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, on
             disabled={dualBusy}
             className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
           >
-            {dualBusy ? 'Checking cameras…' : 'Record both cameras'}
+            {dualBusy ? 'Checking cameras… this can take a few seconds' : 'Record both cameras'}
           </button>
         )}
         {/* R31 — two-pass entry: NO camera-count gate (the flow needs

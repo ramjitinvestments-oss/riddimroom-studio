@@ -18,18 +18,24 @@ export function PendingScreen() {
   const email = userProfile?.email || currentUser?.email || '';
   const [optIn, setOptIn] = useState<boolean>(userProfile?.marketingOptIn === true);
   const [optInSaved, setOptInSaved] = useState(false);
+  const [optInFailed, setOptInFailed] = useState(false);
   const [checking, setChecking] = useState(false);
 
   const handleOptInChange = async (checked: boolean) => {
     setOptIn(checked);
     setOptInSaved(false);
+    setOptInFailed(false);
     if (!currentUser) return;
     try {
       await updateDoc(doc(db, 'users', currentUser.uid), { marketingOptIn: checked });
       setOptInSaved(true);
     } catch (err) {
-      // The preference is a nice-to-have, never a blocker on this screen.
+      // The preference is a nice-to-have, never a blocker on this screen —
+      // but a failed save is shown, not silent: put the box back as it was
+      // and tell the user the choice was not stored.
       console.warn('[PendingScreen] marketing opt-in save failed:', err);
+      setOptIn(!checked);
+      setOptInFailed(true);
     }
   };
 
@@ -63,12 +69,14 @@ export function PendingScreen() {
             You&rsquo;re signed up — access isn&rsquo;t switched on yet
           </h1>
           <p className="mt-3 text-sm text-white/60 leading-relaxed">
-            RiddimRoom Studio access is switched on by the owner for each account. You&rsquo;re on
-            the list — once the owner switches your account on, this screen lifts automatically
-            and is replaced by your studio, with captions, exports and no watermark. There&rsquo;s
-            nothing else you need to do: you don&rsquo;t need to sign up again, and there&rsquo;s
-            no need to contact anyone — unless it&rsquo;s been a while and you&rsquo;re still
-            waiting here.
+            RiddimRoom Studio access is switched on by the owner for each account, when the owner
+            reviews new signups. There&rsquo;s no fixed wait — once the owner switches your account
+            on, this screen lifts and is replaced by your studio. Tap Check again below to re-check
+            sooner. You don&rsquo;t need to sign up again.
+          </p>
+          <p className="mt-3 text-sm text-white/60 leading-relaxed">
+            In your studio you can add captions and export your videos. The basic plan keeps a
+            small &lsquo;Made with RiddimRoom Studio&rsquo; note on exports; Lifetime removes it.
           </p>
           {email && (
             <p className="mt-4 text-sm">
@@ -87,6 +95,11 @@ export function PendingScreen() {
             <span className="text-sm text-white/80 leading-snug">
               Email me RiddimRoom news, drops and offers
               {optInSaved && <span className="block text-xs text-emerald-400 mt-1">Saved — thank you.</span>}
+              {optInFailed && (
+                <span className="block text-xs text-red-300 mt-1">
+                  Couldn&rsquo;t save that just now — your choice hasn&rsquo;t been stored. Please try again.
+                </span>
+              )}
             </span>
           </label>
 
@@ -97,9 +110,6 @@ export function PendingScreen() {
           >
             {checking ? 'Checking…' : 'Check again'}
           </button>
-          <p className="mt-3 text-xs text-white/40">
-            Already switched on? Tap Check again — access takes effect on your next load.
-          </p>
         </div>
       </main>
     </div>

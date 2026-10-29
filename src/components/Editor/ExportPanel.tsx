@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from 'react';
 import { useProject } from '../../context/ProjectContext';
 import { useAuth } from '../../context/AuthContext';
 import { validateRenderResult } from '../../lib/export/validate';
+import { humanizeExportError } from '../../lib/export/exportErrors';
 import type { RenderProgress } from '../../lib/export/renderer';
 import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
 import { createExportRenderer, getConfiguredExportEngine } from '../../lib/export/mediabunnyExporter';
@@ -89,6 +90,10 @@ export function ExportPanel() {
   // phone's share sheet (WhatsApp / TikTok / gallery) without a re-export.
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
   const [captionCopied, setCaptionCopied] = useState(false);
+  // R34 (UX-16): post-tap confirmation for "Save MP4 to this device" —
+  // names the file and where it went, and stays on screen until the next
+  // export action (mirrors CaptionsExportPanel's "Downloaded {name}…").
+  const [savedFileName, setSavedFileName] = useState<string | null>(null);
   const [loudness, setLoudness] = useState<LoudnessReading | null>(null);
   const [postPlatform, setPostPlatform] = useState<SocialPlatform>('tiktok');
   const [postCopied, setPostCopied] = useState(false);
@@ -131,6 +136,7 @@ export function ExportPanel() {
     }
     setStatus('rendering');
     setError(null);
+    setSavedFileName(null);
     setProgress(null);
     setConvertRatio(0);
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
@@ -162,7 +168,7 @@ export function ExportPanel() {
       });
       const validation = validateRenderResult(result.blob, result.durationSeconds);
       if (!validation.valid) {
-        setError(validation.error || 'Export failed validation.');
+        setError(humanizeExportError(validation.error));
         setStatus('error');
         return;
       }
@@ -180,7 +186,7 @@ export function ExportPanel() {
             audioBitrateKbps: output.audioBitsPerSecond / 1000,
           });
         } catch (convertErr: any) {
-          setError(convertErr?.message || 'Could not convert the export to MP4.');
+          setError(humanizeExportError(convertErr));
           setStatus('error');
           return;
         }
@@ -196,7 +202,7 @@ export function ExportPanel() {
       if (err?.name === 'RenderAbortedError') {
         setStatus('idle');
       } else {
-        setError(err?.message || 'Export failed.');
+        setError(humanizeExportError(err));
         setStatus('error');
       }
     } finally {
@@ -307,7 +313,11 @@ export function ExportPanel() {
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Export</h3>
       <p className="text-[11px] text-white/40">
-        {user ? `${remaining} export${remaining === 1 ? '' : 's'} left today (${tier === 'lifetime' ? 'Lifetime' : 'Free'})` : 'Sign in to export.'}
+        {user
+          ? Number.isFinite(remaining)
+            ? `${remaining} export${remaining === 1 ? '' : 's'} left today (${tier === 'lifetime' ? 'Lifetime' : 'Free'})`
+            : 'Unlimited exports (Lifetime)'
+          : 'Sign in to export.'}
         {project.watermarkEnabled !== false ? ' · Watermark on (free).' : ' · No watermark.'}
       </p>
 
@@ -412,10 +422,14 @@ export function ExportPanel() {
           <a
             href={downloadUrl}
             download={exportFileName}
+            onClick={() => setSavedFileName(exportFileName)}
             className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white flex items-center justify-center"
           >
             Save MP4 to this device
           </a>
+          {savedFileName && (
+            <p className="text-xs font-bold text-emerald-400">Saved ✓ — {savedFileName} is in your Downloads.</p>
+          )}
           <button
             onClick={() => void handleCopyCaption()}
             className="min-h-11 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-white text-xs font-bold"

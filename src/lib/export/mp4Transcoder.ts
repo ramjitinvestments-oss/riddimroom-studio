@@ -44,6 +44,7 @@ import {
   TRANSCODE_PROGRESS_STALL_MS,
   TRANSCODE_PROGRESS_WATCHDOG_INTERVAL_MS,
 } from './transcoderAssets';
+import { EXPORT_FINISHING_ERROR } from './exportErrors';
 
 export interface TranscodeProgress {
   /** 0-1. ffmpeg.wasm's own progress events are occasionally slightly out of [0,1]; this is clamped. */
@@ -161,10 +162,9 @@ async function getFFmpeg(): Promise<import('@ffmpeg/ffmpeg').FFmpeg> {
     }
     loadPromise = null;
     if (lastError instanceof TranscoderLoadTimeoutError) throw lastError;
-    throw new Mp4TranscodeError(
-      `Could not load the MP4 conversion engine: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
-      lastError,
-    );
+    // R34: the raw engine-load cause is already console.error'd per
+    // attempt above — the user gets the plain finishing string.
+    throw new Mp4TranscodeError(EXPORT_FINISHING_ERROR, lastError);
   })();
 
   return loadPromise;
@@ -202,7 +202,7 @@ export async function transcodeWebmToMp4(
   quality?: TranscodeQualityOptions,
 ): Promise<Blob> {
   if (webmBlob.size === 0) {
-    throw new Mp4TranscodeError('Cannot convert an empty recording to MP4.');
+    throw new Mp4TranscodeError(EXPORT_FINISHING_ERROR);
   }
   const fps = Number.isFinite(sourceFrameRate) && sourceFrameRate > 0 ? Math.round(sourceFrameRate) : 30;
   const crf = quality?.crf ?? 20;
@@ -291,20 +291,27 @@ export async function transcodeWebmToMp4(
       if (watchdogTimer !== null) clearInterval(watchdogTimer);
     }
     if (exitCode !== 0) {
-      throw new Mp4TranscodeError(`MP4 conversion failed (ffmpeg exited with code ${exitCode}).`);
+      // R34: the exit code is diagnosis detail for the console only —
+      // the user-facing message is the plain finishing string.
+      // eslint-disable-next-line no-console
+      console.error(`[mp4Transcoder] ffmpeg exited with code ${exitCode}.`);
+      throw new Mp4TranscodeError(EXPORT_FINISHING_ERROR);
     }
 
     const data = await ffmpeg.readFile(outputName);
     const bytes = data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
     if (bytes.byteLength === 0) {
-      throw new Mp4TranscodeError('MP4 conversion produced an empty file.');
+      // eslint-disable-next-line no-console
+      console.error('[mp4Transcoder] conversion produced an empty file.');
+      throw new Mp4TranscodeError(EXPORT_FINISHING_ERROR);
     }
     return new Blob([bytes], { type: 'video/mp4' });
   } catch (err) {
     if (err instanceof Mp4TranscodeError) throw err;
     // eslint-disable-next-line no-console
     console.error('[mp4Transcoder] conversion failed:', err);
-    throw new Mp4TranscodeError(err instanceof Error ? err.message : 'MP4 conversion failed.', err);
+    // R34: never wrap a raw library message into the user-facing error.
+    throw new Mp4TranscodeError(EXPORT_FINISHING_ERROR, err);
   } finally {
     ffmpeg.off('progress', progressHandler);
     // Best-effort cleanup of the WASM virtual filesystem so repeated

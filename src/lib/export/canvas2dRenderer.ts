@@ -27,6 +27,7 @@ import { getItemsAtTime, getMainTrackEnd, getProjectDuration } from '../timeline
 import { computeAudioGainAtTime, computeLoopedSourceTime, drawFrame } from './../render/compositor';
 import type { Renderer, RenderOptions, RenderResult } from './renderer';
 import { RenderAbortedError } from './renderer';
+import { EXPORT_FINISHING_ERROR } from './exportErrors';
 
 interface MediaElementHandle {
   element: HTMLVideoElement | HTMLAudioElement;
@@ -217,11 +218,13 @@ export class Canvas2DRenderer implements Renderer {
       canvasStream = (canvas as HTMLCanvasElement & { captureStream: (fps?: number) => MediaStream }).captureStream(
         options.output?.frameRate ?? project.frameRate,
       );
-    } catch {
+    } catch (captureErr) {
       cleanup();
-      throw new Error(
-        'Export could not capture the preview canvas — a clip loaded without CORS access. Storage CORS must allow this app for exports; check the connection and try again.',
-      );
+      // R34: the CORS cause is diagnosis detail for the console only —
+      // the user-facing message is the plain finishing string.
+      // eslint-disable-next-line no-console
+      console.error('[canvas2dRenderer] canvas capture failed (likely a clip loaded without CORS access):', captureErr);
+      throw new Error(EXPORT_FINISHING_ERROR);
     }
     const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...destination.stream.getAudioTracks()]);
 

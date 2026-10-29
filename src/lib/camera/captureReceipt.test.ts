@@ -5,6 +5,10 @@ import {
   codecNameForMimeType,
   formatBitrateBps,
   formatCaptureReceipt,
+  formatDurationSeconds,
+  formatFileSizeBytes,
+  formatPlainDetails,
+  formatTechnicalDetails,
   qualityWordForShortSide,
 } from './captureReceipt';
 
@@ -22,6 +26,8 @@ describe('buildCaptureReceipt', () => {
     expect(receipt.mimeType).toBe('video/mp4;codecs=avc1.640028,mp4a.40.2');
     // 12.25 MB over 10s = 9.8 Mbps measured — not the requested tier.
     expect(receipt.videoBitrateBps).toBe(9_800_000);
+    expect(receipt.blobSizeBytes).toBe(12_250_000);
+    expect(receipt.durationSeconds).toBe(10);
     expect(receipt.droppedFramesEstimate).toBeUndefined();
   });
 
@@ -59,6 +65,24 @@ describe('buildCaptureReceipt', () => {
     expect(receipt.actualHeight).toBe(0);
     expect(receipt.actualFps).toBe(0);
     expect(receipt.videoBitrateBps).toBe(0);
+    expect(receipt.blobSizeBytes).toBe(5000);
+    expect(receipt.durationSeconds).toBe(0);
+  });
+});
+
+describe('formatFileSizeBytes / formatDurationSeconds (plain surface)', () => {
+  it('formats file size in plain MB units', () => {
+    expect(formatFileSizeBytes(8_400_000)).toBe('8.4 MB');
+    expect(formatFileSizeBytes(12_250_000)).toBe('12.3 MB');
+    expect(formatFileSizeBytes(850_000)).toBe('850 KB');
+    expect(formatFileSizeBytes(0)).toBe('');
+  });
+
+  it('formats duration in plain seconds / minutes', () => {
+    expect(formatDurationSeconds(12)).toBe('12 seconds');
+    expect(formatDurationSeconds(1)).toBe('1 second');
+    expect(formatDurationSeconds(65)).toBe('1 minute 5 seconds');
+    expect(formatDurationSeconds(0)).toBe('');
   });
 });
 
@@ -97,7 +121,7 @@ describe('formatBitrateBps', () => {
   });
 });
 
-describe('formatCaptureReceipt', () => {
+describe('formatCaptureReceipt — plain default surface (R34 UX-34)', () => {
   it('formats the headline receipt: size by short side, fps, honest quality word', () => {
     const formatted = formatCaptureReceipt(
       buildCaptureReceipt({
@@ -108,7 +132,8 @@ describe('formatCaptureReceipt', () => {
       }),
     );
     expect(formatted.summary).toBe('Recorded: 1080p · 30fps · high quality');
-    expect(formatted.details).toBe('H.264 · 9.8 Mbps');
+    expect(formatted.details).toBe('10 seconds · 12.3 MB');
+    expect(formatted.technicalDetails).toBe('H.264 · 9.8 Mbps');
   });
 
   it('portrait and landscape of the same class read the same', () => {
@@ -121,7 +146,8 @@ describe('formatCaptureReceipt', () => {
       }),
     );
     expect(formatted.summary).toBe('Recorded: 2160p · 60fps · ultra quality');
-    expect(formatted.details).toBe('VP9 · 80.0 Mbps');
+    expect(formatted.details).toBe('10 seconds · 100.0 MB');
+    expect(formatted.technicalDetails).toBe('VP9 · 80.0 Mbps');
   });
 
   it('a 720p capture honestly reads standard quality', () => {
@@ -134,11 +160,55 @@ describe('formatCaptureReceipt', () => {
       }),
     );
     expect(formatted.summary).toBe('Recorded: 720p · 30fps · standard quality');
-    expect(formatted.details).toBe('VP8 · 4.8 Mbps');
+    expect(formatted.details).toBe('5 seconds · 3.0 MB');
+    expect(formatted.technicalDetails).toBe('VP8 · 4.8 Mbps');
   });
 
+  it('the plain surface (summary + details) is free of codec / bitrate tokens', () => {
+    const banned = ['H.264', 'Mbps', 'Kbps', 'VP9', 'VP8', 'AV1', 'bps'];
+    const samples = [
+      buildCaptureReceipt({
+        trackSettings: { width: 1080, height: 1920, frameRate: 30 },
+        mimeType: 'video/mp4;codecs=avc1.640028,mp4a.40.2',
+        blobSize: 12_250_000,
+        durationSeconds: 10,
+        droppedFramesEstimate: 14,
+      }),
+      buildCaptureReceipt({
+        trackSettings: { width: 3840, height: 2160, frameRate: 60 },
+        mimeType: 'video/webm;codecs=vp9,opus',
+        blobSize: 100_000_000,
+        durationSeconds: 10,
+      }),
+      buildCaptureReceipt({
+        trackSettings: { width: 720, height: 1280, frameRate: 30 },
+        mimeType: 'video/webm;codecs=vp8,opus',
+        blobSize: 3_000_000,
+        durationSeconds: 5,
+      }),
+    ];
+    for (const receipt of samples) {
+      const formatted = formatCaptureReceipt(receipt);
+      const plainSurface = `${formatted.summary} ${formatted.details} ${formatPlainDetails(receipt)}`;
+      for (const token of banned) {
+        expect(plainSurface, `plain surface must not contain "${token}"`).not.toContain(token);
+      }
+    }
+  });
+
+  it('omits unknown facts instead of guessing them', () => {
+    const formatted = formatCaptureReceipt(
+      buildCaptureReceipt({ trackSettings: null, mimeType: '', blobSize: 0, durationSeconds: 0 }),
+    );
+    expect(formatted.summary).toBe('Recorded');
+    expect(formatted.details).toBe('');
+    expect(formatted.technicalDetails).toBe('Browser default');
+  });
+});
+
+describe('formatTechnicalDetails — expander only, tested separately', () => {
   it('adds the dropped-frames segment only when measured, and says so plainly at zero', () => {
-    const withDrops = formatCaptureReceipt(
+    const withDrops = formatTechnicalDetails(
       buildCaptureReceipt({
         trackSettings: { width: 1920, height: 1080, frameRate: 30 },
         mimeType: 'video/mp4',
@@ -147,8 +217,8 @@ describe('formatCaptureReceipt', () => {
         droppedFramesEstimate: 14,
       }),
     );
-    expect(withDrops.details).toBe('H.264 · 9.8 Mbps · about 14 dropped frames');
-    const noDrops = formatCaptureReceipt(
+    expect(withDrops).toBe('H.264 · 9.8 Mbps · about 14 dropped frames');
+    const noDrops = formatTechnicalDetails(
       buildCaptureReceipt({
         trackSettings: { width: 1920, height: 1080, frameRate: 30 },
         mimeType: 'video/mp4',
@@ -157,15 +227,17 @@ describe('formatCaptureReceipt', () => {
         droppedFramesEstimate: 0,
       }),
     );
-    expect(noDrops.details).toBe('H.264 · 9.8 Mbps · no dropped frames spotted');
-  });
-
-  it('omits unknown facts instead of guessing them', () => {
-    const formatted = formatCaptureReceipt(
-      buildCaptureReceipt({ trackSettings: null, mimeType: '', blobSize: 0, durationSeconds: 0 }),
+    expect(noDrops).toBe('H.264 · 9.8 Mbps · no dropped frames spotted');
+    // No measurement -> no dropped-frames segment at all (never fabricated).
+    const unmeasured = formatTechnicalDetails(
+      buildCaptureReceipt({
+        trackSettings: { width: 1920, height: 1080, frameRate: 30 },
+        mimeType: 'video/mp4',
+        blobSize: 12_250_000,
+        durationSeconds: 10,
+      }),
     );
-    expect(formatted.summary).toBe('Recorded');
-    expect(formatted.details).toBe('Browser default');
+    expect(unmeasured).toBe('H.264 · 9.8 Mbps');
   });
 });
 

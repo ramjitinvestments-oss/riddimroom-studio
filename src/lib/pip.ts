@@ -25,7 +25,7 @@ export const PIP_LAYOUTS: PipLayout[] = [
   { id: 'bottom-left', label: 'Bottom-left', position: { x: 18, y: 78 }, scale: 0.32, shape: 'rounded' },
   { id: 'top-right', label: 'Top-right', position: { x: 82, y: 18 }, scale: 0.32, shape: 'rounded' },
   { id: 'top-left', label: 'Top-left', position: { x: 18, y: 18 }, scale: 0.32, shape: 'rounded' },
-  { id: 'side-by-side', label: 'Side-by-side', position: { x: 75, y: 50 }, scale: 0.48, shape: 'rounded' },
+  { id: 'side-by-side', label: 'Large right', position: { x: 75, y: 50 }, scale: 0.48, shape: 'rounded' },
 ];
 
 export function getPipLayout(id: PipLayoutId): PipLayout {

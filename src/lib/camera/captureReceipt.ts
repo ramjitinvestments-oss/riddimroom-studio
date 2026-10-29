@@ -9,12 +9,13 @@
  * requested chip label alone: a phone that negotiated 720p says 720p.
  *
  * Pure builder + formatter, unit-tested; the component supplies the
- * raw facts and renders the two formatted lines.
+ * raw facts and renders the formatted lines.
  *
- * NOTE: this module lives in the lib layer on purpose — the details
- * line carries precise technical strings (codec name, measured
- * bitrate) that the plain-words component copy rules keep out of
- * component files; the component renders these strings verbatim.
+ * The DEFAULT receipt surface is plain: the summary line plus a
+ * plain details line (duration + file size, in MB). The precise
+ * technical line is built separately by `formatTechnicalDetails`
+ * and is rendered only inside a "Details" expander in the
+ * component — never on the default surface.
  *
  * $0 rule: no dependencies.
  */
@@ -32,6 +33,10 @@ export interface CaptureReceipt {
   mimeType: string;
   /** Measured file bitrate: blob bits ÷ duration seconds (0 when unmeasurable). */
   videoBitrateBps: number;
+  /** The recording file size in bytes (0 when unknown). */
+  blobSizeBytes: number;
+  /** The recording duration in seconds (0 when unknown). */
+  durationSeconds: number;
   /** Estimated dropped frames — present only when actually measured. */
   droppedFramesEstimate?: number;
   /**
@@ -72,6 +77,14 @@ export function buildCaptureReceipt(input: CaptureReceiptInput): CaptureReceipt 
       input.durationSeconds > 0
         ? Math.round((input.blobSize * 8) / input.durationSeconds)
         : 0,
+    blobSizeBytes:
+      typeof input.blobSize === 'number' && Number.isFinite(input.blobSize) && input.blobSize > 0
+        ? Math.round(input.blobSize)
+        : 0,
+    durationSeconds:
+      typeof input.durationSeconds === 'number' && Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
+        ? input.durationSeconds
+        : 0,
   };
   const dropped = input.droppedFramesEstimate;
   if (typeof dropped === 'number' && Number.isFinite(dropped) && dropped >= 0) {
@@ -95,6 +108,47 @@ export function qualityWordForShortSide(shortSide: number): 'ultra' | 'high' | '
   return 'low';
 }
 
+/** Format a file size in plain units, e.g. "8.4 MB" (empty when unknown). */
+export function formatFileSizeBytes(bytes: number): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '';
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  if (bytes >= 1_000) return `${Math.round(bytes / 1_000)} KB`;
+  return `${Math.round(bytes)} bytes`;
+}
+
+/** Format a duration in plain words, e.g. "12 seconds" (empty when unknown). */
+export function formatDurationSeconds(durationSeconds: number): string {
+  if (typeof durationSeconds !== 'number' || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return '';
+  const total = Math.round(durationSeconds);
+  if (total <= 0) return '';
+  if (total < 60) return `${total} second${total === 1 ? '' : 's'}`;
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  const minutePart = `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  if (rest === 0) return minutePart;
+  return `${minutePart} ${rest} second${rest === 1 ? '' : 's'}`;
+}
+
+/**
+ * The plain details line for the DEFAULT receipt surface: duration
+ * plus file size, plain units only, e.g. "12 seconds · 8.4 MB".
+ * Unknown facts are left out rather than guessed; the line is empty
+ * when neither fact was measured.
+ */
+export function formatPlainDetails(receipt: CaptureReceipt): string {
+  const parts: string[] = [];
+  const duration = formatDurationSeconds(receipt.durationSeconds);
+  if (duration) parts.push(duration);
+  const size = formatFileSizeBytes(receipt.blobSizeBytes);
+  if (size) parts.push(size);
+  return parts.join(' · ');
+}
+
+// BLOCKLIST-TECHNICAL-START — precise technical strings for the
+// "Details" expander only. The copy blocklist strips this region
+// when it scans this module for the DEFAULT surface (see
+// src/copyBlocklist.test.ts): these strings are sanctioned
+// expander content, never default-surface copy.
 /** Short display name for a recorder mimeType's video codec. */
 export function codecNameForMimeType(mimeType: string): string {
   const mime = (mimeType ?? '').toLowerCase();
@@ -106,7 +160,7 @@ export function codecNameForMimeType(mimeType: string): string {
   return 'Browser default';
 }
 
-/** Format a bitrate for the details line: "9.8 Mbps" / "850 Kbps" / "400 bps". */
+/** Format a bitrate for the technical line: "9.8 Mbps" / "850 Kbps" / "400 bps". */
 export function formatBitrateBps(bps: number): string {
   if (typeof bps !== 'number' || !Number.isFinite(bps) || bps <= 0) return '';
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
@@ -114,30 +168,12 @@ export function formatBitrateBps(bps: number): string {
   return `${Math.round(bps)} bps`;
 }
 
-export interface FormattedCaptureReceipt {
-  /** e.g. "Recorded: 1080p · 30fps · high quality" */
-  summary: string;
-  /** e.g. "H.264 · 9.8 Mbps" — plus a dropped-frames segment when measured. */
-  details: string;
-}
-
 /**
- * Format a receipt as the two review-screen lines. The summary names
- * the achieved size by its short side ("1080p" for 1080×1920), the
- * achieved frame rate and the honest quality word; unknown facts are
- * left out rather than guessed. The details line carries the codec,
+ * The technical line for the "Details" expander only: the codec,
  * the measured bitrate and — only when it was really measured — the
- * dropped-frame estimate.
+ * dropped-frame estimate. Never rendered on the default surface.
  */
-export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureReceipt {
-  const shortSide =
-    receipt.actualWidth > 0 && receipt.actualHeight > 0 ? Math.min(receipt.actualWidth, receipt.actualHeight) : 0;
-  const parts: string[] = [];
-  if (shortSide > 0) parts.push(`${shortSide}p`);
-  if (receipt.actualFps > 0) parts.push(`${receipt.actualFps}fps`);
-  if (shortSide > 0) parts.push(`${qualityWordForShortSide(shortSide)} quality`);
-  const summary = parts.length > 0 ? `Recorded: ${parts.join(' · ')}` : 'Recorded';
-
+export function formatTechnicalDetails(receipt: CaptureReceipt): string {
   const detailParts: string[] = [codecNameForMimeType(receipt.mimeType)];
   const bitrate = formatBitrateBps(receipt.videoBitrateBps);
   if (bitrate) detailParts.push(bitrate);
@@ -148,7 +184,37 @@ export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureR
         : `about ${receipt.droppedFramesEstimate} dropped frames`,
     );
   }
-  return { summary, details: detailParts.join(' · ') };
+  return detailParts.join(' · ');
+}
+// BLOCKLIST-TECHNICAL-END
+
+export interface FormattedCaptureReceipt {
+  /** e.g. "Recorded: 1080p · 30fps · high quality" */
+  summary: string;
+  /** Plain line for the default surface, e.g. "12 seconds · 8.4 MB". */
+  details: string;
+  /** Technical line for the "Details" expander only. */
+  technicalDetails: string;
+}
+
+/**
+ * Format a receipt for the review screen. The summary names the
+ * achieved size by its short side ("1080p" for 1080×1920), the
+ * achieved frame rate and the honest quality word; the plain
+ * details line carries duration + file size. Unknown facts are
+ * left out rather than guessed. The technical line is kept
+ * separate in `technicalDetails` for the expander.
+ */
+export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureReceipt {
+  const shortSide =
+    receipt.actualWidth > 0 && receipt.actualHeight > 0 ? Math.min(receipt.actualWidth, receipt.actualHeight) : 0;
+  const parts: string[] = [];
+  if (shortSide > 0) parts.push(`${shortSide}p`);
+  if (receipt.actualFps > 0) parts.push(`${receipt.actualFps}fps`);
+  if (shortSide > 0) parts.push(`${qualityWordForShortSide(shortSide)} quality`);
+  const summary = parts.length > 0 ? `Recorded: ${parts.join(' · ')}` : 'Recorded';
+
+  return { summary, details: formatPlainDetails(receipt), technicalDetails: formatTechnicalDetails(receipt) };
 }
 
 /**

@@ -183,7 +183,7 @@ export function lightAdvice(
       return advice;
     }
     case 'blowing-out':
-      return 'The brightest parts are washing out — a little less light, or turn down the exposure, will help.';
+      return 'The brightest parts are washing out — a little less light, or turn down the brightness, will help.';
     case 'bright':
       return 'Plenty of light here — you are good to record.';
     case 'good':

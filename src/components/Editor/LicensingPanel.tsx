@@ -53,18 +53,20 @@ export function LicensingPanel() {
     setBusy(true); setCheckoutError(null); setCheckoutUrl(null);
     try {
       const res = await fetch('/api/checkout', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}) }, body: JSON.stringify({}) });
-      // Same static-build guard as TranscribePanel: no /api routes means
-      // an HTML 404 page, not JSON — answer in human terms, never a raw
-      // parse error or internal setup instructions.
+      // R34 (R33 audit §2): genuine unavailability is rendered BEFORE the
+      // button (see checkoutAvailable below), never as a post-click
+      // failure — and never with the old "preview" sentence, which fired
+      // for ANY failure including on production. A click that fails here
+      // is a start failure: one plain retry line, no raw messages.
       const isJson = (res.headers.get('content-type') || '').includes('application/json');
       if (!res.ok || !isJson) {
-        setCheckoutError("Checkout isn't live on this preview yet.");
+        setCheckoutError("Checkout couldn't start — check your connection and try again.");
         return;
       }
       const data = await res.json();
       if (data.checkoutUrl) setCheckoutUrl(data.checkoutUrl);
-      else setCheckoutError(data.error || "Checkout isn't live on this preview yet.");
-    } catch (e: unknown) { setCheckoutError(e instanceof SyntaxError ? "Checkout isn't live on this preview yet." : e instanceof Error ? e.message : 'Checkout failed.'); }
+      else setCheckoutError("Checkout couldn't start — check your connection and try again.");
+    } catch { setCheckoutError("Checkout couldn't start — check your connection and try again."); }
     finally { setBusy(false); }
   };
 
@@ -81,13 +83,17 @@ export function LicensingPanel() {
       )}
       <ul className="text-xs text-white/60 space-y-1">
         <li>• Free: 30s projects · {remaining === null ? '—' : `${remaining} export${remaining === 1 ? '' : 's'} left today`} · 2 transcriptions/day · watermark on</li>
-        <li>• Lifetime — $35 one-time: up to 10 min projects · 10 transcriptions/day · no watermark · all templates</li>
+        <li>• Lifetime — $35 one-time: up to 10 min projects · 10 transcriptions/day · unlimited exports · no watermark · all templates</li>
       </ul>
       {!isPaid && (
         <>
-          <button onClick={handleCheckout} disabled={busy} className="px-4 py-3 rounded-lg bg-white text-black font-bold text-sm min-h-11 disabled:opacity-50">
+          {/* R34: when checkout genuinely isn't available on this build,
+              say so BEFORE the button and disable it — not as a failure
+              after the click. */}
+          <button onClick={handleCheckout} disabled={busy || loading || !checkoutAvailable} className="px-4 py-3 rounded-lg bg-white text-black font-bold text-sm min-h-11 disabled:opacity-50">
             {busy ? 'Starting checkout…' : 'Upgrade to Lifetime — $35 one-time'}
           </button>
+          {!loading && !checkoutAvailable && <p className="text-xs text-white/50">Checkout isn't available here yet.</p>}
           {checkoutError && <p className="text-xs text-amber-400">{checkoutError}</p>}
           {checkoutUrl && <p className="text-xs text-white/70"><a className="underline" href={checkoutUrl} target="_blank" rel="noreferrer">Continue to checkout</a></p>}
         </>

@@ -190,6 +190,7 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
 
         {visible === null && !error && (
           <div className="space-y-3" aria-label="Loading signups">
+            <p className="text-xs text-white/40">Loading signups…</p>
             {[0, 1, 2].map((i) => (
               <div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse">
                 <div className="h-4 w-1/2 rounded bg-white/10" />
@@ -248,7 +249,8 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                       <span>· Marketing: {row.marketingOptIn ? 'opted in' : 'no'}</span>
                     </p>
                   </div>
-                  <div className="flex shrink-0 items-start gap-3">
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <div className="flex items-start gap-3">
                     <div className="flex flex-col items-center gap-1">
                       <span className="text-[10px] font-bold uppercase text-white/50">Access</span>
                       <button
@@ -271,7 +273,7 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                             hasAccess ? 'left-2 text-black' : 'right-2 text-white/60'
                           }`}
                         >
-                          {isBusy ? '…' : hasAccess ? 'On' : 'Off'}
+                          {hasAccess ? 'On' : 'Off'}
                         </span>
                       </button>
                     </div>
@@ -297,10 +299,12 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                             isPremium ? 'left-2 text-black' : 'right-2 text-white/60'
                           }`}
                         >
-                          {isBusy ? '…' : isPremium ? 'On' : 'Off'}
+                          {isPremium ? 'On' : 'Off'}
                         </span>
                       </button>
                     </div>
+                    </div>
+                    {isBusy && <span className="text-[10px] font-bold text-white/50">Saving…</span>}
                   </div>
                 </li>
               );

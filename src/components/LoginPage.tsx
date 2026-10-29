@@ -92,6 +92,19 @@ export function LoginPage() {
           </p>
         </div>
 
+        <div className="text-center space-y-2">
+          <h1 className="text-2xl font-black leading-tight">
+            Make promo videos from your flyer — and edit them properly
+          </h1>
+          <p className="text-sm text-white/60 leading-relaxed">
+            Turn a flyer, poster or logo into a captioned promo video ready to post — or turn your
+            own photo into a headline poster.
+          </p>
+          <p className="text-xs text-white/40 leading-relaxed">
+            Example: a party flyer becomes a short captioned promo, ready to post.
+          </p>
+        </div>
+
         {error && (
           <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 text-xs text-red-300">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -181,9 +194,20 @@ export function LoginPage() {
             disabled={isSubmitting}
             className="w-full py-3 min-h-11 bg-gold hover:bg-gold-bright text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 disabled:opacity-40"
           >
-            {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Send reset email'}
+            {isSubmitting && mode === 'signup'
+              ? 'Creating account…'
+              : mode === 'login'
+                ? 'Sign in'
+                : mode === 'signup'
+                  ? 'Create account'
+                  : 'Send reset email'}
             {mode === 'forgot' ? <KeyRound className="w-4 h-4" /> : <ArrowRight className="w-4 h-4" />}
           </button>
+          {mode === 'signup' && (
+            <p className="text-center text-xs text-white/40 leading-relaxed">
+              New accounts are approved by the owner before they can create.
+            </p>
+          )}
         </form>
 
         <p className="text-center text-xs text-white/40">

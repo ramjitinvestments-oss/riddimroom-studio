@@ -114,7 +114,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
         <div className="flex items-center gap-3 text-xs text-white/50">
           <span className="hidden sm:inline">{userProfile?.email || currentUser?.email}</span>
           <span className="text-gold/90">
-            {userProfile ? `${userProfile.dailyCount} of ${userProfile.maxFree} free exports used today` : '…'}
+            {userProfile ? `${userProfile.dailyCount} of ${userProfile.maxFree} transcriptions used today` : '…'}
           </span>
           {userProfile?.isAdmin && onOpenAdmin && (
             <button
@@ -135,13 +135,56 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
           <span className="px-3 py-1.5 rounded-full bg-white/10 border border-white/10 text-xs font-bold">
             Plan: {tier === 'lifetime' ? 'Lifetime' : 'Free'}
           </span>
-          <span className="text-xs text-white/40">Free: 30s projects · 3 exports/day · watermark · Lifetime: up to 10 min · no watermark · all templates</span>
+          <span className="text-xs text-white/40">Free (Basic): short projects · 3 exports a day · 2 transcription sessions a day · watermark on · Lifetime: Unlimited exports · no watermark · longer projects · 10 transcriptions a day</span>
         </div>
         <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6 text-xs text-white/60 space-y-1">
           <p className="font-bold text-white text-sm">How it works</p>
           <p><span className="font-bold text-white">1. Capture / Upload</span> — record, upload, or pick a template.</p>
           <p><span className="font-bold text-white">2. Edit + Captions</span> — trim, add captions, PiP overlay, text.</p>
           <p><span className="font-bold text-white">3. Export</span> — an MP4 video ready to post, or a caption file for YouTube/TikTok.</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+          {onOpenPromo && (
+            <button
+              onClick={onOpenPromo}
+              className="text-left bg-white/5 hover:bg-white/10 border border-gold/60 rounded-xl p-4 transition"
+            >
+              <span className="block text-sm font-bold uppercase tracking-wide text-gold">Viral Promo</span>
+              <span className="block text-xs text-white/50 mt-1 leading-relaxed">
+                Upload a flyer, poster or logo. We take it apart, build it back on the beat, and hand you a promo ready to post.
+              </span>
+            </button>
+          )}
+          <button
+            onClick={() => setShowRatioPicker(true)}
+            disabled={isCreating}
+            className="text-left bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 rounded-xl p-4 transition"
+          >
+            <span className="block text-sm font-bold uppercase tracking-wide text-white">
+              {isCreating ? 'Creating…' : 'New project'}
+            </span>
+            <span className="block text-xs text-white/50 mt-1 leading-relaxed">
+              Start blank: add your own clips and photos, add captions, and export a video ready to post.
+            </span>
+          </button>
+          {onOpenPromo && (
+            <button
+              onClick={() => {
+                try {
+                  sessionStorage.setItem('rr-promo-start', 'poster');
+                } catch {
+                  // Storage unavailable — the Promo page still opens.
+                }
+                onOpenPromo();
+              }}
+              className="text-left bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl p-4 transition"
+            >
+              <span className="block text-sm font-bold uppercase tracking-wide text-white">Headline Poster</span>
+              <span className="block text-xs text-white/50 mt-1 leading-relaxed">
+                Turn your own photo into the poster format — one heavy headline, one sub-line, locked premium type over your picture.
+              </span>
+            </button>
+          )}
         </div>
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-white/60">Your projects</h2>
@@ -158,34 +201,22 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
                 {selectMode ? 'Done' : 'Select'}
               </button>
             )}
-            {onOpenPromo && (
-              <button
-                onClick={onOpenPromo}
-                className="px-4 py-2 min-h-[36px] text-xs font-bold uppercase tracking-wide bg-gold/15 hover:bg-gold/25 border border-gold/60 text-gold rounded-lg"
-              >
-                Viral Promo
-              </button>
-            )}
-            <button
-              onClick={() => setShowRatioPicker(true)}
-              disabled={isCreating}
-              className="px-4 py-2 min-h-[36px] text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
-            >
-              {isCreating ? 'Creating…' : 'New project'}
-            </button>
           </div>
         </div>
 
         {error && <p className="text-sm text-red-400 mb-4">{error}</p>}
 
         {projects === null && !error && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" aria-label="Loading projects">
-            {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse">
-                <div className="h-4 w-2/3 rounded bg-white/10" />
-                <div className="h-3 w-1/2 rounded bg-white/5 mt-2" />
-              </div>
-            ))}
+          <div>
+            <p className="text-sm text-white/50 mb-3">Loading your projects…</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" aria-label="Loading projects">
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="bg-white/5 border border-white/10 rounded-xl p-4 animate-pulse">
+                  <div className="h-4 w-2/3 rounded bg-white/10" />
+                  <div className="h-3 w-1/2 rounded bg-white/5 mt-2" />
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

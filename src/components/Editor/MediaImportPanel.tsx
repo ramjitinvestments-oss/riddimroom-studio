@@ -609,9 +609,12 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
             <li key={upload.id} className="flex items-center gap-2 text-xs bg-white/5 rounded-lg px-3 py-2">
               <span className="flex-1 truncate text-white/70">{upload.fileName}</span>
               {upload.status === 'uploading' && (
-                <div className="w-24 h-1.5 bg-white/10 rounded overflow-hidden">
-                  <div className="h-full bg-gold" style={{ width: `${Math.round(upload.progress * 100)}%` }} />
-                </div>
+                <>
+                  <span className="shrink-0 text-white/60">Uploading… {Math.round(upload.progress * 100)}%</span>
+                  <div className="w-24 h-1.5 bg-white/10 rounded overflow-hidden">
+                    <div className="h-full bg-gold" style={{ width: `${Math.round(upload.progress * 100)}%` }} />
+                  </div>
+                </>
               )}
               {upload.status === 'done' && <span className="text-emerald-400 font-bold">Done</span>}
               {upload.status === 'error' && (

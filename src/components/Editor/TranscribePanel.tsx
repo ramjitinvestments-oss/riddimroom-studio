@@ -15,21 +15,45 @@ import type { VideoTimelineItem, AudioTimelineItem } from '../../types/timeline'
  * the timeline.
  */
 /**
+ * The caption service is unavailable right now — shown when the PROVIDER's
+ * own billing/quota is exhausted (R34, R33 audit §2 "provider billing
+ * leak"). Gemini's "prepayment credits are depleted" is about the
+ * service's account, not the user's — passing it through made it read as
+ * if the USER's credits had run out.
+ */
+const CAPTION_SERVICE_UNAVAILABLE = 'The caption service is unavailable right now — please try again later.';
+
+const PROVIDER_BILLING_PATTERNS = [
+  /prepayment/i,
+  /credits are depleted/i,
+  /insufficient (funds|credits|balance)/i,
+  /billing/i,
+  /payment required/i,
+];
+
+function isProviderBillingMessage(msg: string): boolean {
+  return PROVIDER_BILLING_PATTERNS.some((re) => re.test(msg));
+}
+
+/**
  * Provider errors sometimes arrive as a stringified JSON body (e.g. the
  * Gemini API's `{error:{code,message,status}}`). Pull the readable
- * message out so the panel shows the actual cause — "prepayment credits
- * are depleted" — instead of a wall of escaped JSON.
+ * message out so the panel shows the actual cause instead of a wall of
+ * escaped JSON — EXCEPT provider-billing text, which is mapped to the
+ * service-side message above (it is never the user's credits).
  */
 function humanizeApiError(raw: unknown): string | null {
   if (typeof raw !== 'string' || !raw) return null;
+  let msg = raw;
   try {
     const parsed = JSON.parse(raw);
-    const msg = parsed?.error?.message;
-    if (typeof msg === 'string' && msg) return msg;
+    const parsedMsg = parsed?.error?.message;
+    if (typeof parsedMsg === 'string' && parsedMsg) msg = parsedMsg;
   } catch {
     // not JSON — use the string as-is
   }
-  return raw;
+  if (isProviderBillingMessage(msg)) return CAPTION_SERVICE_UNAVAILABLE;
+  return msg;
 }
 
 export function TranscribePanel({ uid }: { uid: string }) {
@@ -46,6 +70,11 @@ export function TranscribePanel({ uid }: { uid: string }) {
   ].map((item) => ({ item, label: project.mediaAssets[item.mediaAssetId]?.fileName || item.id }));
 
   const quotaExhausted = !!userProfile && userProfile.dailyCount >= userProfile.maxFree;
+  // R34 (UX-08): Promo's proactive pattern — the remaining count is shown
+  // BEFORE the wall, from the profile the panel already holds (refreshed
+  // after every transcription, so it stays current in-panel).
+  const transcriptionsLeft = userProfile ? Math.max(0, userProfile.maxFree - userProfile.dailyCount) : null;
+  const onLifetime = !!userProfile && (userProfile.licenseTier === 'lifetime' || userProfile.maxFree >= 10);
 
   const handleTranscribe = async (item: VideoTimelineItem | AudioTimelineItem) => {
     const asset = project.mediaAssets[item.mediaAssetId];
@@ -97,9 +126,17 @@ export function TranscribePanel({ uid }: { uid: string }) {
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">AI transcription</h3>
       {error && <p className="text-xs text-red-400">{error}</p>}
+      {!quotaExhausted && transcriptionsLeft !== null && (
+        <p className="text-xs text-white/40">
+          {transcriptionsLeft} of {userProfile?.maxFree} transcriptions left today.
+        </p>
+      )}
       {quotaExhausted && (
         <p className="text-xs text-amber-400">
-          Daily quota reached ({userProfile?.dailyCount}/{userProfile?.maxFree}). Try again tomorrow.
+          Daily quota reached ({userProfile?.dailyCount}/{userProfile?.maxFree}).{' '}
+          {onLifetime
+            ? 'Your count resets tomorrow.'
+            : 'Lifetime raises it to 10 a day — $35 one-time. Open Step 3 — Export — to upgrade.'}
         </p>
       )}
       {transcribableItems.length === 0 && <p className="text-xs text-white/30">Add a video or audio clip first.</p>}

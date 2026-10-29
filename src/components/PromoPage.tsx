@@ -426,6 +426,20 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
     }
   }, []);
 
+  // R34: poster door deep-link — the Dashboard's Headline Poster door
+  // sets this key before navigating here; open the poster builder
+  // (the same state the "Other ways to start" card sets) and clear it.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('rr-promo-start') === 'poster') {
+        sessionStorage.removeItem('rr-promo-start');
+        setPosterOpen(true);
+      }
+    } catch {
+      /* sessionStorage unavailable — no deep-link, no behaviour change */
+    }
+  }, []);
+
   // R21: a website profile confirmed on this device is offered again.
   useEffect(() => {
     const saved = loadSiteProfile();
@@ -1665,9 +1679,11 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const buildLabel =
     phase === 'building'
       ? status || 'Building…'
-      : picked.length === 0 || !analysis || !!fileProblem
-        ? 'Add artwork to build'
-        : 'Build my promo';
+      : fileProblem
+        ? fileProblem
+        : picked.length === 0 || !analysis
+          ? 'Add artwork to build'
+          : 'Build my promo';
 
   /** R27 (WS-M2): the readout in human words — no bands, no
       percentages on the surface (the detail lives behind the
@@ -2042,10 +2058,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
               </label>
               <button
                 onClick={() => void handleBuildPoster()}
-                disabled={!posterPicked || !!posterStatus || !currentUser}
+                disabled={!posterPicked || !!posterStatus || !currentUser || !posterTexts.headline.trim()}
                 className="w-full min-h-[48px] py-3 rounded-lg bg-gold hover:bg-gold-bright disabled:opacity-50 text-black text-sm font-black uppercase tracking-wide"
               >
-                {posterStatus || 'Build poster'}
+                {posterStatus || (posterTexts.headline.trim() ? 'Build poster' : 'Add a headline to build')}
               </button>
               {posterError && <p className="text-xs text-red-400">{posterError}</p>}
               {posterNote && <p className="text-[11px] text-white/50">{posterNote}</p>}
@@ -2255,8 +2271,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                       <div className="mt-1 space-y-1 text-[11px] text-white/40">
                         {analysis && (
                           <p>
-                            {analysis.width} × {analysis.height}px · {analysis.bands.length} element band
-                            {analysis.bands.length === 1 ? '' : 's'} found
+                            {analysis.width} × {analysis.height}px · {analysis.bands.length} {analysis.bands.length === 1 ? 'block' : 'blocks'} of text found
                           </p>
                         )}
                         {readLines.map((line, i) => (
@@ -2340,7 +2355,6 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 ))}
               </select>
               <p className="text-xs text-white/50 mt-2">{recipeMeta.blurb}</p>
-              {fileProblem && <p className="text-xs text-amber-300 mt-3">{fileProblem}</p>}
 
               <div className="flex flex-wrap items-center gap-2 mt-4">
                 <span className="text-xs font-bold uppercase tracking-wide text-white/60 mr-1">Format</span>
@@ -2600,8 +2614,8 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                           <ul className="mt-1 space-y-0.5">
                             {campaignReceipt.flags.slice(0, 6).map((f, i) => (
                               <li key={i} className="text-[11px] text-amber-100/80">
-                                {f.label}: one line couldn't be checked word-for-word against your confirmed
-                                website profile — please check it before posting.
+                                {f.label}: the line “{f.context}” — “{f.token}” couldn't be checked
+                                word-for-word against your confirmed website profile — please check it before posting.
                               </li>
                             ))}
                           </ul>
@@ -2723,23 +2737,25 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
           </>
         )}
-        {phase !== 'pick' && (
-          <div
-            className="lg:hidden fixed bottom-0 inset-x-0 z-40 border-t border-white/10 bg-[#0a0a0a]/90 backdrop-blur"
-            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-          >
-            <div className="px-4 py-3">
-              {fileProblem && <p className="text-[11px] text-amber-300 pb-2">{fileProblem}</p>}
-              <button
-                onClick={() => void handleBuild()}
-                disabled={buildDisabled}
-                className="w-full min-h-[48px] py-3 rounded-lg bg-gold hover:bg-gold-bright disabled:opacity-50 text-black text-sm font-black uppercase tracking-wide"
-              >
-                {buildLabel}
-              </button>
-            </div>
+        {/* R34 (UX-32): the sticky bar renders from first load, not
+            only after artwork is picked — in the pick phase it sits
+            disabled with the reason on the button ("Add artwork to
+            build"), and a recipe file problem becomes the label
+            itself, so the reason appears once, prominently. */}
+        <div
+          className="lg:hidden fixed bottom-0 inset-x-0 z-40 border-t border-white/10 bg-[#0a0a0a]/90 backdrop-blur"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        >
+          <div className="px-4 py-3">
+            <button
+              onClick={() => void handleBuild()}
+              disabled={buildDisabled}
+              className="w-full min-h-[48px] py-3 rounded-lg bg-gold hover:bg-gold-bright disabled:opacity-50 text-black text-sm font-black uppercase tracking-wide"
+            >
+              {buildLabel}
+            </button>
           </div>
-        )}
+        </div>
       </main>
     </div>
   );

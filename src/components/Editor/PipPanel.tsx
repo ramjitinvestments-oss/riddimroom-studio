@@ -34,6 +34,17 @@ import type { ImageTimelineItem, MediaAsset, TimelineItem, VideoTimelineItem } f
  * inspector shows the same fields, and the timeline clip has a quick-mute
  * button).
  */
+/**
+ * R34 (UX-27): pair sound-balance preset labels in level words. The
+ * preset ids and volume values stay in lib/pairLayout — only the
+ * words shown on the buttons change here.
+ */
+const PAIR_BALANCE_LABELS: Record<PairBalancePresetId, string> = {
+  scene: 'Scene loudest',
+  equal: 'Both equal',
+  you: 'You loudest',
+};
+
 export function PipPanel({ item }: { item?: TimelineItem | null }) {
   const { project, mutate } = useProject();
   const [layoutId, setLayoutId] = useState<PipLayoutId>('bottom-right');
@@ -337,18 +348,21 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             </>
           )}
           {(pairCtx.main.type === 'video' || pairCtx.second.type === 'video') && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Sound balance:</span>
-              {(Object.keys(PAIR_BALANCE_PRESETS) as PairBalancePresetId[]).map((presetId) => (
-                <button
-                  key={presetId}
-                  onClick={() => withPair((p, ctx) => applyPairBalance(p, ctx, presetId))}
-                  className="min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 text-white transition"
-                >
-                  {PAIR_BALANCE_PRESETS[presetId].label}
-                </button>
-              ))}
-            </div>
+            <>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Sound balance:</span>
+                {(Object.keys(PAIR_BALANCE_PRESETS) as PairBalancePresetId[]).map((presetId) => (
+                  <button
+                    key={presetId}
+                    onClick={() => withPair((p, ctx) => applyPairBalance(p, ctx, presetId))}
+                    className="min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 text-white transition"
+                  >
+                    {PAIR_BALANCE_LABELS[presetId]}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-white/30 -mt-1">Scene = main clip · You = the overlay clip</p>
+            </>
           )}
           <label className="flex items-center gap-2 text-xs text-white/60">
             <input
