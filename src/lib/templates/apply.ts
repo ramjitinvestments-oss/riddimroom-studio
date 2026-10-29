@@ -187,6 +187,10 @@ interface SlotPlan {
   trimStart?: number;
   trimEnd?: number;
   motion: string;
+  /** Raw transition preset id INTO this item (before pair-safe wrapping). */
+  entranceTransition: string;
+  /** Raw transition preset id OUT of this item (before pair-safe wrapping) — the next slot's entrance, or the template default for the last slotted item. */
+  exitTransition: string;
   /** True when a video's duration shrank (crop-picker candidate). */
   shortened: boolean;
 }
@@ -279,6 +283,11 @@ export function applyFullTemplate(
         trimStart,
         trimEnd,
         motion: slot.motion,
+        entranceTransition: slot.transition ?? template.transition,
+        exitTransition:
+          index + 1 < slotted.length
+            ? (slots[Math.min(index + 1, slots.length - 1)].transition ?? template.transition)
+            : template.transition,
         shortened,
       });
       cursor += newDuration;
@@ -319,9 +328,13 @@ export function applyFullTemplate(
   for (const item of next.items) {
     if (item.type === 'video' || item.type === 'image' || item.type === 'text') {
       const isPairItem = pairIds.has(item.id);
-      const transition = isPairItem ? pairSafeTransition(template.transition) : template.transition;
+      const planForAnimation = planById.get(item.id);
+      const rawEntrance = planForAnimation ? planForAnimation.entranceTransition : template.transition;
+      const rawExit = planForAnimation ? planForAnimation.exitTransition : template.transition;
+      const entrance = isPairItem ? pairSafeTransition(rawEntrance) : rawEntrance;
+      const exit = isPairItem ? pairSafeTransition(rawExit) : rawExit;
       const patch: Record<string, unknown> = {
-        animation: { entrance: transition as never, exit: transition as never, intensity: 1 },
+        animation: { entrance: entrance as never, exit: exit as never, intensity: 1 },
       };
       if (item.type === 'video' || item.type === 'image') {
         const plan = planById.get(item.id);

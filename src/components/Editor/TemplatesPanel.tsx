@@ -1,50 +1,190 @@
-import React, { useMemo, useState } from 'react';
-import { Check, ChevronDown, ChevronRight, Clapperboard, Crop, Frame, Loader2, Music, Sparkles } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Clapperboard, Crop, Frame, Sparkles } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import {
-  TEMPLATE_CATEGORIES,
+  STUDIO_TEMPLATES,
   getTemplate,
-  templatesByKind,
   type StudioTemplate,
-  type TemplateCategory,
 } from '../../lib/templates';
-import type { MediaAsset, VideoTimelineItem } from '../../types/timeline';
+import type { Project, VideoTimelineItem } from '../../types/timeline';
 import { applyFullTemplate, applyHookToProject, type ShortenedClipInfo } from '../../lib/templates/apply';
+import {
+  buildPreview,
+  createPreviewCache,
+  createPreviewScheduler,
+  hasPreviewMedia,
+  previewSignature,
+  type PreviewCache,
+  type PreviewScheduler,
+} from '../../lib/templates/reelPreview';
+import { renderPreviewCanvases } from './reelPreviewRenderer';
+import {
+  REEL_CHIPS,
+  REEL_LAYOUT,
+  reelCardModel,
+  reelFilter,
+  type ReelCardModel,
+  type ReelChip,
+} from '../../lib/templates/reelMeta';
 import { findAspectRatioOption } from '../../lib/aspectRatios';
-import { uploadMediaFile } from '../../lib/media/upload';
 import { updateItem } from '../../lib/timeline/utils';
 import { SlotTrimPicker } from './SlotTrimPicker';
 import { ReframePicker } from './ReframePicker';
 
 /**
- * Templates v3 — 20 ultra-premium viral templates in two collapsible
- * sections of COMPACT ROWS (v3 compact pass: thumbnail h-14/w-24, name +
- * one-line meta, small gold Apply pill — same actions as the v2 cards,
- * a fraction of the height).
+ * Templates — R37 Phase 1: the chooser is ONE horizontal reel strip of
+ * vertical cards (88×156, snap-scrolling) behind a single chip row
+ * (All · Hooks · Full edits · the 8 categories), replacing the two
+ * collapsible row sections + category dropdown (≈1,750px → 236px of
+ * chooser; see `lib/templates/reelMeta.ts` for the height budget).
+ * Cards carry Stage-A designed posters derived from the template's own
+ * data (accent gradient treated with its grade filter, its headline in
+ * its caption style, its slot plan as bars). Tapping an unfocused card
+ * focuses it; tapping the focused card applies it — no accidental
+ * applies while swiping.
  *
- * Hooks (1.5–4s) insert their text/effects into the open project at the
- * playhead. Full Edits (15–45s) now make their slot plan REAL: each
- * main-track clip/image is reduced to its slot's size and re-packed
- * into the reel, with the template's transition, per-slot motion, and
- * cinematic grade (see `lib/templates/apply.ts`). R20: templates add
- * no music — the app adds no audio of its own; the user adds their
- * own track from the Music panel when they want one.
- * After an apply that shortened any video, an "Adjust clips" step
- * offers the crop picker for each shortened clip.
+ * Apply behaviour is unchanged from the row era: Hooks (1.5–4s) insert
+ * their text/effects into the open project at the playhead. Full Edits
+ * (15–45s) make their slot plan REAL: each main-track clip/image is
+ * reduced to its slot's size and re-packed into the reel, with the
+ * template's transition, per-slot motion, and cinematic grade (see
+ * `lib/templates/apply.ts`). R20: templates add no music — the app
+ * adds no audio of its own; the user adds their own track from the
+ * Music panel when they want one. After an apply that shortened any
+ * video, an "Adjust clips" step offers the crop picker for each
+ * shortened clip.
  */
 export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number; uid: string }) {
   const { project, mutate } = useProject();
   const [appliedId, setAppliedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [category, setCategory] = useState<TemplateCategory | 'All'>('All');
+  const [chip, setChip] = useState<ReelChip>('all');
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [openSections, setOpenSections] = useState<{ hooks: boolean; full: boolean }>({ hooks: true, full: true });
   const [pendingAdjust, setPendingAdjust] = useState<ShortenedClipInfo[] | null>(null);
   const [adjustTargetId, setAdjustTargetId] = useState<string | null>(null);
+  const [framePrompt, setFramePrompt] = useState<StudioTemplate | null>(null);
+  const [pendingFramed, setPendingFramed] = useState<ShortenedClipInfo[] | null>(null);
+  const [reframeTargetId, setReframeTargetId] = useState<string | null>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 
-  const hooks = useMemo(() => filterByCategory(templatesByKind('hook'), category), [category]);
-  const fulls = useMemo(() => filterByCategory(templatesByKind('full'), category), [category]);
+  const visible = useMemo(() => reelFilter(STUDIO_TEMPLATES, chip), [chip]);
+  const cardModels = useMemo(
+    () => new Map(visible.map((t) => [t.id, reelCardModel(t)] as const)),
+    [visible],
+  );
+  // The focused card: the tracked id while it is in the current filter,
+  // else the filter's first card.
+  const focusedModel: ReelCardModel | null =
+    (focusedId ? cardModels.get(focusedId) : undefined) ?? visible.map((t) => cardModels.get(t.id))[0] ?? null;
+
+  // ── R37 Phase 2 Stage B: own-media preview frames for the focused
+  // card. The cache + scheduler live in refs (created once); the
+  // render function resolves its (project, template, playhead)
+  // snapshot from the jobs map by cache key, so a render scheduled
+  // for one card can never paint another card's frames.
+  const [preview, setPreview] = useState<{ key: string; canvases: HTMLCanvasElement[] } | null>(null);
+  const previewJobsRef = useRef(new Map<string, { project: Project; template: StudioTemplate; currentTime: number }>());
+  const previewGenerationRef = useRef(0);
+  const previewCacheRef = useRef<PreviewCache<HTMLCanvasElement[]> | null>(null);
+  if (!previewCacheRef.current) previewCacheRef.current = createPreviewCache<HTMLCanvasElement[]>(12);
+  const previewSchedulerRef = useRef<PreviewScheduler<HTMLCanvasElement[]> | null>(null);
+  if (!previewSchedulerRef.current) {
+    previewSchedulerRef.current = createPreviewScheduler<HTMLCanvasElement[]>(async (key) => {
+      const job = previewJobsRef.current.get(key);
+      if (!job) return null;
+      const built = buildPreview(job.project, job.template, job.currentTime);
+      return renderPreviewCanvases(built.project, built.timestamps);
+    }, previewCacheRef.current);
+  }
+  const previewTemplate: StudioTemplate | undefined = focusedModel ? getTemplate(focusedModel.id) : undefined;
+
+  useEffect(() => {
+    const generation = ++previewGenerationRef.current;
+    const scheduler = previewSchedulerRef.current;
+    if (!project || !previewTemplate || !scheduler || !hasPreviewMedia(project)) {
+      setPreview(null);
+      return () => {
+        previewGenerationRef.current += 1;
+      };
+    }
+    const template = previewTemplate;
+    const key = previewSignature(project, template, currentTime);
+    const cached = scheduler.peek(key);
+    if (cached) {
+      setPreview({ key, canvases: cached });
+      return () => {
+        previewGenerationRef.current += 1;
+      };
+    }
+    previewJobsRef.current.set(key, { project, template, currentTime });
+    let debounceId: number | undefined;
+    let idleId: number | undefined;
+    let idleIsTimeout = false;
+    debounceId = window.setTimeout(() => {
+      const schedule = () => {
+        void scheduler.request(key).then((frames) => {
+          if (frames && previewGenerationRef.current === generation) {
+            setPreview({ key, canvases: frames });
+          }
+        });
+      };
+      const idleWindow = window as Window & {
+        requestIdleCallback?: (cb: () => void, options?: { timeout: number }) => number;
+      };
+      if (typeof idleWindow.requestIdleCallback === 'function') {
+        idleId = idleWindow.requestIdleCallback(schedule, { timeout: 600 });
+      } else {
+        idleIsTimeout = true;
+        idleId = window.setTimeout(schedule);
+      }
+    }, 350);
+    return () => {
+      previewGenerationRef.current += 1;
+      if (debounceId !== undefined) window.clearTimeout(debounceId);
+      if (idleId !== undefined) {
+        if (idleIsTimeout) {
+          window.clearTimeout(idleId);
+        } else {
+          const idleWindow = window as Window & { cancelIdleCallback?: (id: number) => void };
+          if (typeof idleWindow.cancelIdleCallback === 'function') idleWindow.cancelIdleCallback(idleId);
+        }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedId, project, currentTime]);
+
+  // Scroll-driven focus: the card the user swipes to (≥90% visible in
+  // the strip) becomes the focused card. Guarded for environments
+  // without IntersectionObserver — tap focus still works there.
+  useEffect(() => {
+    if (typeof IntersectionObserver !== 'function') return;
+    const root = stripRef.current;
+    if (!root) return;
+    const ratios = new Map<string, number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.reelCard;
+          if (id) ratios.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
+        }
+        let bestId: string | null = null;
+        let best = 0;
+        ratios.forEach((ratio, id) => {
+          if (ratio >= 0.9 && ratio > best) {
+            best = ratio;
+            bestId = id;
+          }
+        });
+        if (bestId) setFocusedId(bestId);
+      },
+      { root, threshold: [0.9] },
+    );
+    cardRefs.current.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [visible, project]);
 
   if (!project) {
     return (
@@ -54,8 +194,6 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       </div>
     );
   }
-
-  const [framePrompt, setFramePrompt] = useState<StudioTemplate | null>(null);
 
   const handleApply = async (t: StudioTemplate) => {
     if (busyId) return;
@@ -107,8 +245,6 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     }
   };
 
-  const [pendingFramed, setPendingFramed] = useState<ShortenedClipInfo[] | null>(null);
-  const [reframeTargetId, setReframeTargetId] = useState<string | null>(null);
   const reframeTarget = reframeTargetId
     ? project.items.find((i) => i.id === reframeTargetId && (i.type === 'video' || i.type === 'image'))
     : undefined;
@@ -119,60 +255,120 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     : undefined;
   const adjustAsset = adjustTarget ? project.mediaAssets[adjustTarget.mediaAssetId] : undefined;
 
+  const selectChip = (next: ReelChip) => {
+    setChip(next);
+    const first = reelFilter(STUDIO_TEMPLATES, next)[0];
+    setFocusedId(first ? first.id : null);
+  };
+
+  // One tap, two meanings: an unfocused card only takes focus (and
+  // scrolls into view); the focused card applies.
+  const handleCardTap = (t: StudioTemplate) => {
+    if (!focusedModel || focusedModel.id !== t.id) {
+      setFocusedId(t.id);
+      const el = cardRefs.current.get(t.id);
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
+      }
+      return;
+    }
+    void handleApply(t);
+  };
+
+  const focusedTemplate = focusedModel ? getTemplate(focusedModel.id) : undefined;
+
   return (
-    <div className="flex flex-col gap-2.5">
+    <div className="flex flex-col" style={{ gap: REEL_LAYOUT.gap }}>
       <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Templates</h3>
-      <p className="text-[11px] text-white/40 leading-snug">
-        <span className="text-gold">Hooks</span> drop into this project at the playhead. <span className="text-gold">Full edits</span> trim
-        your clips to the slot plan and re-pack them into the reel.
+
+      {/* R37: one chip row absorbs both old filters (the kind sections
+          and the category dropdown). */}
+      <div className="flex items-center gap-1.5 overflow-x-auto" style={{ height: REEL_LAYOUT.chipsHeight }}>
+        {REEL_CHIPS.map((c) => {
+          const selected = chip === c.id;
+          return (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => selectChip(c.id)}
+              aria-pressed={selected}
+              className={`shrink-0 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] font-bold ${
+                selected ? 'bg-gold text-black' : 'bg-white/5 border border-white/10 text-white/70'
+              }`}
+            >
+              {c.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* The reel strip: snap-scrolling vertical cards. touch-action
+          pan-x lets horizontal swipes scroll the strip while vertical
+          drags still scroll the panel around it. */}
+      <div
+        ref={stripRef}
+        data-reel-strip
+        className="overflow-x-auto [scroll-snap-type:x_mandatory]"
+        style={{
+          touchAction: 'pan-x',
+          paddingTop: REEL_LAYOUT.stripPaddingY,
+          paddingBottom: REEL_LAYOUT.stripPaddingY,
+        }}
+      >
+        {visible.length === 0 ? (
+          <p className="text-[11px] text-white/30">No templates in this filter.</p>
+        ) : (
+          <div className="flex" style={{ gap: REEL_LAYOUT.gap }}>
+            {visible.map((t) => {
+              const model = cardModels.get(t.id);
+              if (!model) return null;
+              const isFocusedCard = focusedModel?.id === t.id;
+              return (
+                <ReelTemplateCard
+                  key={t.id}
+                  model={model}
+                  focused={isFocusedCard}
+                  applied={appliedId === t.id}
+                  previewCanvases={
+                    isFocusedCard && preview && preview.key === previewSignature(project, t, currentTime)
+                      ? preview.canvases
+                      : undefined
+                  }
+                  onTap={() => handleCardTap(t)}
+                  registerRef={(el) => {
+                    if (el) cardRefs.current.set(t.id, el);
+                    else cardRefs.current.delete(t.id);
+                  }}
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Focused-card detail: the facts the old rows carried (name,
+          description, slot plan), at the tap point under the strip. */}
+      {focusedTemplate && focusedModel && (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs font-bold" style={{ color: focusedModel.accentColor }}>
+            {focusedTemplate.name}
+          </span>
+          <p className="text-[11px] text-white/50 leading-snug">{focusedTemplate.description}</p>
+          {focusedTemplate.kind === 'full' && focusedTemplate.slots && (
+            <p className="text-[10px] text-white/35 leading-snug">{focusedTemplate.slots.map((s) => s.name).join(' → ')}</p>
+          )}
+        </div>
+      )}
+      <p className="text-[10px] text-white/35 leading-snug">
+        Hooks drop in at the playhead and stack. Applying another full edit re-packs from your current clips.
       </p>
-      {error && <p className="text-xs text-red-400">{error}</p>}
-      {notice && <p className="text-[11px] text-white/50">{notice}</p>}
       {appliedId && (
         <p className="text-[11px] text-gold flex items-center gap-1">
           <Check size={12} strokeWidth={3} /> Applied: {getTemplate(appliedId)?.name}
         </p>
       )}
-
-      {/* v9: category as one dropdown row (was a scrolling chip row). */}
-      <label className="flex items-center gap-2">
-        <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Category</span>
-        <select
-          aria-label="Template category"
-          value={category}
-          onChange={(e) => setCategory(e.target.value as TemplateCategory | 'All')}
-          className="flex-1 min-h-10 bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white focus:outline-none focus:border-gold/60"
-        >
-          {(['All', ...TEMPLATE_CATEGORIES] as const).map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <TemplateSection
-        title="Hooks · 1.5–4s"
-        icon={<Sparkles size={12} className="text-gold" />}
-        templates={hooks}
-        appliedId={appliedId}
-        busyId={busyId}
-        onApply={handleApply}
-        emptyText="No hooks in this category."
-        open={openSections.hooks}
-        onToggle={() => setOpenSections((s) => ({ ...s, hooks: !s.hooks }))}
-      />
-      <TemplateSection
-        title="Full Edits · 15–45s"
-        icon={<Clapperboard size={12} className="text-gold" />}
-        templates={fulls}
-        appliedId={appliedId}
-        busyId={busyId}
-        onApply={handleApply}
-        emptyText="No full edits in this category."
-        open={openSections.full}
-        onToggle={() => setOpenSections((s) => ({ ...s, full: !s.full }))}
-      />
+      {error && <p className="text-xs text-red-400">{error}</p>}
+      {notice && <p className="text-[11px] text-white/50">{notice}</p>}
 
       {/* v9 frame prompt: the preset's frame ≠ the project's size —
           one clear choice, in place, before anything is applied. */}
@@ -297,126 +493,173 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
   );
 }
 
-function filterByCategory(list: StudioTemplate[], category: TemplateCategory | 'All'): StudioTemplate[] {
-  return category === 'All' ? list : list.filter((t) => t.category === category);
+/**
+ * One reel card: the Stage-A poster (accent gradient treated with the
+ * template's grade filter — the filter sits on the poster layer only,
+ * never on the type above it), its headline in its caption style, the
+ * slot-plan bars, and the two facts a card carries (duration, clips).
+ */
+/**
+ * Stage-B preview host: the focused card's own-media frames, moved
+ * into this layer (appendChild — the preview cache keeps the canvas
+ * references; on unmount they stay parented here and are simply
+ * orphaned if the cache evicts them). With more than one frame the
+ * layer crossfades between them; a single frame is static.
+ */
+function ReelPreviewLayer({ canvases }: { canvases: HTMLCanvasElement[] }) {
+  const hostRef = useRef<HTMLSpanElement | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    host.replaceChildren();
+    canvases.forEach((canvas, i) => {
+      canvas.style.position = 'absolute';
+      canvas.style.inset = '0';
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      canvas.style.objectFit = 'contain';
+      canvas.style.transition = 'opacity 500ms ease';
+      canvas.style.opacity = i === 0 ? '1' : '0';
+      host.appendChild(canvas);
+    });
+    setActiveIndex(0);
+  }, [canvases]);
+
+  useEffect(() => {
+    if (canvases.length <= 1) return;
+    const id = window.setInterval(() => {
+      setActiveIndex((a) => (a + 1) % canvases.length);
+    }, 1400);
+    return () => window.clearInterval(id);
+  }, [canvases]);
+
+  useEffect(() => {
+    canvases.forEach((canvas, i) => {
+      canvas.style.opacity = i === activeIndex ? '1' : '0';
+    });
+  }, [canvases, activeIndex]);
+
+  return <span ref={hostRef} aria-hidden className="absolute inset-0 block" />;
 }
 
-function TemplateSection({
-  title,
-  icon,
-  templates,
-  appliedId,
-  busyId,
-  onApply,
-  emptyText,
-  open,
-  onToggle,
+function ReelTemplateCard({
+  model,
+  focused,
+  applied,
+  previewCanvases,
+  onTap,
+  registerRef,
 }: {
-  title: string;
-  icon: React.ReactNode;
-  templates: StudioTemplate[];
-  appliedId: string | null;
-  busyId: string | null;
-  onApply: (t: StudioTemplate) => void;
-  emptyText: string;
-  open: boolean;
-  onToggle: () => void;
+  model: ReelCardModel;
+  focused: boolean;
+  applied: boolean;
+  previewCanvases?: HTMLCanvasElement[];
+  onTap: () => void;
+  registerRef: (el: HTMLButtonElement | null) => void;
 }) {
+  const { poster } = model;
   return (
-    <div className="flex flex-col gap-1.5">
-      <button
-        onClick={onToggle}
-        aria-expanded={open}
-        className="flex items-center gap-1.5 min-h-10 text-left text-[11px] font-bold uppercase tracking-wider text-white/70 hover:text-white"
-      >
-        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        {icon} {title}
-        <span className="text-white/30 normal-case tracking-normal font-normal">({templates.length})</span>
-      </button>
-      {open &&
-        (templates.length === 0 ? (
-          <p className="text-[11px] text-white/30">{emptyText}</p>
-        ) : (
-          <div className="flex flex-col gap-1.5">
-            {templates.map((t) => (
-              <TemplateRow key={t.id} template={t} applied={appliedId === t.id} busy={busyId === t.id} onApply={onApply} />
-            ))}
-          </div>
-        ))}
-    </div>
-  );
-}
-
-function TemplateRow({ template: t, applied, busy, onApply }: { template: StudioTemplate; applied: boolean; busy: boolean; onApply: (t: StudioTemplate) => void }) {
-  const meta = t.frame
-    ? `${t.durationSeconds}s · Frame ${t.frame.aspect} ${t.frame.stage === 'card' ? '· Card stage' : '· Full-bleed'} · ${t.category}`
-    : `${t.durationSeconds}s · ${t.aspectRatios.join(' ')} · ${t.category}`;
-  return (
-    <div
-      className={`flex items-center gap-2 rounded-xl border bg-white/5 p-1.5 transition ${
-        applied ? 'border-gold ring-1 ring-gold/60' : 'border-white/10'
+    <button
+      type="button"
+      ref={registerRef}
+      data-reel-card={model.id}
+      onClick={onTap}
+      aria-pressed={focused}
+      aria-label={`${model.name} — ${model.kindLabel}, ${model.durationLabel}`}
+      className={`relative shrink-0 overflow-hidden rounded-xl text-left ${
+        focused ? 'ring-2 ring-gold' : 'ring-1 ring-white/15'
       }`}
-    >
-      <TemplateRowThumb template={t} applied={applied} />
-      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-        <span className="font-bold text-xs leading-tight truncate" style={{ color: t.accentColor }}>{t.name}</span>
-        <span className="text-[10px] text-white/45 leading-tight truncate">{meta}</span>
-        {t.kind === 'full' && t.slots ? (
-          <span className="text-[9px] text-white/30 leading-tight truncate">{t.slots.map((s) => s.name).join(' → ')}</span>
-        ) : (
-          <span className="text-[9px] text-white/30 leading-tight truncate">{t.description}</span>
-        )}
-
-      </div>
-      <button
-        onClick={() => onApply(t)}
-        disabled={busy}
-        className={`shrink-0 min-h-10 px-3 rounded-full text-[11px] font-bold flex items-center gap-1 transition disabled:opacity-60 ${
-          applied ? 'bg-gold/15 text-gold border border-gold/50' : 'bg-gold hover:bg-gold-bright text-black'
-        }`}
-      >
-        {busy ? <Loader2 size={12} className="animate-spin" /> : applied ? <Check size={12} strokeWidth={3} /> : null}
-        {busy ? 'Applying…' : applied ? 'Applied' : 'Apply'}
-      </button>
-    </div>
-  );
-}
-
-function TemplateRowThumb({ template, applied }: { template: StudioTemplate; applied: boolean }) {
-  if (template.thumbnail) {
-    return (
-      <span className="relative block w-24 h-14 shrink-0 overflow-hidden rounded-lg bg-black">
-        <img src={template.thumbnail} alt="" loading="lazy" className="absolute inset-0 w-full h-full object-cover" />
-        {applied && (
-          <span className="absolute top-1 right-1 flex items-center justify-center w-4 h-4 rounded-full bg-gold text-black">
-            <Check size={10} strokeWidth={3.5} />
-          </span>
-        )}
-      </span>
-    );
-  }
-  const initials = template.name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w[0])
-    .join('')
-    .toUpperCase();
-  return (
-    <span
-      className="relative block w-24 h-14 shrink-0 overflow-hidden rounded-lg"
       style={{
-        background:
-          'radial-gradient(circle at 85% 15%, rgba(255,209,0,0.16) 0, transparent 45%), radial-gradient(circle at 10% 90%, rgba(255,138,0,0.10) 0, transparent 50%), linear-gradient(135deg, #161616 0%, #0a0a0a 100%)',
+        width: REEL_LAYOUT.cardWidth,
+        height: REEL_LAYOUT.cardHeight,
+        scrollSnapAlign: 'start',
       }}
     >
-      <span className="absolute inset-0 flex items-center justify-center font-black tracking-tight text-lg" style={{ color: template.accentColor }}>
-        {initials}
-      </span>
-      {applied && (
-        <span className="absolute top-1 right-1 flex items-center justify-center w-4 h-4 rounded-full bg-gold text-black">
-          <Check size={10} strokeWidth={3.5} />
+      {/* Poster base — the grade treats this layer only. */}
+      <span
+        aria-hidden
+        className="absolute inset-0 block"
+        style={{
+          background: poster.gradientCss,
+          ...(poster.gradeFilter ? { filter: poster.gradeFilter } : {}),
+        }}
+      />
+      {poster.headline && (
+        <span
+          aria-hidden
+          className="absolute inset-x-1 text-center text-[11px] leading-tight line-clamp-3"
+          style={{
+            top: '30%',
+            fontFamily: poster.headline.fontFamily,
+            fontWeight: poster.headline.fontWeight,
+            color: poster.headline.color,
+            textTransform: poster.headline.uppercase ? 'uppercase' : 'none',
+          }}
+        >
+          {poster.headline.text}
         </span>
       )}
-    </span>
+
+      {/* Stage-B own-media preview: above the poster, below every
+          overlay/chip; only ever on the focused card. */}
+      {focused && previewCanvases && previewCanvases.length > 0 && (
+        <ReelPreviewLayer canvases={previewCanvases} />
+      )}
+
+      {/* Kind glyph, top-left. */}
+      <span className="absolute left-1 top-1 flex items-center justify-center rounded-full bg-black/55 p-1 text-white/85">
+        {model.kind === 'hook' ? <Sparkles size={11} /> : <Clapperboard size={11} />}
+      </span>
+
+      {/* Top-right stack: applied check, then duration, then frame. */}
+      <span className="absolute right-1 top-1 flex flex-col items-end gap-1">
+        {applied && (
+          <span className="flex items-center justify-center rounded-full bg-gold p-1 text-black">
+            <Check size={11} strokeWidth={3.5} />
+          </span>
+        )}
+        <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[9px] font-bold text-white/85">{model.durationLabel}</span>
+        {model.frameAspect && (
+          <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[9px] font-bold text-white/85">{model.frameAspect}</span>
+        )}
+      </span>
+
+      {/* Bottom stack: slot bars over the name overlay. */}
+      <span className="absolute inset-x-0 bottom-0 flex flex-col gap-1 bg-gradient-to-t from-black/75 via-black/35 to-transparent px-1.5 pb-1.5 pt-4">
+        {poster.slotSegments.length > 0 && (
+          <span aria-hidden className="flex gap-px">
+            {poster.slotSegments.map((seg) => (
+              <span
+                key={seg.name}
+                className="block h-[3px] rounded-full"
+                style={{
+                  flexGrow: seg.fraction,
+                  flexBasis: '0%',
+                  background: model.accentColor,
+                  opacity: 0.45 + 0.55 * seg.fraction,
+                }}
+              />
+            ))}
+          </span>
+        )}
+        <span className="truncate text-[10px] font-bold leading-tight" style={{ color: model.accentColor }}>
+          {model.name}
+        </span>
+        <span className="flex items-center justify-between gap-1">
+          <span className="truncate text-[8.5px] leading-tight text-white/60">
+            {model.kindLabel}
+            {model.slotCount ? ` · ${model.slotCount} clips` : ''}
+          </span>
+          {focused &&
+            (applied ? (
+              <span className="shrink-0 rounded-full border border-gold/50 bg-gold/15 px-1.5 py-0.5 text-[9px] font-bold text-gold">Applied</span>
+            ) : (
+              <span className="shrink-0 rounded-full bg-gold px-1.5 py-0.5 text-[9px] font-bold text-black">Apply</span>
+            ))}
+        </span>
+      </span>
+    </button>
   );
 }

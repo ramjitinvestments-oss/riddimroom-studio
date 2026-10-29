@@ -170,9 +170,13 @@ describe('templates v2 — full apply', () => {
     const video = next.items.find((i) => i.type === 'video');
     // First clip takes the first slot's motion (Intro = ken-burns) and the template transition.
     expect(video?.type === 'video' ? video.motion?.type : undefined).toBe('ken-burns');
-    // v3 re-map: music-video's transition is now the premium film-burn
-    // (the v2 assertion pinned whip-pan; the mapping changed by design).
-    expect(video?.type === 'video' ? video.animation?.entrance : undefined).toBe('film-burn');
+    // R37: music-video carries a per-slot transition sequence — the
+    // first clip enters through the Intro slot's 'smoke'; as the only
+    // slotted item its exit falls back to the template default
+    // 'film-burn' (the v3 premium transition this assertion pinned
+    // before per-slot sequences existed).
+    expect(video?.type === 'video' ? video.animation?.entrance : undefined).toBe('smoke');
+    expect(video?.type === 'video' ? video.animation?.exit : undefined).toBe('film-burn');
 
     // Placeholders: headline + sub + outro added.
     const texts = next.items.filter((i) => i.type === 'text').map((i) => (i.type === 'text' ? i.text : ''));
@@ -358,10 +362,15 @@ describe('templates v3 — real slot trims', () => {
     expect(videos.map((i) => Math.round((i.endTime - i.startTime) * 100) / 100)).toEqual([3, 6, 4, 2, 2, 2]);
     expect(videos.map((i) => i.startTime)).toEqual([0, 3, 9, 13, 15, 17]);
     expect(result.reelEndSeconds).toBeCloseTo(19, 6);
-    // The extra items still get the template grade + transition.
+    // The extra items still get the template grade. Entrances follow
+    // the R37 per-slot transition sequence (Problem shake → Hero
+    // dip-to-gold → Offer pop → CTA flash); extras beyond the slot
+    // count clamp to the last slot, so they enter on 'flash' too.
+    expect(videos.map((v) => (v.type === 'video' ? v.animation?.entrance : undefined))).toEqual([
+      'shake', 'dip-to-gold', 'pop', 'flash', 'flash', 'flash',
+    ]);
     for (const v of videos) {
       expect(v.type === 'video' ? v.colorGrade : undefined).toEqual(getGradePreset('clean-commercial')!.grade);
-      expect(v.type === 'video' ? v.animation?.entrance : undefined).toBe('dip-to-gold');
     }
   });
 

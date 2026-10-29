@@ -56,6 +56,8 @@ export interface TemplateSlot {
   durationSeconds: number;
   /** Motion effect id from `lib/motionEffects.ts` ('none' allowed). */
   motion: string;
+  /** Transition preset id from `lib/transitions.ts` — the transition INTO this slot; absent = the template's default. */
+  transition?: string;
 }
 
 /** One text element a hook inserts into the open project. Times are offsets from the insertion point. */
@@ -238,11 +240,11 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     suggestedLoopId: 'dancehall-riddim',
     grade: 'vivid-party',
     slots: [
-      { name: 'Hook', durationSeconds: 3, motion: 'punch-zoom' },
-      { name: 'Setup', durationSeconds: 6, motion: 'dynamic-zoom' },
-      { name: 'Build', durationSeconds: 8, motion: 'parallax' },
-      { name: 'Payoff', durationSeconds: 8, motion: 'slow-zoom-in' },
-      { name: 'CTA', durationSeconds: 5, motion: 'product-focus' },
+      { name: 'Hook', durationSeconds: 3, motion: 'punch-zoom', transition: 'snap-zoom' },
+      { name: 'Setup', durationSeconds: 6, motion: 'dynamic-zoom', transition: 'pop' },
+      { name: 'Build', durationSeconds: 8, motion: 'parallax', transition: 'whip-pan' },
+      { name: 'Payoff', durationSeconds: 8, motion: 'slow-zoom-in', transition: 'cross-zoom' },
+      { name: 'CTA', durationSeconds: 5, motion: 'product-focus', transition: 'dip-to-gold' },
     ],
     headlineText: 'WATCH THIS', subText: "You won't believe the end", ctaText: 'FOLLOW FOR MORE',
   },
@@ -255,11 +257,11 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     suggestedLoopId: 'soca-groove',
     grade: 'moody-noir',
     slots: [
-      { name: 'Intro', durationSeconds: 5, motion: 'ken-burns' },
-      { name: 'Verse', durationSeconds: 12, motion: 'parallax' },
-      { name: 'Chorus', durationSeconds: 12, motion: 'dynamic-zoom' },
-      { name: 'Bridge', durationSeconds: 8, motion: 'slow-zoom-out' },
-      { name: 'Outro', durationSeconds: 8, motion: 'vignette' },
+      { name: 'Intro', durationSeconds: 5, motion: 'ken-burns', transition: 'smoke' },
+      { name: 'Verse', durationSeconds: 12, motion: 'parallax', transition: 'film-dissolve' },
+      { name: 'Chorus', durationSeconds: 12, motion: 'dynamic-zoom', transition: 'film-burn' },
+      { name: 'Bridge', durationSeconds: 8, motion: 'slow-zoom-out', transition: 'luma-fade' },
+      { name: 'Outro', durationSeconds: 8, motion: 'vignette', transition: 'dip-to-black' },
     ],
     headlineText: 'YOUR SONG TITLE', subText: 'ARTIST NAME', outroText: 'STREAMING EVERYWHERE',
   },
@@ -272,10 +274,10 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     suggestedLoopId: 'chill-island',
     grade: 'clean-commercial',
     slots: [
-      { name: 'Problem', durationSeconds: 3, motion: 'subtle-shake' },
-      { name: 'Product Hero', durationSeconds: 6, motion: 'product-focus' },
-      { name: 'Offer', durationSeconds: 4, motion: 'punch-zoom' },
-      { name: 'CTA', durationSeconds: 2, motion: 'flash' },
+      { name: 'Problem', durationSeconds: 3, motion: 'subtle-shake', transition: 'shake' },
+      { name: 'Product Hero', durationSeconds: 6, motion: 'product-focus', transition: 'dip-to-gold' },
+      { name: 'Offer', durationSeconds: 4, motion: 'punch-zoom', transition: 'pop' },
+      { name: 'CTA', durationSeconds: 2, motion: 'flash', transition: 'flash' },
     ],
     headlineText: 'NEW DROP', subText: 'Premium quality. Limited run.', ctaText: 'SHOP NOW — LINK IN BIO',
   },
@@ -306,10 +308,10 @@ export const STUDIO_TEMPLATES: StudioTemplate[] = [
     suggestedLoopId: 'soca-groove',
     grade: 'vivid-party',
     slots: [
-      { name: 'Hype Open', durationSeconds: 4, motion: 'dynamic-zoom' },
-      { name: 'Lineup', durationSeconds: 6, motion: 'punch-zoom' },
-      { name: 'Details', durationSeconds: 6, motion: 'subtle-shake' },
-      { name: 'CTA', durationSeconds: 4, motion: 'flash' },
+      { name: 'Hype Open', durationSeconds: 4, motion: 'dynamic-zoom', transition: 'flash' },
+      { name: 'Lineup', durationSeconds: 6, motion: 'punch-zoom', transition: 'mask-reveal' },
+      { name: 'Details', durationSeconds: 6, motion: 'subtle-shake', transition: 'heartbeat' },
+      { name: 'CTA', durationSeconds: 4, motion: 'flash', transition: 'snap-zoom' },
     ],
     headlineText: 'THE BIG PARTY', subText: 'SAT NIGHT • YOUR VENUE', ctaText: 'GET YOUR TICKETS',
   },

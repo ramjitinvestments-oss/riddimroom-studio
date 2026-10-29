@@ -495,6 +495,10 @@ function EditorInner({ uid }: { uid: string }) {
         />
       </PanelGroup>
 
+      <PanelGroup title="Templates" {...groupProps('templates')}>
+        <TemplatesPanel currentTime={currentTime} uid={uid} />
+      </PanelGroup>
+
       <PanelGroup title={selectedItem ? 'Selected item' : 'Text & watermark'} {...groupProps('item')}>
         {selectedItem ? (
           <ItemInspector item={selectedItem} />
