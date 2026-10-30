@@ -11,6 +11,13 @@ describe('licensing plan limits', () => {
     expect(getPlanLimits('lifetime').watermark).toBe(false);
   });
 
+  it('templates are not a tier differentiator — no plan carries a templates distinction (R39)', () => {
+    // Owner decision 2026-10-30: every tier gets all templates. The plan
+    // model must not reintroduce a curated/all split the app doesn't enforce.
+    expect('templates' in getPlanLimits('free')).toBe(false);
+    expect('templates' in getPlanLimits('lifetime')).toBe(false);
+  });
+
   it('maxProjectSecondsFor is the one derivation the export gate consumes (R35)', () => {
     expect(maxProjectSecondsFor('free')).toBe(30);
     expect(maxProjectSecondsFor('lifetime')).toBe(600);

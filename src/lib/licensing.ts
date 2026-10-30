@@ -37,13 +37,16 @@ export interface PlanLimits {
   dailyTranscriptions: number;
   dailyExports: number; // Number.POSITIVE_INFINITY = unlimited
   watermark: boolean;
-  templates: 'curated' | 'all';
   label: string;
 }
 
+// Templates are NOT a tier differentiator (owner decision 2026-10-30, R39):
+// every tier gets all templates — TemplatesPanel has never tier-gated, and
+// the plan copy must not sell template access as a Lifetime benefit. Do not
+// re-add a templates field here.
 export const PLAN_LIMITS: Record<LicenseTier, PlanLimits> = {
-  free: { maxProjectSeconds: 30, dailyTranscriptions: 2, dailyExports: 3, watermark: true, templates: 'curated', label: 'Free' },
-  lifetime: { maxProjectSeconds: 600, dailyTranscriptions: 10, dailyExports: Number.POSITIVE_INFINITY, watermark: false, templates: 'all', label: 'Lifetime' },
+  free: { maxProjectSeconds: 30, dailyTranscriptions: 2, dailyExports: 3, watermark: true, label: 'Free' },
+  lifetime: { maxProjectSeconds: 600, dailyTranscriptions: 10, dailyExports: Number.POSITIVE_INFINITY, watermark: false, label: 'Lifetime' },
 };
 
 export function getPlanLimits(tier: LicenseTier): PlanLimits {

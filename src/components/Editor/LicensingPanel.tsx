@@ -83,7 +83,7 @@ export function LicensingPanel() {
       )}
       <ul className="text-xs text-white/60 space-y-1">
         <li>• Free: projects up to 30 seconds · {remaining === null ? '—' : `${remaining} export${remaining === 1 ? '' : 's'} left today`} · 2 transcriptions/day · watermark on</li>
-        <li>• Lifetime — $35 one-time: projects up to 10 minutes · 10 transcriptions/day · unlimited exports · no watermark · all templates</li>
+        <li>• Lifetime — $35 one-time: projects up to 10 minutes · 10 transcriptions/day · unlimited exports · no watermark</li>
       </ul>
       {!isPaid && (
         <>
@@ -98,7 +98,7 @@ export function LicensingPanel() {
           {checkoutUrl && <p className="text-xs text-white/70"><a className="underline" href={checkoutUrl} target="_blank" rel="noreferrer">Continue to checkout</a></p>}
         </>
       )}
-      {isPaid && <p className="text-xs text-emerald-400">Lifetime unlocked — no watermark, full templates, projects up to 10 minutes.</p>}
+      {isPaid && <p className="text-xs text-emerald-400">Lifetime unlocked — no watermark, projects up to 10 minutes.</p>}
       <label className="flex items-center gap-2 text-xs text-white/70">
         <input type="checkbox" checked={project?.watermarkEnabled !== false} onChange={(e) => handleToggleWatermark(e.target.checked)} disabled={!isPaid} />
         Show “RiddimRoom Studio” watermark on exports {isPaid ? '' : '(Lifetime only — free exports always show it)'}
