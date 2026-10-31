@@ -543,6 +543,26 @@ export const PAIR_BALANCE_PRESETS = {
 
 export type PairBalancePresetId = keyof typeof PAIR_BALANCE_PRESETS;
 
+/**
+ * R40 P-25 — which balance preset (if any) a pair's current volumes
+ * match, so the preset buttons can show their selected state. Only
+ * video members carry volume; image members are ignored, exactly as
+ * applyPairBalance ignores them. A small epsilon absorbs slider
+ * rounding. Returns null when the pair matches no preset.
+ */
+export function matchingPairBalancePreset(context: PairContext): PairBalancePresetId | null {
+  const EPSILON = 0.01;
+  for (const presetId of Object.keys(PAIR_BALANCE_PRESETS) as PairBalancePresetId[]) {
+    const preset = PAIR_BALANCE_PRESETS[presetId];
+    const mainOk =
+      context.main.type !== 'video' || Math.abs(context.main.volume - preset.main) < EPSILON;
+    const secondOk =
+      context.second.type !== 'video' || Math.abs(context.second.volume - preset.second) < EPSILON;
+    if (mainOk && secondOk) return presetId;
+  }
+  return null;
+}
+
 /** Apply a balance preset to a pair's video members (images carry no volume). */
 export function applyPairBalance(
   project: Project,

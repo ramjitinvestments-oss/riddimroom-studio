@@ -138,7 +138,7 @@ export function PipRingControls({
               key={chip.id}
               onClick={() => onPatch(pipRingPatch(pip, chip.id))}
               aria-pressed={active === chip.id}
-              className={`flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold uppercase rounded min-h-9 ${
+              className={`flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold uppercase rounded min-h-11 ${
                 active === chip.id ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
               }`}
             >
@@ -173,7 +173,7 @@ export function PipRingControls({
               key={color}
               onClick={() => onPatch({ glowColor: color })}
               aria-pressed={glowColor === color}
-              className={`flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold uppercase rounded min-h-9 ${
+              className={`flex items-center gap-1.5 px-2 py-1 text-[10px] font-bold uppercase rounded min-h-11 ${
                 glowColor === color ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
               }`}
             >

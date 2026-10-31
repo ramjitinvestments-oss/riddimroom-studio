@@ -29,18 +29,22 @@ function byId(id: string): StudioTemplate {
 }
 
 describe('R37 reelMeta — layout budget', () => {
-  it('exposes the plan geometry and computes the 236px chooser height', () => {
+  it('exposes the plan geometry and computes the 268px chooser height', () => {
+    // R40 re-derived: chips are 44px targets (the 44px accessibility
+    // standard, P-34) and the two-tap hint line sits inside the
+    // chooser budget (P-40): 20 + 8 + 44 + 8 + 164 + 8 + 16 = 268.
     expect(REEL_LAYOUT).toMatchObject({
       cardWidth: 88,
       cardHeight: 156,
-      chipsHeight: 36,
+      chipsHeight: 44,
       headerHeight: 20,
+      hintHeight: 16,
       gap: 8,
       stripPaddingY: 4,
     });
     expect(REEL_STRIP_HEIGHT).toBe(164);
-    expect(reelChooserHeight()).toBe(236);
-    expect(reelChooserHeight()).toBeLessThanOrEqual(260);
+    expect(reelChooserHeight()).toBe(268);
+    expect(reelChooserHeight()).toBeLessThanOrEqual(268);
   });
 });
 

@@ -15,8 +15,9 @@ import {
   type ExportQualityTier,
   type ExportResolutionId,
 } from '../../lib/export/quality';
-import { canExportToday, exportsRemainingToday, recordExport } from '../../lib/licensing';
+import { canExportToday, exportsRemainingLabel, recordExport } from '../../lib/licensing';
 import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
+import { requestOpenPlan } from '../../lib/upgradeRequest';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { buildProducerReport, type LoudnessReading } from '../../lib/export/producerReport';
 import { ensureFontsLoaded, fontsUsedInProject } from '../../lib/fonts';
@@ -113,7 +114,6 @@ export function ExportPanel() {
   // Effective tier (server profile when the API answered; admin-grant
   // fallback on builds without /api/*) — see hooks/useLicenseTier.
   const { tier } = useLicenseTier();
-  const remaining = user ? exportsRemainingToday(user.uid, tier) : 0;
   const canExport = user ? canExportToday(user.uid, tier) : false;
   // R35: the tier duration gate (Free 30s / Lifetime 600s, main-track
   // measure) — evaluated on every render for the proactive line below
@@ -141,7 +141,7 @@ export function ExportPanel() {
       return;
     }
     if (user && !canExportToday(user.uid, tier)) {
-      setError(`Daily export limit reached (${tier === 'lifetime' ? 'lifetime' : 'free'} plan). Upgrade to Lifetime for more exports.`);
+      setError('Daily export limit reached (Free plan). Lifetime gives you unlimited exports.');
       setStatus('error');
       return;
     }
@@ -326,18 +326,35 @@ export function ExportPanel() {
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">Export</h3>
-      <p className="text-[11px] text-white/40">
-        {user
-          ? Number.isFinite(remaining)
-            ? `${remaining} export${remaining === 1 ? '' : 's'} left today (${tier === 'lifetime' ? 'Lifetime' : 'Free'})`
-            : 'Unlimited exports (Lifetime)'
-          : 'Sign in to export.'}
-        {project.watermarkEnabled !== false ? ' · Watermark on (free).' : ' · No watermark.'}
+      <p className="text-[11px] text-white/60">
+        {user ? exportsRemainingLabel(user.uid, tier) : 'Sign in to export.'}
+        {project.watermarkEnabled !== false ? ' · Watermark: on' : ' · Watermark: off'}
       </p>
       {durationGate && (tier === 'free' || durationGate.exceedsCap) && (
-        <p className={`text-[11px] ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/40'}`}>
+        <p className={`text-[11px] ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/60'}`}>
           {durationGate.indicator}
         </p>
+      )}
+      {/* R40 P-19: the walls carry their own gold button to the plan
+          surface (Step 3's plan card) — never just words about one. */}
+      {durationGate?.exceedsCap && tier === 'free' && (
+        <button
+          onClick={requestOpenPlan}
+          className="w-full min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black"
+        >
+          Upgrade to Lifetime
+        </button>
+      )}
+      {user && !canExport && tier === 'free' && (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[11px] font-bold text-amber-300">Daily export limit reached — Lifetime gives you unlimited exports.</p>
+          <button
+            onClick={requestOpenPlan}
+            className="w-full min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black"
+          >
+            Upgrade to Lifetime
+          </button>
+        </div>
       )}
 
       {/* v9: the three export pickers as dropdowns — one row each. */}
@@ -391,7 +408,7 @@ export function ExportPanel() {
             </option>
           ))}
         </select>
-        <span className="text-[10px] text-white/30">
+        <span className="text-[10px] text-white/60">
           {resolved.height === 1080 ? 'Full HD' : resolved.height === 720 ? 'HD' : 'Original size'} · {resolved.frameRate} frames per second · smooth for TikTok and Reels{' '}
           <span className="text-white/25">({resolved.width}×{resolved.height})</span>
         </span>
@@ -410,7 +427,7 @@ export function ExportPanel() {
           <div className="w-full h-2 bg-white/10 rounded overflow-hidden">
             <div className="h-full bg-gold transition-all" style={{ width: `${Math.round((progress?.fraction ?? 0) * 100)}%` }} />
           </div>
-          <p className="text-[10px] text-white/40">
+          <p className="text-[10px] text-white/60">
             {progress ? `Rendering… ${progress.renderedSeconds.toFixed(1)}s / ${progress.totalSeconds.toFixed(1)}s` : 'Starting…'}
           </p>
           <button onClick={handleCancel} className="min-h-11 text-[10px] text-white/40 hover:text-white/70 underline self-start">
@@ -423,7 +440,7 @@ export function ExportPanel() {
           <div className="w-full h-2 bg-white/10 rounded overflow-hidden">
             <div className="h-full bg-gold transition-all" style={{ width: `${Math.round(convertRatio * 100)}%` }} />
           </div>
-          <p className="text-[10px] text-white/40">Preparing MP4… {Math.round(convertRatio * 100)}%</p>
+          <p className="text-[10px] text-white/60">Preparing MP4… {Math.round(convertRatio * 100)}%</p>
         </div>
       )}
       {status === 'error' && error && <p className="text-xs text-red-400">{error}</p>}
@@ -456,7 +473,7 @@ export function ExportPanel() {
             {captionCopied ? 'Caption copied ✓' : 'Copy caption + hashtags'}
           </button>
           {!canShareFiles && (
-            <p className="text-[10px] text-white/40">
+            <p className="text-[10px] text-white/60">
               This browser can't share files directly — save the MP4, then post it from your gallery or files.
             </p>
           )}
@@ -552,7 +569,7 @@ export function ExportPanel() {
               ))}
             </div>
           )}
-          <p className="text-[10px] text-white/30 leading-snug">
+          <p className="text-[10px] text-white/60 leading-snug">
             Measured from your project and the finished file — hook timing, captions, beat, closing ask, format.
             Posting window tip: Caribbean audiences scroll hardest in the evening and on weekends.
           </p>

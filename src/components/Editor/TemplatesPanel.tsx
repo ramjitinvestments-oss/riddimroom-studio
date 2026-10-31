@@ -292,7 +292,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
               type="button"
               onClick={() => selectChip(c.id)}
               aria-pressed={selected}
-              className={`shrink-0 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] font-bold ${
+              className={`shrink-0 whitespace-nowrap rounded-full px-2.5 min-h-11 inline-flex items-center text-[11px] font-bold ${
                 selected ? 'bg-gold text-black' : 'bg-white/5 border border-white/10 text-white/70'
               }`}
             >
@@ -346,6 +346,9 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         )}
       </div>
 
+      {/* R40 P-40: the two-tap rule, stated once under the strip. */}
+      <p className="text-[11px] leading-4 text-white/60">Tap a card to preview it with your clips — tap again to use it.</p>
+
       {/* Focused-card detail: the facts the old rows carried (name,
           description, slot plan), at the tap point under the strip. */}
       {focusedTemplate && focusedModel && (
@@ -384,19 +387,19 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
           <div className="flex flex-wrap gap-1.5">
             <button
               onClick={() => void doApply(framePrompt, true)}
-              className="min-h-10 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-[11px] font-bold"
+              className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-[11px] font-bold"
             >
               Switch to {framePrompt.frame.aspect} + apply
             </button>
             <button
               onClick={() => void doApply(framePrompt, false)}
-              className="min-h-10 px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-white text-[11px] font-bold"
+              className="min-h-11 px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-white text-[11px] font-bold"
             >
               Apply in current size
             </button>
             <button
               onClick={() => setFramePrompt(null)}
-              className="min-h-10 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
+              className="min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
             >
               Cancel
             </button>
@@ -419,7 +422,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
               <span className="flex-1 min-w-0 truncate text-xs text-white/80">{clip.fileName}</span>
               <button
                 onClick={() => setAdjustTargetId(clip.itemId)}
-                className="shrink-0 min-h-10 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
+                className="shrink-0 min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
               >
                 Adjust crop
               </button>
@@ -427,7 +430,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
           ))}
           <button
             onClick={() => setPendingAdjust(null)}
-            className="self-end min-h-10 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
+            className="self-end min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
           >
             Done
           </button>
@@ -450,7 +453,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
               <span className="flex-1 min-w-0 truncate text-xs text-white/80">{clip.fileName}</span>
               <button
                 onClick={() => setReframeTargetId(clip.itemId)}
-                className="shrink-0 min-h-10 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
+                className="shrink-0 min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
               >
                 Reframe
               </button>
@@ -458,7 +461,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
           ))}
           <button
             onClick={() => setPendingFramed(null)}
-            className="self-end min-h-10 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
+            className="self-end min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
           >
             Done
           </button>

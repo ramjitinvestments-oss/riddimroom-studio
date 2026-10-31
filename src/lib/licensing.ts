@@ -114,3 +114,14 @@ export function exportsRemainingToday(uid: string, tier: LicenseTier): number {
   if (!Number.isFinite(limits.dailyExports)) return Number.POSITIVE_INFINITY;
   return Math.max(0, limits.dailyExports - getExportsToday(uid));
 }
+
+/**
+ * R40 P-20 — the ONLY words a surface may show for exports remaining.
+ * Lifetime is unlimited and is named in words; a raw unlimited count
+ * is never formatted into copy (it reads as a nonsense number).
+ */
+export function exportsRemainingLabel(uid: string, tier: LicenseTier): string {
+  if (tier === 'lifetime') return 'Unlimited exports (Lifetime)';
+  const remaining = exportsRemainingToday(uid, tier);
+  return `${remaining} export${remaining === 1 ? '' : 's'} left today`;
+}

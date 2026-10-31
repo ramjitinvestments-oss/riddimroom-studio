@@ -35,7 +35,7 @@ export function AddTextPanel({ currentTime }: { currentTime: number }) {
           Add
         </button>
       </div>
-      <p className="text-[10px] text-white/30">Inserted at {currentTime.toFixed(1)}s, editable afterward in the inspector.</p>
+      <p className="text-[10px] text-white/60">Inserted at {currentTime.toFixed(1)}s, editable afterward in the inspector.</p>
     </div>
   );
 }

@@ -12,6 +12,7 @@ import { TrimSelectModal } from './TrimSelectModal';
 import { PipAddButtons } from './PipAddButtons';
 import { claimPipRequest, RECORD_PIP_EVENT, UPLOAD_PIP_EVENT } from '../../lib/pipRequests';
 import { defaultSplitOrientation, softInTileWarning } from '../../lib/pairLayout';
+import { humanizeUploadError } from '../../lib/media/uploadErrors';
 
 /**
  * Phase 1 Step 4-5 (Capture + Upload).
@@ -261,7 +262,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         })
         .catch((err: any) => {
           setPending((list) =>
-            list.map((u) => (u.id === uploadId ? { ...u, status: 'error', error: err?.message || 'Upload failed.' } : u)),
+            list.map((u) => (u.id === uploadId ? { ...u, status: 'error', error: humanizeUploadError(err) } : u)),
           );
         });
     },
@@ -275,7 +276,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
       if (!validation.valid) {
         setPending((list) => [
           ...list,
-          { id: uploadId, fileName: file.name, file, progress: 0, status: 'error', error: validation.error },
+          { id: uploadId, fileName: file.name, file, progress: 0, status: 'error', error: humanizeUploadError(validation.error) },
         ]);
         return;
       }
@@ -592,7 +593,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         />
       </div>
 
-      <p className="text-[10px] text-white/30">Videos, songs, and audio are limited to {MAX_MEDIA_SECONDS / 60} minutes per clip.</p>
+      <p className="text-[10px] text-white/60">Videos, songs, and audio are limited to {MAX_MEDIA_SECONDS / 60} minutes per clip.</p>
 
       <div
         onDragOver={(e) => e.preventDefault()}
@@ -600,7 +601,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           e.preventDefault();
           handleFiles(e.dataTransfer.files, 'main');
         }}
-        className="border border-dashed border-white/15 rounded-lg px-4 py-4 text-center text-xs text-white/40"
+        className="border border-dashed border-white/15 rounded-lg px-4 py-4 text-center text-xs text-white/60"
       >
         Drag and drop video, image, or audio files here
       </div>

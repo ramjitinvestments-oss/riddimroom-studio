@@ -348,6 +348,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   const [posterAnalysis, setPosterAnalysis] = useState<ArtworkAnalysis | null>(null);
   const [posterTexts, setPosterTexts] = useState<{ headline: string; sub: string }>({ headline: '', sub: '' });
   const posterTouchedRef = useRef<Set<'headline' | 'sub'>>(new Set());
+  /** R40 P-24: fields the user TYPED themselves (posterTouchedRef also
+      fills when a suggestion cycles, so it cannot tell the two apart). */
+  const posterTypedRef = useRef<Set<'headline' | 'sub'>>(new Set());
   const [posterLayoutChoice, setPosterLayoutChoice] = useState<PosterLayoutChoice>('auto');
   const [posterPurpose, setPosterPurpose] = useState<NoTextPurpose | null>(null);
   const [posterProject, setPosterProject] = useState<Project | null>(null);
@@ -648,6 +651,13 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
   }, [persistFixesSoon]);
 
   const cycleField = useCallback((field: SuggestionField) => {
+    // R40 P-24: a suggestion may only replace words the user did NOT
+    // type themselves. The 'Your words' provenance tag is the guard:
+    // a field tagged 'yours' is skipped and left exactly as written.
+    if (fieldSources[field] === 'yours' && (texts[field] ?? '').trim()) {
+      setAutoNote("That's your own line — left as is");
+      return;
+    }
     const ctx = suggestCtxRef.current;
     if (!ctx) return;
     touchedRef.current.add(field);
@@ -661,7 +671,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       return { ...t, [field]: value };
     });
     persistFixesSoon();
-  }, [persistFixesSoon]);
+  }, [persistFixesSoon, fieldSources, texts]);
 
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     setError(null);
@@ -733,12 +743,18 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
 
   const cyclePosterField = useCallback(
     (field: 'headline' | 'sub') => {
+      // R40 P-24: same rule as the artwork fields — never replace
+      // words the user typed themselves; skip with a brief note.
+      if (posterTypedRef.current.has(field) && posterTexts[field].trim()) {
+        setPosterNote("That's your own line — left as is");
+        return;
+      }
       if (!posterPicked || !posterAnalysis) return;
       posterTouchedRef.current.add(field);
       const alternates = posterAlternates(field, posterCtx(posterPicked, posterAnalysis, posterPurpose));
       setPosterTexts((t) => ({ ...t, [field]: cycleAlternate(alternates, t[field]) }));
     },
-    [posterPicked, posterAnalysis, posterCtx, posterPurpose],
+    [posterPicked, posterAnalysis, posterCtx, posterPurpose, posterTexts],
   );
 
   const handlePosterFile = useCallback(
@@ -2014,11 +2030,12 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 <div key={field}>
                   <div className="relative">
                     <input
-                      className={`${inputCls} pr-10`}
+                      className={`${inputCls} pr-12`}
                       placeholder={placeholder}
                       value={posterTexts[field]}
                       onChange={(e) => {
                         posterTouchedRef.current.add(field);
+                        posterTypedRef.current.add(field);
                         setPosterTexts((t) => ({ ...t, [field]: e.target.value }));
                       }}
                     />
@@ -2027,7 +2044,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                       aria-label={`Another suggestion for the poster ${field}`}
                       title="Another suggestion"
                       onClick={() => cyclePosterField(field)}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
                     >
                       <RefreshCw size={14} />
                     </button>
@@ -2191,7 +2208,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 ).map(([field, placeholder]) => (
                   <div key={field}>
                     <div className="relative">
-                    <input id={`promo-field-${field}`} className={`${inputCls} pr-10`} placeholder={placeholder} value={texts[field] ?? ''}
+                    <input id={`promo-field-${field}`} className={`${inputCls} pr-12`} placeholder={placeholder} value={texts[field] ?? ''}
                       onChange={(e) => {
                         touchedRef.current.add(field);
                         setFieldSources((prev) => ({ ...prev, [field]: 'yours' as const }));
@@ -2203,7 +2220,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                       aria-label={`Another suggestion for ${field}`}
                       title="Another suggestion"
                       onClick={() => cycleField(field)}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
+                      className="absolute right-1 top-1/2 -translate-y-1/2 w-11 h-11 flex items-center justify-center rounded-md text-white/40 hover:text-gold hover:bg-white/10"
                     >
                       <RefreshCw size={14} />
                     </button>

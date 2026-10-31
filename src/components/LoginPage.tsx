@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Mail, Lock, User, ArrowRight, KeyRound, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import BrandLogo from './BrandLogo';
+import { SupportLink } from './SupportLink';
 
 /**
  * Source: riddimroom-caption's src/components/LoginPage.tsx (mode-switching
@@ -12,7 +13,7 @@ import BrandLogo from './BrandLogo';
  * this component now needs to be mountable from either entry point.
  * Validation rules (password length, required fields) are unchanged.
  */
-export function LoginPage() {
+export function LoginPage({ onOpenLegal }: { onOpenLegal?: (path: '/privacy' | '/terms') => void } = {}) {
   const { signInWithGoogle, signInWithEmail, signUpWithEmail, resetPassword, authError, clearAuthError } = useAuth();
   const [mode, setMode] = useState<'login' | 'signup' | 'forgot'>('login');
   const [email, setEmail] = useState('');
@@ -233,6 +234,20 @@ export function LoginPage() {
             </button>
           )}
         </p>
+
+        <footer className="text-center space-y-1 pt-2 border-t border-white/10">
+          <SupportLink />
+          {onOpenLegal && (
+            <p className="flex items-center justify-center gap-4">
+              <button onClick={() => onOpenLegal('/privacy')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
+                Privacy
+              </button>
+              <button onClick={() => onOpenLegal('/terms')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
+                Terms
+              </button>
+            </p>
+          )}
+        </footer>
       </div>
     </div>
   );

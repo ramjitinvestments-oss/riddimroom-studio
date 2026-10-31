@@ -26,6 +26,7 @@ import { addPipOverlay, isPipItem } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
+import { OPEN_PLAN_EVENT, OPEN_PLAN_SESSION_KEY } from '../../lib/upgradeRequest';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 
 /**
@@ -155,6 +156,25 @@ function EditorInner({ uid }: { uid: string }) {
   // one-tap Undo here, auto-dismissing after ~6s.
   const [undoToast, setUndoToast] = useState<string | null>(null);
   const undoToastTimerRef = useRef<number | null>(null);
+  // R40 P-19 — upgrade walls anywhere in the editor dispatch
+  // 'rr:open-plan'; the shell owns the step state, so it listens and
+  // moves to Step 3, where the plan surface (LicensingPanel) mounts.
+  // The dashboard's plan strip uses the session flag instead: it is
+  // set before a project opens and read once here.
+  useEffect(() => {
+    const handler = () => goToStep(3);
+    window.addEventListener(OPEN_PLAN_EVENT, handler);
+    try {
+      if (sessionStorage.getItem(OPEN_PLAN_SESSION_KEY) === '1') {
+        sessionStorage.removeItem(OPEN_PLAN_SESSION_KEY);
+        goToStep(3);
+      }
+    } catch {
+      // Storage unavailable — in-editor walls still work via the event.
+    }
+    return () => window.removeEventListener(OPEN_PLAN_EVENT, handler);
+  }, [goToStep]);
+
   useEffect(() => {
     const handler = (e: Event) => {
       const message = (e as CustomEvent<{ message?: string }>).detail?.message;
@@ -436,7 +456,7 @@ function EditorInner({ uid }: { uid: string }) {
 
       <section className="flex flex-col gap-2">
         <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Media library</h3>
-        {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/30">Nothing uploaded yet — import a clip above and it lands here.</p>}
+        {Object.values(project.mediaAssets).length === 0 && <p className="text-xs text-white/60">Nothing uploaded yet — import a clip above and it lands here.</p>}
         <ul className="flex flex-col gap-1">
           {Object.values(project.mediaAssets)
             // A background-removed asset is a derivative of its original,
@@ -448,7 +468,7 @@ function EditorInner({ uid }: { uid: string }) {
             .map((asset) => (
               <li key={asset.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">
                 <span className="flex-1 truncate">{asset.fileName}</span>
-                <span className="text-white/30 uppercase text-[10px]">{asset.kind}</span>
+                <span className="text-white/60 uppercase text-[10px]">{asset.kind}</span>
                 <button
                   onClick={() => handleAddExistingAssetToTimeline(asset)}
                   className="text-gold hover:text-gold-bright font-bold min-h-11 min-w-11 flex items-center justify-center"
@@ -540,6 +560,13 @@ function EditorInner({ uid }: { uid: string }) {
         <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50 mb-1.5">Export</h3>
         <ExportPanel />
       </section>
+      {/* R40 P-30 — caption files live in Step 3 too, next to Export
+          video, where the Step-1 map promises them. The panel's state
+          is a local message only, so mounting it here as well as in
+          the Step-2 Captions group is safe. */}
+      <section>
+        <CaptionsExportPanel />
+      </section>
       <section>
         <LicensingPanel />
       </section>
@@ -547,7 +574,7 @@ function EditorInner({ uid }: { uid: string }) {
         <h3 className="font-bold text-white text-sm">Project summary</h3>
         <p>Duration: {getProjectDuration(project).toFixed(1)}s</p>
         <p>Items: {project.items.length} · Media: {Object.keys(project.mediaAssets).length}</p>
-        <p>Watermark: {project.watermarkEnabled !== false ? 'On (free)' : 'Off (lifetime)'}</p>
+        <p>Watermark: {project.watermarkEnabled !== false ? 'On' : 'Off'}</p>
       </section>
     </>
   );
@@ -589,7 +616,7 @@ function EditorInner({ uid }: { uid: string }) {
             </button>
           </div>
           {saveError && <span className="text-red-400">{saveError}</span>}
-          <span className="text-white/30">
+          <span className="text-white/60">
             {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved · ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}
           </span>
           <button
@@ -618,7 +645,7 @@ function EditorInner({ uid }: { uid: string }) {
       )}
 
       {tier === 'free' && durationGate && (
-        <p className={`px-3 sm:px-4 py-1.5 text-[11px] border-b border-white/10 shrink-0 ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/40'}`}>
+        <p className={`px-3 sm:px-4 py-1.5 text-[11px] border-b border-white/10 shrink-0 ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/60'}`}>
           {durationGate.indicator}
         </p>
       )}
@@ -641,7 +668,7 @@ function EditorInner({ uid }: { uid: string }) {
             </button>
           </React.Fragment>
         ))}
-        <span className="ml-auto hidden sm:inline text-[11px] text-white/30">
+        <span className="ml-auto hidden sm:inline text-[11px] text-white/60">
           {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, transitions, effects, captions, PiP' : 'Choose format and quality, export, done'}
         </span>
       </nav>

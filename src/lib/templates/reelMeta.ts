@@ -24,14 +24,18 @@ import { getCaptionStyle } from '../captions/styles';
 
 /**
  * Strip geometry (px) — the single source the chooser's height budget
- * is computed from: header 20 + gap 8 + chips 36 + gap 8 + strip 164
- * = 236, inside the plan's ≤260 target (was ≈1,750 for the row list).
+ * is computed from. R40 (P-34/P-40) re-derived it honestly: the chip
+ * row is now 44 (the 44px touch-target standard, was 36) and the
+ * two-tap hint line under the strip is part of the chooser: header 20
+ * + gap 8 + chips 44 + gap 8 + strip 164 + gap 8 + hint 16 = 268.
+ * (Was 236 in R37; ≈1,750 for the old row list.)
  */
 export const REEL_LAYOUT = {
   cardWidth: 88,
   cardHeight: 156,
-  chipsHeight: 36,
+  chipsHeight: 44,
   headerHeight: 20,
+  hintHeight: 16,
   gap: 8,
   stripPaddingY: 4,
 } as const;
@@ -39,14 +43,16 @@ export const REEL_LAYOUT = {
 /** Strip height: one card plus its vertical padding. */
 export const REEL_STRIP_HEIGHT = REEL_LAYOUT.cardHeight + 2 * REEL_LAYOUT.stripPaddingY;
 
-/** Total chooser height implied by REEL_LAYOUT (header + chips + strip + the two gaps). */
+/** Total chooser height implied by REEL_LAYOUT (header + chips + strip + hint + the three gaps). */
 export function reelChooserHeight(): number {
   return (
     REEL_LAYOUT.headerHeight +
     REEL_LAYOUT.gap +
     REEL_LAYOUT.chipsHeight +
     REEL_LAYOUT.gap +
-    REEL_STRIP_HEIGHT
+    REEL_STRIP_HEIGHT +
+    REEL_LAYOUT.gap +
+    REEL_LAYOUT.hintHeight
   );
 }
 

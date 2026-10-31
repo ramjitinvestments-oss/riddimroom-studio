@@ -9,6 +9,7 @@ import { updateItem } from '../../lib/timeline/utils';
 import {
   applyPairBalance,
   getPairContext,
+  matchingPairBalancePreset,
   pairSyncNudgePatch,
   setPairDivider,
   setPairLayout,
@@ -184,7 +185,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
   return (
     <div className="flex flex-col gap-2">
       <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Picture in picture (PiP)</h3>
-      <p className="text-[11px] text-white/40">Talking-head / explainer: overlay a video on top of your main video. Drag + resize on canvas.</p>
+      <p className="text-[11px] text-white/60">Talking-head / explainer: overlay a video on top of your main video. Drag + resize on canvas.</p>
       {pipCount > 0 && <p className="text-[11px] text-emerald-400">{pipCount} overlay{pipCount === 1 ? '' : 's'} on timeline</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
       {/* R36 WS-1 — empty state (no PiP selected): Record PiP and
@@ -199,7 +200,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           {PIP_LAYOUTS.map((l) => (<option key={l.id} value={l.id}>{l.label}</option>))}
         </select>
       </label>
-      {videoAssets.length === 0 && <p className="text-xs text-white/30">Upload or record a video first, then add it as an overlay.</p>}
+      {videoAssets.length === 0 && <p className="text-xs text-white/60">Upload or record a video first, then add it as an overlay.</p>}
       <ul className="flex flex-col gap-1">
         {videoAssets.map((asset) => (
           <li key={asset.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">
@@ -247,7 +248,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           >
             <ArrowLeftRight size={13} /> Swap main ↔ overlay
           </button>
-          <p className="text-[10px] text-white/30 -mt-1">The overlay becomes the full-screen main video; the main video takes its place in the circle. Timing, trim and each clip's own sound stay with the clip.</p>
+          <p className="text-[10px] text-white/60 -mt-1">The overlay becomes the full-screen main video; the main video takes its place in the circle. Timing, trim and each clip's own sound stay with the clip.</p>
           {/* R29 — dual-camera sync nudge: shift the overlay a frame at
               a time against the main clip until lips and sound line up. */}
           <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Line up the sound</span>
@@ -270,7 +271,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
                 : `${syncNudgeFrames > 0 ? '+' : ''}${syncNudgeFrames} frame${Math.abs(syncNudgeFrames) === 1 ? '' : 's'}`}
             </span>
           </div>
-          <p className="text-[10px] text-white/30 -mt-1">Dual-camera recordings can land a few frames off. If the overlay's lips move before you hear the words, tap +; after the words, tap −. Up to {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+          <p className="text-[10px] text-white/60 -mt-1">Dual-camera recordings can land a few frames off. If the overlay's lips move before you hear the words, tap +; after the words, tap −. Up to {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
         </div>
       )}
 
@@ -282,7 +283,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
       {pairCtx && (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
           <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Pair</span>
-          <p className="text-[10px] text-white/30 -mt-1">
+          <p className="text-[10px] text-white/60 -mt-1">
             {pairCtx.layout === 'split'
               ? 'These two clips are side by side as equal halves.'
               : 'These two clips are paired: one full screen, one in the corner.'}{' '}
@@ -358,17 +359,23 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             <>
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Sound balance:</span>
-                {(Object.keys(PAIR_BALANCE_PRESETS) as PairBalancePresetId[]).map((presetId) => (
-                  <button
-                    key={presetId}
-                    onClick={() => withPair((p, ctx) => applyPairBalance(p, ctx, presetId))}
-                    className="min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 text-white transition"
-                  >
-                    {PAIR_BALANCE_LABELS[presetId]}
-                  </button>
-                ))}
+                {(Object.keys(PAIR_BALANCE_PRESETS) as PairBalancePresetId[]).map((presetId) => {
+                  const isActivePreset = matchingPairBalancePreset(pairCtx) === presetId;
+                  return (
+                    <button
+                      key={presetId}
+                      onClick={() => withPair((p, ctx) => applyPairBalance(p, ctx, presetId))}
+                      aria-pressed={isActivePreset}
+                      className={`min-h-11 px-3 rounded-lg text-xs font-bold uppercase tracking-wide transition ${
+                        isActivePreset ? 'bg-gold text-black' : 'bg-white/10 hover:bg-white/20 text-white'
+                      }`}
+                    >
+                      {PAIR_BALANCE_LABELS[presetId]}
+                    </button>
+                  );
+                })}
               </div>
-              <p className="text-[10px] text-white/30 -mt-1">Scene = main clip · You = the overlay clip</p>
+              <p className="text-[10px] text-white/60 -mt-1">Scene = main clip · You = the overlay clip</p>
             </>
           )}
           <label className="flex items-center gap-2 text-xs text-white/60">
@@ -380,7 +387,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             />
             Match clips — pull the second clip's colour toward the first
           </label>
-          {matchBusy && <p className="text-[10px] text-white/30 -mt-1">Reading both clips…</p>}
+          {matchBusy && <p className="text-[10px] text-white/60 -mt-1">Reading both clips…</p>}
           {matchError && <p className="text-xs text-red-400">{matchError}</p>}
           {/* Line up the sound for a split pair: the second tile is
               not a PiP, so the pair nudge lives here. (For a Corner
@@ -458,7 +465,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
                 onPatch={(p) => patchSelectedPip({ pip: { ...selectedPip.pip!, ...p } })}
               />
               {selectedPip.pip.fit === 'source' && selectedPip.pip.shape !== 'circle' && (
-                <p className="text-[10px] text-white/30 -mt-1">Camera framing: the whole recording is shown (head-and-shoulders). The Circle shape crops to a square, as before.</p>
+                <p className="text-[10px] text-white/60 -mt-1">Camera framing: the whole recording is shown (head-and-shoulders). The Circle shape crops to a square, as before.</p>
               )}
             </>
           )}
@@ -500,7 +507,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             />
           </label>
           {!canPanX && !canPanY && cropZoom === 1 && (
-            <p className="text-[10px] text-white/30 -mt-1">The frame fills the box exactly at 1× — zoom in to pan, or the box already shows the whole width/height.</p>
+            <p className="text-[10px] text-white/60 -mt-1">The frame fills the box exactly at 1× — zoom in to pan, or the box already shows the whole width/height.</p>
           )}
           {framingModified && (
             <button
@@ -522,7 +529,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
           <span className="font-bold uppercase tracking-wide text-white/40 text-xs flex items-center gap-1.5">
             {selectedPip.muted ? <VolumeX size={13} className="text-gold" /> : <Volume2 size={13} />} Overlay audio
           </span>
-          <p className="text-[11px] text-white/35 -mt-1">This overlay clip’s own sound only — separate from the main video’s audio. Raise it to hear a talking head over the main clip.</p>
+          <p className="text-[11px] text-white/60 -mt-1">This overlay clip’s own sound only — separate from the main video’s audio. Raise it to hear a talking head over the main clip.</p>
           <div className="flex items-center gap-2 text-xs text-white/60">
             <label className="flex flex-col gap-1 flex-1">
               Volume ({Math.round(selectedPip.volume * 100)}%)
@@ -543,10 +550,10 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
         </div>
       ) : (
         pipCount > 0 && (
-          <p className="text-[10px] text-white/30">Select a PiP clip on the timeline to set its volume here — each overlay has its own sound level. Uploaded overlays start muted; camera overlays start with sound on.</p>
+          <p className="text-[10px] text-white/60">Select a PiP clip on the timeline to set its volume here — each overlay has its own sound level. Uploaded overlays start muted; camera overlays start with sound on.</p>
         )
       )}
-      <p className="text-[10px] text-white/30">Tip: overlays keep their own volume in preview and export — set it under Overlay audio above, in the inspector, or with the mute button on the timeline clip.</p>
+      <p className="text-[10px] text-white/60">Tip: overlays keep their own volume in preview and export — set it under Overlay audio above, in the inspector, or with the mute button on the timeline clip.</p>
     </div>
   );
 }

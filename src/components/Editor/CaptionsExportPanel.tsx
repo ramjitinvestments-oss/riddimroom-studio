@@ -135,11 +135,11 @@ export function CaptionsExportPanel() {
       )}
       <div className="flex gap-2">
         <button onClick={() => handleExport('srt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-11 inline-flex flex-col items-start justify-center gap-0.5">
-          <span>Export SRT</span>
+          <span>Download captions (SRT)</span>
           <span className="text-[10px] font-normal normal-case text-white/50">Caption file — works on YouTube</span>
         </button>
         <button onClick={() => handleExport('vtt')} disabled={!hasCues} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 min-h-11 inline-flex flex-col items-start justify-center gap-0.5">
-          <span>Export VTT</span>
+          <span>Download captions (VTT)</span>
           <span className="text-[10px] font-normal normal-case text-white/50">Caption file — works on web players</span>
         </button>
         <button onClick={() => fileInputRef.current?.click()} className="px-3 py-2 rounded bg-white/10 hover:bg-white/20 text-xs font-bold min-h-11 inline-flex items-center">Import captions</button>
@@ -156,7 +156,7 @@ export function CaptionsExportPanel() {
           if (file) void handleImportFile(file);
         }}
       />
-      <p className="text-[11px] text-white/30">Import an .srt or .ass file — it replaces the current captions and stays fully editable.</p>
+      <p className="text-[11px] text-white/60">Import an .srt or .ass file — it replaces the current captions and stays fully editable.</p>
       {message && <p className="text-[11px] text-emerald-400">{message}</p>}
       {importError && <p className="text-[11px] text-red-400">{importError}</p>}
     </div>

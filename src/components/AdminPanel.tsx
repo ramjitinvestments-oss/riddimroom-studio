@@ -45,6 +45,14 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [busyUid, setBusyUid] = useState<string | null>(null);
+  // R40 P-29: waiting-only view — one tap shows just the pending rows.
+  const [waitingOnly, setWaitingOnly] = useState(false);
+  // R40 P-21: an access change never fires on the switch tap itself —
+  // it waits here for the confirm dialog's answer first.
+  const [confirmAccess, setConfirmAccess] = useState<{
+    row: AdminUserRow;
+    access: AdminUserRow['accessState'];
+  } | null>(null);
 
   const load = useCallback(async () => {
     if (!idToken) return;
@@ -74,12 +82,14 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
 
   const visible = useMemo(() => {
     if (!users) return null;
+    let list = users;
+    if (waitingOnly) list = list.filter((u) => u.status === 'pending');
     const q = query.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter(
+    if (!q) return list;
+    return list.filter(
       (u) => u.email.toLowerCase().includes(q) || u.displayName.toLowerCase().includes(q),
     );
-  }, [users, query]);
+  }, [users, query, waitingOnly]);
 
   const setAccess = useCallback(
     async (uid: string, access: AdminUserRow['accessState']) => {
@@ -112,27 +122,22 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
     [idToken, busyUid],
   );
 
+  // R40 P-21: the export is exactly the list the label promises —
+  // the people currently on screen (search + waiting filter applied)
+  // who said yes to marketing emails, name and email only.
   const handleExportEmails = useCallback(() => {
-    if (!users) return;
-    const header = 'email,name,signup date,status,access,marketing opt-in';
-    const lines = users.map((u) =>
-      [
-        csvCell(u.email),
-        csvCell(u.displayName),
-        csvCell(u.createdAt ? new Date(u.createdAt).toISOString() : ''),
-        csvCell(u.status),
-        csvCell(u.accessState),
-        csvCell(u.marketingOptIn ? 'yes' : 'no'),
-      ].join(','),
-    );
+    if (!visible) return;
+    const optedIn = visible.filter((u) => u.marketingOptIn);
+    const header = 'name,email';
+    const lines = optedIn.map((u) => [csvCell(u.displayName), csvCell(u.email)].join(','));
     const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'riddimroom-signups.csv';
+    a.download = 'riddimroom-marketing-emails.csv';
     a.click();
     URL.revokeObjectURL(url);
-  }, [users]);
+  }, [visible]);
 
   return (
     <div className="min-h-screen bg-[#070707] text-white">
@@ -163,17 +168,33 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
           <div className="flex-1" />
           <button
             onClick={handleExportEmails}
-            disabled={!users || users.length === 0}
-            className="flex items-center gap-1.5 px-4 py-2 min-h-[36px] text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
+            disabled={!visible || visible.length === 0}
+            className="flex items-center gap-1.5 px-4 py-2 min-h-11 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
           >
             <Download size={14} /> Export emails (CSV)
           </button>
         </div>
-        <p className="text-xs text-white/40 mb-6">
+        <p className="text-xs text-white/60 mb-4">
           Allow access switches a signup on with the free plan (projects up to 30 seconds, 3 exports a
           day, watermark on). Premium lifts the limits — projects up to 10 minutes, unlimited exports, no watermark. Switching access off returns them to the pending screen — their projects are
-          kept. The export is the marketing list for the Riddim List.
+          kept. Every switch asks you to confirm first. The export gives you name and email for exactly the people on screen who said yes to marketing emails — no one else is in the file.
         </p>
+        <div className="flex flex-wrap items-center gap-2 mb-6">
+          <button
+            onClick={() => setWaitingOnly((v) => !v)}
+            aria-pressed={waitingOnly}
+            className={`px-4 py-2 min-h-11 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide rounded-lg border transition ${
+              waitingOnly
+                ? 'bg-gold/15 border-gold/60 text-gold'
+                : 'bg-white/5 hover:bg-white/10 border-white/10 text-white/70'
+            }`}
+          >
+            Waiting for access
+          </button>
+          {waitingOnly && (
+            <span className="text-xs text-white/60">Showing only the people still waiting for access.</span>
+          )}
+        </div>
 
         <div className="relative mb-4">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
@@ -202,7 +223,11 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
         {visible !== null && visible.length === 0 && (
           <div className="text-center py-16 border border-dashed border-white/10 rounded-xl">
             <p className="text-sm text-white/40">
-              {users && users.length > 0 ? 'No signups match that search.' : 'No signups yet.'}
+              {users && users.length > 0
+                ? waitingOnly
+                  ? 'Nobody is waiting for access in this view.'
+                  : 'No signups match that search.'
+                : 'No signups yet.'}
             </p>
           </div>
         )}
@@ -256,9 +281,9 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                         role="switch"
                         aria-checked={hasAccess}
                         aria-label={`Allow access for ${row.email}`}
-                        onClick={() => setAccess(row.uid, hasAccess ? 'pending' : 'basic')}
+                        onClick={() => setConfirmAccess({ row, access: hasAccess ? 'pending' : 'basic' })}
                         disabled={isBusy}
-                        className={`relative shrink-0 w-14 h-8 rounded-full border transition disabled:opacity-50 ${
+                        className={`relative shrink-0 w-14 h-11 rounded-full border transition disabled:opacity-50 ${
                           hasAccess ? 'bg-gold border-gold' : 'bg-white/10 border-white/20'
                         }`}
                       >
@@ -282,9 +307,9 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                         role="switch"
                         aria-checked={isPremium}
                         aria-label={`Premium for ${row.email}`}
-                        onClick={() => setAccess(row.uid, isPremium ? 'basic' : 'premium')}
+                        onClick={() => setConfirmAccess({ row, access: isPremium ? 'basic' : 'premium' })}
                         disabled={isBusy}
-                        className={`relative shrink-0 w-14 h-8 rounded-full border transition disabled:opacity-50 ${
+                        className={`relative shrink-0 w-14 h-11 rounded-full border transition disabled:opacity-50 ${
                           isPremium ? 'bg-gold border-gold' : 'bg-white/10 border-white/20'
                         }`}
                       >
@@ -311,6 +336,58 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
           </ul>
         )}
       </main>
+
+      {confirmAccess && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => !busyUid && setConfirmAccess(null)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Confirm access change"
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="font-bold text-base">
+              Switch {confirmAccess.row.displayName || confirmAccess.row.email} to{' '}
+              {confirmAccess.access === 'premium'
+                ? 'Premium'
+                : confirmAccess.access === 'basic'
+                  ? 'Basic'
+                  : 'Waiting for access'}
+              ?
+            </h2>
+            <p className="text-sm text-white/60 mt-2">
+              {confirmAccess.access === 'pending'
+                ? 'They go back to the waiting screen. Their projects are kept.'
+                : confirmAccess.access === 'premium'
+                  ? 'Projects up to 10 minutes, unlimited exports, no watermark.'
+                  : 'The free plan: projects up to 30 seconds, 3 exports a day, watermark on.'}
+            </p>
+            <div className="flex gap-2 mt-6">
+              <button
+                onClick={() => setConfirmAccess(null)}
+                disabled={!!busyUid}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const pendingChange = confirmAccess;
+                  setConfirmAccess(null);
+                  void setAccess(pendingChange.row.uid, pendingChange.access);
+                }}
+                disabled={!!busyUid}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
+              >
+                Switch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

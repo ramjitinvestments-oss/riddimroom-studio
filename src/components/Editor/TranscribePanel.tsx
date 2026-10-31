@@ -4,6 +4,7 @@ import { useProject } from '../../context/ProjectContext';
 import { addCaptionItems } from '../../lib/timeline/insert';
 import { messageForNonJsonTranscribeResponse, messageForTranscribeFetchFailure } from '../../lib/transcription/clientErrors';
 import { getItemsByTrackType } from '../../lib/timeline/utils';
+import { requestOpenPlan } from '../../lib/upgradeRequest';
 import type { VideoTimelineItem, AudioTimelineItem } from '../../types/timeline';
 
 /**
@@ -127,19 +128,27 @@ export function TranscribePanel({ uid }: { uid: string }) {
       <h3 className="text-xs font-bold uppercase tracking-wide text-white/50">AI transcription</h3>
       {error && <p className="text-xs text-red-400">{error}</p>}
       {!quotaExhausted && transcriptionsLeft !== null && (
-        <p className="text-xs text-white/40">
+        <p className="text-xs text-white/60">
           {transcriptionsLeft} of {userProfile?.maxFree} transcriptions left today.
         </p>
       )}
       {quotaExhausted && (
-        <p className="text-xs text-amber-400">
-          Daily quota reached ({userProfile?.dailyCount}/{userProfile?.maxFree}).{' '}
-          {onLifetime
-            ? 'Your count resets tomorrow.'
-            : 'Lifetime raises it to 10 a day — $35 one-time. Open Step 3 — Export — to upgrade.'}
-        </p>
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs text-amber-400">
+            Daily quota reached ({userProfile?.dailyCount}/{userProfile?.maxFree}).{' '}
+            {onLifetime ? 'Your count resets tomorrow.' : 'Lifetime raises it to 10 a day — $35 one-time.'}
+          </p>
+          {!onLifetime && (
+            <button
+              onClick={requestOpenPlan}
+              className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black"
+            >
+              Upgrade to Lifetime
+            </button>
+          )}
+        </div>
       )}
-      {transcribableItems.length === 0 && <p className="text-xs text-white/30">Add a video or audio clip first.</p>}
+      {transcribableItems.length === 0 && <p className="text-xs text-white/60">Add a video or audio clip first.</p>}
       <ul className="flex flex-col gap-1">
         {transcribableItems.map(({ item, label }) => (
           <li key={item.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">

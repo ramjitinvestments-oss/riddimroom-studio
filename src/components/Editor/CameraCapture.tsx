@@ -97,6 +97,7 @@ import {
   TWO_PASS_BUTTON_LABEL,
   TWO_PASS_STEP1_HEADING,
   TWO_PASS_STEP2_HEADING,
+  TWO_PASS_ENTRY_TIP,
   TWO_PASS_STEP2_TIP,
   TWO_PASS_WHY_LINE,
   initialTwoPassState,
@@ -2254,7 +2255,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/50">
             <span className="text-6xl font-black text-white tabular-nums">{countdownDisplay}</span>
             <p className="text-[11px] font-bold uppercase tracking-wide text-white/80 text-center px-6">
-              Hold still — recording starts when you are steady
+              Recording hasn&rsquo;t started yet — hold still and it begins on its own
             </p>
             <button
               onClick={completeCountdown}
@@ -2350,6 +2351,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         <div className="flex flex-col items-center gap-1 max-w-md w-full text-center">
           <p className="text-xs font-bold uppercase tracking-wide text-gold">{TWO_PASS_STEP1_HEADING}</p>
           {twoPass.viaDualFallback && <p className="text-[11px] text-white/60">{TWO_PASS_WHY_LINE}</p>}
+          <p className="text-[11px] text-white/60">{TWO_PASS_ENTRY_TIP}</p>
         </div>
       )}
       {(twoPassPhase === 'step2-live' || twoPassPhase === 'step2-review') && (
@@ -2668,6 +2670,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             </button>
           )}
         </div>
+        <p className="text-[10px] text-white/60 text-center max-w-md">
+          Steady start: recording hasn&rsquo;t started during the count — it begins on its own once you hold still.
+        </p>
         {/* R36 WS-4 — proven-smooth suggestion: the last take at this
             camera dropped frames, so the step below is offered with
             a one-tap apply. Shown only while the rough quality is

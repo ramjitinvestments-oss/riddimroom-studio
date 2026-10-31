@@ -5,6 +5,8 @@ import { Check, Trash2, X } from 'lucide-react';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
 import BrandLogo from './BrandLogo';
 import { useLicenseTier } from '../hooks/useLicenseTier';
+import { SupportLink } from './SupportLink';
+import { OPEN_PLAN_SESSION_KEY } from '../lib/upgradeRequest';
 
 /**
  * Phase 1 Step 6 — authenticated home screen. Replaces the placeholder
@@ -19,9 +21,11 @@ interface DashboardProps {
   onOpenAdmin?: () => void;
   /** Viral Promo mode entry point. */
   onOpenPromo?: () => void;
+  /** R40 P-04: opens the public Privacy / Terms pages. */
+  onOpenLegal?: (path: '/privacy' | '/terms') => void;
 }
 
-export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: DashboardProps) {
+export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal }: DashboardProps) {
   const { currentUser, userProfile, signOut } = useAuth();
   const { tier } = useLicenseTier();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -135,7 +139,27 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
           <span className="px-3 py-1.5 rounded-full bg-white/10 border border-white/10 text-xs font-bold">
             Plan: {tier === 'lifetime' ? 'Lifetime' : 'Free'}
           </span>
-          <span className="text-xs text-white/40">Free (Basic): projects up to 30 seconds · 3 exports a day · 2 transcription sessions a day · watermark on · Lifetime: projects up to 10 minutes · Unlimited exports · no watermark · 10 transcriptions a day</span>
+          <span className="text-xs text-white/60">Free (Basic): projects up to 30 seconds · 3 exports a day · 2 transcription sessions a day · watermark on · Lifetime: projects up to 10 minutes · Unlimited exports · no watermark · 10 transcriptions a day</span>
+          {tier !== 'lifetime' && (
+            <button
+              onClick={() => {
+                // R40 P-19: the strip's upgrade button takes the user to
+                // the plan surface (Step 3 of the editor). With projects,
+                // open the most recent one with the plan flag set; with
+                // none, the format picker creates one and lands there.
+                try {
+                  sessionStorage.setItem(OPEN_PLAN_SESSION_KEY, '1');
+                } catch {
+                  // Storage unavailable — the editor still opens.
+                }
+                if (projects && projects.length > 0) onOpenProject(projects[0].id);
+                else setShowRatioPicker(true);
+              }}
+              className="px-4 py-2 min-h-11 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-black"
+            >
+              Upgrade to Lifetime
+            </button>
+          )}
         </div>
         <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6 text-xs text-white/60 space-y-1">
           <p className="font-bold text-white text-sm">How it works</p>
@@ -292,6 +316,20 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo }: Dashboard
             })}
           </ul>
         )}
+
+        <footer className="mt-10 border-t border-white/10 pt-4 flex flex-wrap items-center justify-center gap-x-6 gap-y-1">
+          <SupportLink />
+          {onOpenLegal && (
+            <>
+              <button onClick={() => onOpenLegal('/privacy')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
+                Privacy
+              </button>
+              <button onClick={() => onOpenLegal('/terms')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
+                Terms
+              </button>
+            </>
+          )}
+        </footer>
       </main>
 
       {selectMode && (

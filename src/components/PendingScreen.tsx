@@ -3,6 +3,7 @@ import { doc, updateDoc } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
 import BrandLogo from './BrandLogo';
+import { SupportLink } from './SupportLink';
 
 /**
  * Phase 2 (Plan v5) — the waiting room for a signed-in user whose account
@@ -13,7 +14,7 @@ import BrandLogo from './BrandLogo';
  * users/{uid} doc — firestore.rules freezes only the privileged fields,
  * so this stays a safe client write).
  */
-export function PendingScreen() {
+export function PendingScreen({ onOpenLegal }: { onOpenLegal?: (path: '/privacy' | '/terms') => void } = {}) {
   const { currentUser, userProfile, signOut, refreshUserProfile } = useAuth();
   const email = userProfile?.email || currentUser?.email || '';
   const [optIn, setOptIn] = useState<boolean>(userProfile?.marketingOptIn === true);
@@ -110,6 +111,19 @@ export function PendingScreen() {
           >
             {checking ? 'Checking…' : 'Check again'}
           </button>
+          <div className="mt-4 border-t border-white/10 pt-3 flex flex-col items-center gap-1">
+            <SupportLink />
+            {onOpenLegal && (
+              <p className="flex items-center justify-center gap-4">
+                <button onClick={() => onOpenLegal('/privacy')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
+                  Privacy
+                </button>
+                <button onClick={() => onOpenLegal('/terms')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
+                  Terms
+                </button>
+              </p>
+            )}
+          </div>
         </div>
       </main>
     </div>

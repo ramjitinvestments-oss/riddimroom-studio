@@ -4,6 +4,8 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './components/LoginPage';
 import { Dashboard } from './components/Dashboard';
 import { PendingScreen } from './components/PendingScreen';
+import { LegalPage } from './components/LegalPage';
+import { SupportLink } from './components/SupportLink';
 import BrandLogo from './components/BrandLogo';
 import { useRouter } from './lib/router';
 
@@ -54,7 +56,7 @@ function AppShell() {
   // away from /login — same behavior as riddimroom-caption's two
   // corresponding useEffects in App.tsx.
   useEffect(() => {
-    if (!isAuthLoading && !currentUser && currentPath !== '/login') {
+    if (!isAuthLoading && !currentUser && currentPath !== '/login' && currentPath !== '/privacy' && currentPath !== '/terms') {
       navigateTo('/login');
     }
   }, [isAuthLoading, currentUser, currentPath, navigateTo]);
@@ -65,11 +67,22 @@ function AppShell() {
     }
   }, [isAuthLoading, currentUser, currentPath, navigateTo]);
 
+  // R40 P-04: Privacy and Terms are public pages — reachable without
+  // sign-in, from the login footer and the dashboard footer alike.
+  if (currentPath === '/privacy' || currentPath === '/terms') {
+    return (
+      <LegalPage
+        kind={currentPath === '/privacy' ? 'privacy' : 'terms'}
+        onBack={() => navigateTo(currentUser ? '/' : '/login')}
+      />
+    );
+  }
+
   // UX-02: when the profile is available and says the account is only
   // pending, the user belongs on the pending screen — never on the
   // restricted screen below, whose wording is for other states.
   if (currentUser && userProfile && userProfile.status === 'pending' && !userProfile.isAdmin) {
-    return <PendingScreen />;
+    return <PendingScreen onOpenLegal={(path) => navigateTo(path)} />;
   }
 
   if (isAccountDisabled) {
@@ -94,12 +107,13 @@ function AppShell() {
             Sign out
           </button>
         </div>
+        <SupportLink />
       </div>
     );
   }
 
   if (currentPath === '/login') {
-    return <LoginPage />;
+    return <LoginPage onOpenLegal={(path) => navigateTo(path)} />;
   }
 
   // Phase 2 (Plan v5) toggle gate: a signed-in user whose profile is
@@ -107,7 +121,7 @@ function AppShell() {
   // every route. Admins are exempt — the owner is never gated by status
   // (and his own profile may predate the status field entirely).
   if (currentUser && userProfile && userProfile.status === 'pending' && !userProfile.isAdmin) {
-    return <PendingScreen />;
+    return <PendingScreen onOpenLegal={(path) => navigateTo(path)} />;
   }
 
   if (currentPath === '/admin') {
@@ -122,6 +136,7 @@ function AppShell() {
             onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
             onOpenAdmin={() => navigateTo('/admin')}
             onOpenPromo={() => navigateTo('/promo')}
+            onOpenLegal={(path) => navigateTo(path)}
           />
         )}
       </ProtectedRoute>
@@ -156,6 +171,7 @@ function AppShell() {
           onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
           onOpenAdmin={() => navigateTo('/admin')}
           onOpenPromo={() => navigateTo('/promo')}
+          onOpenLegal={(path) => navigateTo(path)}
         />
       )}
     </ProtectedRoute>

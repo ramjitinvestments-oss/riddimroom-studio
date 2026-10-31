@@ -61,6 +61,14 @@ export const TWO_PASS_WHY_LINE =
 export const TWO_PASS_STEP2_TIP =
   'Your main video plays with sound while you record. Tip: earbuds keep its sound out of your recording — or keep the volume low.';
 
+/**
+ * R40 P-44 — the earbud tip at the flow's ENTRY (step 1), where the
+ * decision is made: step 2 plays the main video out loud, so earbuds
+ * are wanted from the start, not discovered at step 2.
+ */
+export const TWO_PASS_ENTRY_TIP =
+  'In step 2 your main video plays out loud — earbuds keep its sound out of your recording, and let you react in time.';
+
 /** Label of the button that enters the flow from the live controls. */
 export const TWO_PASS_BUTTON_LABEL = 'Record in two steps';
 
