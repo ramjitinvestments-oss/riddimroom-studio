@@ -97,29 +97,127 @@ export function buildPreview(
 }
 
 /**
+ * JSON with sorted object keys, so two items that carry the same
+ * fields with the same values always stringify identically no matter
+ * what order the fields were written in. Undefined fields are dropped.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? '';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
+/**
+ * One item's full render-relevant state (R40 P-07). The audit rule:
+ * EVERYTHING that changes what Apply renders must change the preview
+ * signature, or the focused card keeps showing pre-edit frames. That
+ * means, per item kind —
+ *  - all: id, type, track, timing, zIndex, visibility;
+ *  - visual (video/image/text): position, scale, rotation, opacity,
+ *    end transform, fades, entrance/exit animation, motion effect;
+ *  - video/image: media asset, crop window, colour grade, flip and
+ *    crop-zoom/pan framing, explicit frame rect, pair settings (the
+ *    pair divider is drawn from them);
+ *  - video: trim, speed, reverse, volume/mute (its own sound is part
+ *    of the applied result), PiP settings in full;
+ *  - image: role (main-visual vs overlay changes rendering);
+ *  - text: the words themselves plus font, size, colour, role;
+ *  - caption: the words and their timings, style, size, anchor;
+ *  - audio: asset, trim, volume/mute, fades, loop, role.
+ * Fields that cannot change a frame or the mix (locked, an item's
+ * bookkeeping-only counters) are the only ones left out.
+ */
+function itemSignaturePart(item: TimelineItem): string {
+  const part: Record<string, unknown> = {
+    id: item.id,
+    type: item.type,
+    trackId: item.trackId,
+    start: item.startTime,
+    end: item.endTime,
+    z: item.zIndex,
+    visible: item.visible,
+  };
+  if ('position' in item) {
+    part.pos = [item.position.x, item.position.y];
+    part.scale = item.scale;
+    part.rotation = item.rotation;
+    part.opacity = item.opacity;
+  }
+  if ('endTransform' in item) part.endTransform = item.endTransform;
+  if ('fade' in item) part.fade = item.fade;
+  if ('animation' in item) part.animation = item.animation;
+  if ('motion' in item) part.motion = item.motion;
+  if ('crop' in item) part.crop = item.crop;
+  if ('colorGrade' in item) part.colorGrade = item.colorGrade;
+  if ('frameRect' in item) part.frameRect = item.frameRect;
+  if ('pair' in item) part.pair = item.pair;
+  if ('flipX' in item || 'cropZoom' in item || 'cropOffsetX' in item || 'cropOffsetY' in item) {
+    const framing = item as { flipX?: boolean; cropZoom?: number; cropOffsetX?: number; cropOffsetY?: number };
+    part.framing = [framing.flipX ?? false, framing.cropZoom ?? '', framing.cropOffsetX ?? '', framing.cropOffsetY ?? ''];
+  }
+  switch (item.type) {
+    case 'video':
+      part.media = item.mediaAssetId;
+      part.trim = [item.trimStart, item.trimEnd];
+      part.speed = item.speed;
+      part.reverse = item.reverse;
+      part.volume = item.volume;
+      part.muted = item.muted;
+      part.pip = item.pip;
+      break;
+    case 'image':
+      part.media = item.mediaAssetId;
+      part.role = item.role;
+      break;
+    case 'text':
+      part.text = item.text;
+      part.role = item.role;
+      part.font = item.font;
+      part.fontSize = item.fontSize;
+      part.color = item.color;
+      break;
+    case 'caption':
+      part.words = item.words;
+      part.captionStyleId = item.captionStyleId;
+      part.sizeScale = item.sizeScale;
+      part.anchorY = item.anchorY;
+      break;
+    case 'audio':
+      part.media = item.mediaAssetId;
+      part.trim = [item.trimStart, item.trimEnd];
+      part.role = item.role;
+      part.volume = item.volume;
+      part.muted = item.muted;
+      part.loop = item.loop ?? false;
+      break;
+  }
+  return stableStringify(part);
+}
+
+/**
  * Deterministic cache key for a preview: the template, the canvas,
- * and every item's identity/timing/trim/speed — anything that would
- * change the applied frames changes the key. Hooks also fold in the
- * playhead (rounded to 0.25s), because a hook preview is anchored
- * where it would be inserted.
+ * the watermark flag, every track's visibility/mute (a hidden track
+ * renders nothing), and every item's full render-relevant state (see
+ * `itemSignaturePart`) — anything that would change the applied
+ * result changes the key. Hooks also fold in the playhead (rounded
+ * to 0.25s), because a hook preview is anchored where it would be
+ * inserted.
  */
 export function previewSignature(project: Project, template: StudioTemplate, currentTime: number): string {
-  const itemPart = project.items
-    .map((item) => {
-      const media = item as TimelineItem & { mediaAssetId?: string; trimStart?: number; trimEnd?: number; speed?: number };
-      return [
-        item.id,
-        item.type,
-        media.mediaAssetId ?? '',
-        item.startTime,
-        item.endTime,
-        media.trimStart ?? '',
-        media.trimEnd ?? '',
-        media.speed ?? '',
-      ].join(':');
-    })
+  const itemPart = project.items.map(itemSignaturePart).join(',');
+  const trackPart = project.tracks
+    .map((track) => `${track.id}:${track.visible ? 1 : 0}:${track.muted ? 1 : 0}`)
     .join(',');
-  const base = [template.id, `${project.canvasWidth}x${project.canvasHeight}`, itemPart].join('|');
+  const base = [
+    template.id,
+    `${project.canvasWidth}x${project.canvasHeight}`,
+    project.watermarkEnabled === false ? 'wm0' : 'wm1',
+    trackPart,
+    itemPart,
+  ].join('|');
   if (template.kind === 'hook') {
     const rounded = Math.round(currentTime / 0.25) * 0.25;
     return `${base}|@${rounded.toFixed(2)}`;

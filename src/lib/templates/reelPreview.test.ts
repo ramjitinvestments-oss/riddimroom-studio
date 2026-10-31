@@ -12,7 +12,7 @@ import { getTemplate } from '../templates';
 import { createDefaultProject } from '../projects/persistence';
 import { appendMediaToTimeline } from '../timeline/insert';
 import { updateItem } from '../timeline/utils';
-import type { MediaAsset, Project } from '../../types/timeline';
+import type { CaptionTimelineItem, MediaAsset, Project, TextTimelineItem } from '../../types/timeline';
 
 function videoAsset(id: string, durationSeconds = 30): MediaAsset {
   return {
@@ -42,11 +42,19 @@ function projectWithClips(count: number): Project {
  * texts…); replace those with positional placeholders so two honest
  * applies of the same input can be deep-compared. Ids the input
  * already carried are kept as-is.
+ *
+ * R40 Phase 2 (flake fix): `updatedAt` is also zeroed on both sides.
+ * Each apply stamps the result with the current time, so two honest
+ * applies of the same input run a millisecond apart differed by that
+ * stamp alone and the deep-equals below failed intermittently. The
+ * stamp says when the apply ran, not what it produced — it is not
+ * part of what "exactly the real apply" means.
  */
 function normalizeGeneratedIds(project: Project, knownIds: Set<string>): Project {
   let added = 0;
   return {
     ...project,
+    updatedAt: 0,
     items: project.items.map((item) =>
       knownIds.has(item.id) ? item : { ...item, id: `added-${added++}` },
     ),
@@ -149,6 +157,109 @@ describe('R37 Phase 2 — previewSignature', () => {
     expect(previewSignature(fixture, hook, 2.5)).not.toBe(previewSignature(fixture, hook, 2));
     const full = getTemplate('viral-hook-story')!;
     expect(previewSignature(fixture, full, 7)).toBe(previewSignature(fixture, full, 2));
+  });
+});
+
+describe('R40 P-07 — previewSignature covers every visual edit', () => {
+  const template = getTemplate('viral-hook-story')!;
+
+  function changedSignature(mutateFixture: (project: Project) => Project): string {
+    return previewSignature(mutateFixture(projectWithClips(2)), template, 0);
+  }
+
+  it('an unchanged project keeps the same signature (even after a JSON round trip)', () => {
+    const fixture = projectWithClips(2);
+    const roundTripped = JSON.parse(JSON.stringify(fixture)) as Project;
+    expect(previewSignature(roundTripped, template, 0)).toBe(previewSignature(fixture, template, 0));
+  });
+
+  // One case per render-relevant field class: edit it, and the cached
+  // own-media preview must be invalidated (signature changes).
+  const videoCases: [string, Record<string, unknown>][] = [
+    ['position', { position: { x: 61, y: 42 } }],
+    ['scale', { scale: 1.4 }],
+    ['rotation', { rotation: 12 }],
+    ['opacity', { opacity: 0.5 }],
+    ['crop window', { crop: { x: 5, y: 5, width: 50, height: 50 } }],
+    ['zIndex', { zIndex: 9 }],
+    ['visibility', { visible: false }],
+    ['PiP settings', { pip: { isPip: true, shape: 'circle', borderWidth: 3, borderColor: '#FFD100', shadow: true } }],
+    ['end transform', { endTransform: { position: { x: 50, y: 40 }, scale: 1.2, opacity: 0.8 } }],
+    ['fades', { fade: { fadeInDuration: 1, fadeOutDuration: 0.5 } }],
+    ['animation', { animation: { entrance: 'pop', intensity: 2 } }],
+    ['motion effect', { motion: { type: 'ken-burns', direction: 'left' } }],
+    ['colour grade', { colorGrade: { brightness: 10, contrast: 5, saturation: 0 } }],
+    ['frame rect', { frameRect: { x: 0, y: 0, w: 50, h: 100 } }],
+    ['flip', { flipX: true }],
+    ['crop zoom', { cropZoom: 2 }],
+    ['crop pan', { cropOffsetX: 0.5 }],
+    ['reverse', { reverse: true }],
+    ['speed', { speed: 2 }],
+    ['volume', { volume: 0.25 }],
+    ['mute', { muted: true }],
+    ['track change', { trackId: 'another-track' }],
+  ];
+  for (const [label, patch] of videoCases) {
+    it(`changes when a video item's ${label} changes`, () => {
+      const base = previewSignature(projectWithClips(2), template, 0);
+      const changed = changedSignature((project) => {
+        const video = project.items.find((i) => i.type === 'video')!;
+        return updateItem(project, video.id, patch as never);
+      });
+      expect(changed).not.toBe(base);
+    });
+  }
+
+  it('changes when a text item’s words or style change', () => {
+    const textItem: TextTimelineItem = {
+      id: 'text-1', trackId: 'track-text', type: 'text',
+      startTime: 0, endTime: 3, zIndex: 5, visible: true,
+      position: { x: 50, y: 80 }, scale: 1, rotation: 0, opacity: 1,
+      text: 'Big sale', role: 'title', font: 'Inter', fontSize: 48, color: '#FFFFFF',
+    };
+    const fixture = projectWithClips(1);
+    const withText: Project = { ...fixture, items: [...fixture.items, textItem] };
+    const base = previewSignature(withText, template, 0);
+    const edit = (patch: Partial<TextTimelineItem>): Project => ({
+      ...withText,
+      items: withText.items.map((i) => (i.id === 'text-1' && i.type === 'text' ? { ...i, ...patch } : i)),
+    });
+    expect(previewSignature(edit({ text: 'Bigger sale' }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ fontSize: 64 }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ color: '#FFD100' }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ font: 'Archivo' }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ position: { x: 50, y: 30 } }), template, 0)).not.toBe(base);
+  });
+
+  it('changes when a caption item’s words or style change', () => {
+    const captionItem: CaptionTimelineItem = {
+      id: 'cap-1', trackId: 'track-caption', type: 'caption',
+      startTime: 0, endTime: 3, zIndex: 6, visible: true,
+      words: [{ text: 'Hello', start: 0, end: 0.5 }],
+      captionStyleId: 'bold-pop', source: 'manual', editable: true,
+    };
+    const fixture = projectWithClips(1);
+    const withCaption: Project = { ...fixture, items: [...fixture.items, captionItem] };
+    const base = previewSignature(withCaption, template, 0);
+    const edit = (patch: Partial<CaptionTimelineItem>): Project => ({
+      ...withCaption,
+      items: withCaption.items.map((i) => (i.id === 'cap-1' && i.type === 'caption' ? { ...i, ...patch } : i)),
+    });
+    expect(previewSignature(edit({ words: [{ text: 'Goodbye', start: 0, end: 0.5 }] }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ captionStyleId: 'clean' }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ sizeScale: 1.55 }), template, 0)).not.toBe(base);
+    expect(previewSignature(edit({ anchorY: 'top' }), template, 0)).not.toBe(base);
+  });
+
+  it('changes when a track is hidden or the watermark is switched off', () => {
+    const fixture = projectWithClips(2);
+    const base = previewSignature(fixture, template, 0);
+    const hiddenTrack: Project = {
+      ...fixture,
+      tracks: fixture.tracks.map((t, i) => (i === 0 ? { ...t, visible: false } : t)),
+    };
+    expect(previewSignature(hiddenTrack, template, 0)).not.toBe(base);
+    expect(previewSignature({ ...fixture, watermarkEnabled: false }, template, 0)).not.toBe(base);
   });
 });
 

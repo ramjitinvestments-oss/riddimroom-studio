@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Check, Clapperboard, Crop, Frame, Sparkles } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -6,17 +6,26 @@ import {
   getTemplate,
   type StudioTemplate,
 } from '../../lib/templates';
-import type { Project, VideoTimelineItem } from '../../types/timeline';
-import { applyFullTemplate, applyHookToProject, type ShortenedClipInfo } from '../../lib/templates/apply';
+import type { VideoTimelineItem } from '../../types/timeline';
+import { applyFullTemplate, applyHookToProject } from '../../lib/templates/apply';
 import {
   buildPreview,
-  createPreviewCache,
-  createPreviewScheduler,
   hasPreviewMedia,
   previewSignature,
-  type PreviewCache,
-  type PreviewScheduler,
 } from '../../lib/templates/reelPreview';
+import {
+  ensureTemplatesPanelProject,
+  getOrCreatePreviewScheduler,
+  getPreviewJobs,
+  getTemplatesPanelScrollLeft,
+  getTemplatesPanelState,
+  initialTemplatesPanelState,
+  setTemplatesPanelScrollLeft,
+  subscribeTemplatesPanelState,
+  updateTemplatesPanelState,
+  type TemplatesPanelState,
+} from '../../lib/templates/panelStore';
+import { decideReelCardTap, resolveReelFocusedId } from '../../lib/templates/reelFocus';
 import { renderPreviewCanvases } from './reelPreviewRenderer';
 import {
   REEL_CHIPS,
@@ -56,17 +65,45 @@ import { ReframePicker } from './ReframePicker';
  */
 export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number; uid: string }) {
   const { project, mutate } = useProject();
-  const [appliedId, setAppliedId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [chip, setChip] = useState<ReelChip>('all');
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [pendingAdjust, setPendingAdjust] = useState<ShortenedClipInfo[] | null>(null);
-  const [adjustTargetId, setAdjustTargetId] = useState<string | null>(null);
-  const [framePrompt, setFramePrompt] = useState<StudioTemplate | null>(null);
-  const [pendingFramed, setPendingFramed] = useState<ShortenedClipInfo[] | null>(null);
-  const [reframeTargetId, setReframeTargetId] = useState<string | null>(null);
-  const [focusedId, setFocusedId] = useState<string | null>(null);
+  // R40 P-06 — the panel's state lives in the shared store
+  // (lib/templates/panelStore.ts), not in this component: EditorShell
+  // mounts this panel in the Step-1 aside and again in the Step-2
+  // panel group, steps render conditionally, and the store is what
+  // survives the switch — applied marker, unfinished Adjust/Reframe
+  // steps, focus/chip/scroll, and the preview cache included.
+  const storedState = useSyncExternalStore(
+    subscribeTemplatesPanelState,
+    getTemplatesPanelState,
+    getTemplatesPanelState,
+  );
+  const projectId = project?.id ?? null;
+  useEffect(() => {
+    if (projectId) ensureTemplatesPanelProject(projectId);
+  }, [projectId]);
+  // Until the store is bound to THIS project it reads as a fresh
+  // panel, so a previous project's state can never show in this editor.
+  const panelState: TemplatesPanelState =
+    project && storedState.projectId === project.id
+      ? storedState
+      : initialTemplatesPanelState(project?.id ?? null);
+  const {
+    appliedId,
+    chip,
+    focusedId,
+    pendingAdjust,
+    adjustTargetId,
+    pendingFramed,
+    reframeTargetId,
+    framePromptId,
+    error,
+    notice,
+    busyId,
+  } = panelState;
+  const setPanel = (patch: Partial<TemplatesPanelState>) => {
+    if (!project) return;
+    ensureTemplatesPanelProject(project.id);
+    updateTemplatesPanelState(patch);
+  };
   const stripRef = useRef<HTMLDivElement | null>(null);
   const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -75,36 +112,36 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     () => new Map(visible.map((t) => [t.id, reelCardModel(t)] as const)),
     [visible],
   );
-  // The focused card: the tracked id while it is in the current filter,
-  // else the filter's first card.
-  const focusedModel: ReelCardModel | null =
-    (focusedId ? cardModels.get(focusedId) : undefined) ?? visible.map((t) => cardModels.get(t.id))[0] ?? null;
+  // The focused card (R40 P-08): the tracked id while it is in the
+  // current filter, else the filter's first card. This resolution is
+  // a read only — the stored focus itself changes only on a tap (see
+  // lib/templates/reelFocus.ts), never because the strip scrolled.
+  const focusedModel: ReelCardModel | null = (() => {
+    const id = resolveReelFocusedId(focusedId, visible.map((t) => t.id));
+    return id ? cardModels.get(id) ?? null : null;
+  })();
 
   // ── R37 Phase 2 Stage B: own-media preview frames for the focused
-  // card. The cache + scheduler live in refs (created once); the
-  // render function resolves its (project, template, playhead)
-  // snapshot from the jobs map by cache key, so a render scheduled
-  // for one card can never paint another card's frames.
+  // card. R40 P-06: the cache + scheduler + jobs live in the shared
+  // store (created once for the whole editor), so a preview rendered
+  // in one step is the one the other step shows — never rendered
+  // twice. The render function resolves its (project, template,
+  // playhead) snapshot from the jobs map by cache key, so a render
+  // scheduled for one card can never paint another card's frames.
   const [preview, setPreview] = useState<{ key: string; canvases: HTMLCanvasElement[] } | null>(null);
-  const previewJobsRef = useRef(new Map<string, { project: Project; template: StudioTemplate; currentTime: number }>());
   const previewGenerationRef = useRef(0);
-  const previewCacheRef = useRef<PreviewCache<HTMLCanvasElement[]> | null>(null);
-  if (!previewCacheRef.current) previewCacheRef.current = createPreviewCache<HTMLCanvasElement[]>(12);
-  const previewSchedulerRef = useRef<PreviewScheduler<HTMLCanvasElement[]> | null>(null);
-  if (!previewSchedulerRef.current) {
-    previewSchedulerRef.current = createPreviewScheduler<HTMLCanvasElement[]>(async (key) => {
-      const job = previewJobsRef.current.get(key);
-      if (!job) return null;
-      const built = buildPreview(job.project, job.template, job.currentTime);
-      return renderPreviewCanvases(built.project, built.timestamps);
-    }, previewCacheRef.current);
-  }
+  const previewScheduler = getOrCreatePreviewScheduler(async (key) => {
+    const job = getPreviewJobs().get(key);
+    if (!job) return null;
+    const built = buildPreview(job.project, job.template, job.currentTime);
+    return renderPreviewCanvases(built.project, built.timestamps);
+  });
   const previewTemplate: StudioTemplate | undefined = focusedModel ? getTemplate(focusedModel.id) : undefined;
 
   useEffect(() => {
     const generation = ++previewGenerationRef.current;
-    const scheduler = previewSchedulerRef.current;
-    if (!project || !previewTemplate || !scheduler || !hasPreviewMedia(project)) {
+    const scheduler = previewScheduler;
+    if (!project || !previewTemplate || !hasPreviewMedia(project)) {
       setPreview(null);
       return () => {
         previewGenerationRef.current += 1;
@@ -119,7 +156,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         previewGenerationRef.current += 1;
       };
     }
-    previewJobsRef.current.set(key, { project, template, currentTime });
+    getPreviewJobs().set(key, { project, template, currentTime });
     let debounceId: number | undefined;
     let idleId: number | undefined;
     let idleIsTimeout = false;
@@ -156,35 +193,20 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedId, project, currentTime]);
 
-  // Scroll-driven focus: the card the user swipes to (≥90% visible in
-  // the strip) becomes the focused card. Guarded for environments
-  // without IntersectionObserver — tap focus still works there.
+  // R40 P-08 — there is deliberately NO scroll-driven focus here any
+  // more. The old IntersectionObserver moved focus to whichever card
+  // was ≥90% visible after a scroll or an unrelated project edit, so
+  // the focused card (the Apply target) could change under the user's
+  // finger. Focus now changes only on a tap, through
+  // decideReelCardTap (lib/templates/reelFocus.ts).
+
+  // R40 P-06 — restore the strip's saved scroll position on mount, so
+  // a step switch returns the user to the card they were looking at.
+  // The position is saved on every scroll (the strip's onScroll).
   useEffect(() => {
-    if (typeof IntersectionObserver !== 'function') return;
     const root = stripRef.current;
-    if (!root) return;
-    const ratios = new Map<string, number>();
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const id = (entry.target as HTMLElement).dataset.reelCard;
-          if (id) ratios.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
-        }
-        let bestId: string | null = null;
-        let best = 0;
-        ratios.forEach((ratio, id) => {
-          if (ratio >= 0.9 && ratio > best) {
-            best = ratio;
-            bestId = id;
-          }
-        });
-        if (bestId) setFocusedId(bestId);
-      },
-      { root, threshold: [0.9] },
-    );
-    cardRefs.current.forEach((el) => observer.observe(el));
-    return () => observer.disconnect();
-  }, [visible, project]);
+    if (root) root.scrollLeft = getTemplatesPanelScrollLeft();
+  }, []);
 
   if (!project) {
     return (
@@ -203,7 +225,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     if (t.kind === 'full' && t.frame) {
       const currentAspect = findAspectRatioOption(project.canvasWidth, project.canvasHeight)?.id;
       if (currentAspect && currentAspect !== t.frame.aspect) {
-        setFramePrompt(t);
+        setPanel({ framePromptId: t.id });
         return;
       }
     }
@@ -212,14 +234,11 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
 
   const doApply = async (t: StudioTemplate, switchToFrame: boolean) => {
     if (busyId) return;
-    setFramePrompt(null);
-    setError(null);
-    setNotice(null);
+    setPanel({ framePromptId: null, error: null, notice: null });
     try {
       if (t.kind === 'hook') {
         mutate((p) => applyHookToProject(p, t, currentTime));
-        setAppliedId(t.id);
-        setPendingAdjust(null);
+        setPanel({ appliedId: t.id, pendingAdjust: null });
         return;
       }
       // R20: templates no longer auto-add music — the app adds no
@@ -234,16 +253,20 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         result = applyFullTemplate(current, t, { switchToFrame });
         return result.project;
       });
-      setAppliedId(t.id);
-      setPendingAdjust(result.shortenedClips.length > 0 ? result.shortenedClips : null);
-      setPendingFramed(result.framedItems.length > 0 ? result.framedItems : null);
+      setPanel({
+        appliedId: t.id,
+        pendingAdjust: result.shortenedClips.length > 0 ? result.shortenedClips : null,
+        pendingFramed: result.framedItems.length > 0 ? result.framedItems : null,
+      });
       if (result.canvasSwitched) {
-        setNotice(`Project switched to ${t.frame?.aspect} — the frame this preset is designed for. Every clip was cropped to it.`);
+        setPanel({ notice: `Project switched to ${t.frame?.aspect} — the frame this preset is designed for. Every clip was cropped to it.` });
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Could not apply template.');
+      setPanel({ error: e instanceof Error ? e.message : 'Could not apply template.' });
     }
   };
+
+  const framePrompt = framePromptId ? getTemplate(framePromptId) ?? null : null;
 
   const reframeTarget = reframeTargetId
     ? project.items.find((i) => i.id === reframeTargetId && (i.type === 'video' || i.type === 'image'))
@@ -256,16 +279,19 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
   const adjustAsset = adjustTarget ? project.mediaAssets[adjustTarget.mediaAssetId] : undefined;
 
   const selectChip = (next: ReelChip) => {
-    setChip(next);
     const first = reelFilter(STUDIO_TEMPLATES, next)[0];
-    setFocusedId(first ? first.id : null);
+    setPanel({ chip: next, focusedId: first ? first.id : null });
   };
 
-  // One tap, two meanings: an unfocused card only takes focus (and
-  // scrolls into view); the focused card applies.
+  // One tap, two meanings (R40 P-08: the ONLY way focus ever moves):
+  // an unfocused card only takes focus (and scrolls into view); the
+  // focused card applies. The decision is the pure helper in
+  // lib/templates/reelFocus.ts — scrolling the strip afterwards can
+  // never retarget the next tap's Apply.
   const handleCardTap = (t: StudioTemplate) => {
-    if (!focusedModel || focusedModel.id !== t.id) {
-      setFocusedId(t.id);
+    const decision = decideReelCardTap(focusedModel?.id ?? null, t.id);
+    if (decision.action === 'focus') {
+      setPanel({ focusedId: decision.focusedId });
       const el = cardRefs.current.get(t.id);
       if (el && typeof el.scrollIntoView === 'function') {
         el.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
@@ -308,6 +334,10 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       <div
         ref={stripRef}
         data-reel-strip
+        onScroll={() => {
+          const root = stripRef.current;
+          if (root) setTemplatesPanelScrollLeft(root.scrollLeft);
+        }}
         className="overflow-x-auto [scroll-snap-type:x_mandatory]"
         style={{
           touchAction: 'pan-x',
@@ -398,7 +428,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
               Apply in current size
             </button>
             <button
-              onClick={() => setFramePrompt(null)}
+              onClick={() => setPanel({ framePromptId: null })}
               className="min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
             >
               Cancel
@@ -421,7 +451,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
             <div key={clip.itemId} className="flex items-center gap-2">
               <span className="flex-1 min-w-0 truncate text-xs text-white/80">{clip.fileName}</span>
               <button
-                onClick={() => setAdjustTargetId(clip.itemId)}
+                onClick={() => setPanel({ adjustTargetId: clip.itemId })}
                 className="shrink-0 min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
               >
                 Adjust crop
@@ -429,7 +459,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
             </div>
           ))}
           <button
-            onClick={() => setPendingAdjust(null)}
+            onClick={() => setPanel({ pendingAdjust: null })}
             className="self-end min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
           >
             Done
@@ -452,7 +482,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
             <div key={clip.itemId} className="flex items-center gap-2">
               <span className="flex-1 min-w-0 truncate text-xs text-white/80">{clip.fileName}</span>
               <button
-                onClick={() => setReframeTargetId(clip.itemId)}
+                onClick={() => setPanel({ reframeTargetId: clip.itemId })}
                 className="shrink-0 min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
               >
                 Reframe
@@ -460,7 +490,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
             </div>
           ))}
           <button
-            onClick={() => setPendingFramed(null)}
+            onClick={() => setPanel({ pendingFramed: null })}
             className="self-end min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
           >
             Done
@@ -472,10 +502,10 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         <ReframePicker
           item={reframeTarget}
           asset={reframeAsset}
-          onCancel={() => setReframeTargetId(null)}
+          onCancel={() => setPanel({ reframeTargetId: null })}
           onConfirm={(crop) => {
             mutate((p) => updateItem(p, reframeTarget.id, { crop }));
-            setReframeTargetId(null);
+            setPanel({ reframeTargetId: null });
           }}
         />
       )}
@@ -484,11 +514,11 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         <SlotTrimPicker
           item={adjustTarget}
           asset={adjustAsset}
-          onCancel={() => setAdjustTargetId(null)}
+          onCancel={() => setPanel({ adjustTargetId: null })}
           onConfirm={(trimStart) => {
             const length = adjustTarget.trimEnd - adjustTarget.trimStart;
             mutate((p) => updateItem(p, adjustTarget.id, { trimStart, trimEnd: trimStart + length }));
-            setAdjustTargetId(null);
+            setPanel({ adjustTargetId: null });
           }}
         />
       )}
