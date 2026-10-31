@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { createProject, listProjects, deleteProjects, type ProjectSummary } from '../lib/projects/persistence';
+import { createProject, listProjects, deleteProjects, renameProject, type ProjectSummary } from '../lib/projects/persistence';
+import { cleanedProjectName, filterProjectsByName } from '../lib/projects/library';
 import { Check, Trash2, X } from 'lucide-react';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
 import BrandLogo from './BrandLogo';
@@ -50,6 +51,11 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
   // request (fire-and-forget) — nothing is deleted by the tap itself.
   const [deleteAccountPhase, setDeleteAccountPhase] = useState<'closed' | 'confirm' | 'done'>('closed');
   const [isDeleting, setIsDeleting] = useState(false);
+  // R40 P-53 — project search + rename on the home library.
+  const [searchQuery, setSearchQuery] = useState('');
+  const [renameTarget, setRenameTarget] = useState<ProjectSummary | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [isRenaming, setIsRenaming] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!currentUser) return;
@@ -98,6 +104,31 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
     });
   }, []);
 
+  // R40 P-53 — rename through the same project-update path the
+  // editor header uses (name + updatedAt, whole doc via saveProject,
+  // inside renameProject in persistence).
+  const handleConfirmRename = useCallback(async () => {
+    if (!renameTarget || !currentUser) return;
+    const name = cleanedProjectName(renameValue);
+    if (!name) return;
+    setIsRenaming(true);
+    setError(null);
+    try {
+      const saved = await renameProject(renameTarget.id, currentUser.uid, name);
+      setProjects((prev) =>
+        prev
+          ? prev.map((p) => (p.id === saved.id ? { ...p, name: saved.name, updatedAt: saved.updatedAt } : p))
+          : prev,
+      );
+      setRenameTarget(null);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to rename project.');
+      setRenameTarget(null);
+    } finally {
+      setIsRenaming(false);
+    }
+  }, [renameTarget, renameValue, currentUser]);
+
   const handleConfirmDelete = useCallback(async () => {
     if (!confirmDelete) return;
     const ids = confirmDelete.ids;
@@ -116,6 +147,8 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
     }
   }, [confirmDelete, exitSelectMode, refresh]);
 
+  const visibleProjects = projects ? filterProjectsByName(projects, searchQuery) : null;
+
   return (
     <div className="min-h-screen bg-[#070707] text-white">
       <header className="flex items-center justify-between px-6 py-4 border-b border-white/10">
@@ -123,7 +156,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
         <div className="flex items-center gap-3 text-xs text-white/50">
           <span className="hidden sm:inline">{userProfile?.email || currentUser?.email}</span>
           <span className="text-gold/90">
-            {userProfile ? `${userProfile.dailyCount} of ${userProfile.maxFree} transcriptions used today` : '…'}
+            {userProfile ? `${userProfile.dailyCount} of ${userProfile.maxFree} transcriptions used today` : 'Checking plan…'}
           </span>
           {userProfile?.isAdmin && onOpenAdmin && (
             <button
@@ -233,6 +266,22 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
           </div>
         </div>
 
+        {projects && projects.length > 0 && (
+          <div className="mb-4">
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-white/40 mb-1" htmlFor="project-search">
+              Search projects
+            </label>
+            <input
+              id="project-search"
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search by name"
+              className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-base text-white placeholder-white/30 focus:outline-none focus:border-gold/60"
+            />
+          </div>
+        )}
+
         {error && <p className="text-sm text-red-400 mb-4">{error}</p>}
 
         {projects === null && !error && (
@@ -262,9 +311,15 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
           </div>
         )}
 
-        {projects && projects.length > 0 && (
+        {projects && projects.length > 0 && visibleProjects && visibleProjects.length === 0 && (
+          <p className="text-sm text-white/40 text-center py-10 border border-dashed border-white/10 rounded-xl">
+            No projects match your search.
+          </p>
+        )}
+
+        {visibleProjects && visibleProjects.length > 0 && (
           <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {projects.map((project) => {
+            {visibleProjects.map((project) => {
               const ratio = findAspectRatioOption(project.canvasWidth, project.canvasHeight);
               const metaLine = `${ratio ? `${ratio.ratioLabel} ${ratio.name}` : `${project.canvasWidth}×${project.canvasHeight}`} · updated ${new Date(project.updatedAt).toLocaleString()}`;
               const isSelected = selectedIds.has(project.id);
@@ -304,6 +359,19 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
                       <Check size={18} strokeWidth={3} />
                     </span>
                   ) : (
+                    <>
+                    <button
+                      type="button"
+                      aria-label={`Rename ${project.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRenameValue(project.name);
+                        setRenameTarget(project);
+                      }}
+                      className="absolute top-2 left-2 z-10 flex items-center justify-center min-h-[36px] px-2.5 rounded-lg bg-black/60 hover:bg-black/85 backdrop-blur text-white/80 hover:text-white text-[11px] font-bold transition"
+                    >
+                      Rename
+                    </button>
                     <button
                       type="button"
                       aria-label={`Delete ${project.name}`}
@@ -315,6 +383,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
                     >
                       <Trash2 size={18} />
                     </button>
+                    </>
                   )}
                 </li>
               );
@@ -366,6 +435,58 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
             >
               Delete selected
             </button>
+          </div>
+        </div>
+      )}
+
+      {renameTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => !isRenaming && setRenameTarget(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Rename project"
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-2">
+              <h2 className="font-bold text-base">Rename project</h2>
+              <button
+                onClick={() => !isRenaming && setRenameTarget(null)}
+                disabled={isRenaming}
+                aria-label="Cancel"
+                className="text-white/40 hover:text-white/70 disabled:opacity-50 -mt-1 -mr-1 p-1"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <label className="block text-[11px] font-bold uppercase tracking-wide text-white/40 mb-1" htmlFor="project-rename">
+              Project name
+            </label>
+            <input
+              id="project-rename"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              className="w-full min-h-11 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-base text-white focus:outline-none focus:border-gold/60 mb-6"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => setRenameTarget(null)}
+                disabled={isRenaming}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleConfirmRename()}
+                disabled={isRenaming || !cleanedProjectName(renameValue)}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-50 rounded-lg text-black"
+              >
+                {isRenaming ? 'Renaming…' : 'Save name'}
+              </button>
+            </div>
           </div>
         </div>
       )}

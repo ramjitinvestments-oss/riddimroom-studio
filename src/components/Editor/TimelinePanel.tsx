@@ -49,12 +49,18 @@ const ZOOM_STEP = 1.25;
 /** Scrub commits: at most one onSeek per this interval mid-scrub, plus a flush of the final value on release. */
 const SCRUB_COMMIT_INTERVAL_MS = 100;
 
+// R40 P-50c — the type coding follows the design law at the top of
+// src/index.css (gold #FFD100 as the one accent, cream/white text,
+// neutral surfaces; green reserved for success only): a restrained
+// gold / white / neutral tint scale that still tells the types apart
+// by depth. Colour is never the only signal — every clip also
+// carries its type in its label and title, and every lane is named.
 const TRACK_COLORS: Record<string, string> = {
-  video: 'bg-blue-500/70',
-  image: 'bg-purple-500/70',
-  text: 'bg-amber-500/70',
-  caption: 'bg-pink-500/70',
-  audio: 'bg-emerald-500/70',
+  video: 'bg-gold/70',
+  image: 'bg-white/50',
+  text: 'bg-gold/40',
+  caption: 'bg-white/35',
+  audio: 'bg-neutral-400/60',
 };
 
 interface ActiveDrag {
@@ -160,7 +166,7 @@ const ClipRow = React.memo(function ClipRow({
         />
       )}
       <span className="absolute inset-0 flex items-center px-3 pointer-events-none overflow-hidden">
-        <span className="truncate text-[9px] font-semibold leading-none text-white/90 drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]">{clipLabel}</span>
+        <span className="truncate text-[10px] font-semibold leading-none text-white/90 drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]">{clipLabel}</span>
       </span>
       {clipMuted !== null && (
         <button
@@ -209,7 +215,7 @@ const ClipRow = React.memo(function ClipRow({
 /**
  * Multi-track timeline: click-to-seek, click-a-clip-to-select, drag a clip
  * body to move it (`moveItem`), drag its left/right edge to trim
- * (`trimItemStart`/`trimItemEnd`), and a "Split at Playhead" action
+ * (`trimItemStart`/`trimItemEnd`), and a "Cut at Playhead" action
  * (`splitItemAtTime`) for the selected item.
  *
  * R26 WS-T1 (smoothness): a drag/trim gesture no longer mutates the
@@ -623,15 +629,15 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
             className={`min-h-11 px-2 py-0.5 rounded uppercase tracking-wide font-bold ${
               canSplit ? 'bg-white/20 hover:bg-white/30 text-white' : 'bg-white/5 text-white/20 cursor-not-allowed'
             }`}
-            title={canSplit ? 'Split the selected clip at the playhead' : 'Select a clip and move the playhead inside it to split'}
+            title={canSplit ? 'Cut the selected clip at the playhead' : 'Select a clip and move the playhead inside it to cut'}
           >
-            Split at Playhead
+            Cut at Playhead
           </button>
           <span>{formatTimecode(duration)} total</span>
         </div>
       </div>
       {project.items.length === 0 && (
-        <p className="text-[11px] text-white/35 px-0.5 pb-1">Tap Upload to add your first clip — it lands here.</p>
+        <p className="text-[11px] text-white/35 px-0.5 pb-1">Tap Add Video / Image to add your first clip — it lands here.</p>
       )}
       {/* Horizontally scrollable on narrow viewports — the inner row gets a
           minimum pixel width (pxPerSec * extent) so clips never

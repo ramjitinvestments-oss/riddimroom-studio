@@ -124,7 +124,13 @@ export function buildProducerReport(project: Project, loudness?: LoudnessReading
       id: 'beat',
       label: 'Beat',
       status: tooQuiet || hot ? 'warn' : 'pass',
-      detail: `Music is on. Level measured from the finished file: ≈ ${loudness.rmsDbfs.toFixed(0)} dB average, peak ${loudness.peakDbfs.toFixed(1)} dB${tooQuiet ? ' — very quiet for a phone speaker' : hot ? ' — peaking at the ceiling, may distort' : ' — healthy phone level'}.`,
+      // R40 P-49d: the line leads with the plain verdict; the measured
+      // numbers ride in parentheses after it, never in front.
+      detail: tooQuiet
+        ? `Music is on, but it is very quiet for a phone speaker (level measured from the finished file: average ≈ ${loudness.rmsDbfs.toFixed(0)} dB, peak ${loudness.peakDbfs.toFixed(1)} dB).`
+        : hot
+          ? `Music is on, but it is peaking at the ceiling and may distort (level measured from the finished file: average ≈ ${loudness.rmsDbfs.toFixed(0)} dB, peak ${loudness.peakDbfs.toFixed(1)} dB).`
+          : `Music is on at a healthy phone level (level measured from the finished file: average ≈ ${loudness.rmsDbfs.toFixed(0)} dB, peak ${loudness.peakDbfs.toFixed(1)} dB).`,
       fix: tooQuiet ? 'Raise the music volume before exporting again.' : hot ? 'Lower the music volume a touch before exporting again.' : undefined,
       weight: 2,
     });

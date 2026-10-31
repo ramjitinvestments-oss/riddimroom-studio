@@ -38,6 +38,7 @@ import {
 } from '../lib/promo/suggest';
 import { analyzeArtwork } from '../lib/promo/ocrEngine';
 import { parseEventDate, planCampaign, campaignFileName, type CampaignPiece, type CampaignPlan } from '../lib/promo/campaign';
+import { campaignGatePrecheck } from '../lib/promo/campaignPrecheck';
 import { detectBeats, findHookWindow } from '../lib/media/beats';
 import { convertPromoTextToCaptions } from '../lib/promo/viralCaptions';
 import { CAPTION_SIZE_TIERS, type CaptionSizeTier } from '../lib/captions/styles';
@@ -47,7 +48,6 @@ import { transcodeWebmToMp4 } from '../lib/export/mp4Transcoder';
 import { resolveExportSettings } from '../lib/export/quality';
 import { buildSocialPosts, buildSoundGuide, type SocialPost } from '../lib/export/socialPosts';
 import { canExportToday, exportsRemainingToday, recordExport } from '../lib/licensing';
-import { evaluateProjectExportGate } from '../lib/projectDurationGate';
 import { classifyReadout, isCleanLine, mergeReadoutFields, stripJunkEdges, type FieldSource, type OcrLine, type ReadoutResult } from '../lib/promo/readout';
 import { loadArtworkFixes, saveArtworkFixes } from '../lib/promo/fixes';
 import type { SnapCorrection } from '../lib/promo/snap';
@@ -775,7 +775,10 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           if (prev) URL.revokeObjectURL(prev);
           return null;
         });
-        applyPosterSuggestion(next, a, posterPurpose);
+        // R40 P-47: purpose first — with no purpose chosen yet, the
+        // fields stay empty until a purpose is picked (the purpose
+        // handler fills them then) or the user types their own.
+        if (posterPurpose) applyPosterSuggestion(next, a, posterPurpose);
       } catch (err: any) {
         setPosterError(err?.message || 'That file could not be read as an image.');
       }
@@ -1549,27 +1552,39 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
         setCampaignResults([...results]);
       }
 
+      // R40 P-37 — PRE-CHECK: before ANY piece renders, the existing
+      // duration gate runs over ALL built pieces. Refused pieces are
+      // marked now (with the gate's plain message), the campaign note
+      // says so up front, and they never reach the renderer or the
+      // quota counter. Only the passable pieces render below.
+      const precheck = campaignGatePrecheck(
+        built.map((b) => b.project),
+        tier,
+      );
+      let capHit = precheck.refusedCount > 0;
+      if (capHit && !controller.signal.aborted) {
+        setCampaignNote(
+          `${precheck.note} Every piece is saved as its own project in your projects list, and the pieces are listed in the results below — open an over-limit piece there to trim it.`,
+        );
+      }
+      built.forEach(({ entry }, i) => {
+        if (!precheck.refused[i]) return;
+        entry.status = 'failed';
+        entry.error = precheck.messages[i] ?? undefined;
+      });
+      if (capHit) setCampaignResults([...results]);
+
       // Render phase — same engine, same validation, same daily
       // counter as an editor export.
       const engine = getConfiguredExportEngine();
       const renderer = createExportRenderer(engine);
       await ensureFontsLoaded([fontFamily]);
       let quotaHit = false;
-      let capHit = false;
-      for (const { entry, project } of built) {
+      for (const [index, { entry, project }] of built.entries()) {
         if (controller.signal.aborted) break;
-        // R35: the tier duration gate runs before the quota check and
-        // before any rendering — a refused piece is marked on its
-        // result card with the gate's plain message, consumes no
-        // daily quota, and never reaches the renderer.
-        const gate = evaluateProjectExportGate(project, tier);
-        if (gate.exceedsCap) {
-          capHit = true;
-          entry.status = 'failed';
-          entry.error = gate.message ?? undefined;
-          setCampaignResults([...results]);
-          continue;
-        }
+        // R35/P-37: a pre-checked refusal is already marked — it is
+        // skipped here, consumes no daily quota, and never renders.
+        if (precheck.refused[index]) continue;
         if (!canExportToday(uid, tier)) {
           quotaHit = true;
           break;
@@ -1604,20 +1619,24 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       }
 
       if (controller.signal.aborted) {
-        setCampaignNote('Campaign stopped — every piece built so far is saved above as its own project.');
+        setCampaignNote('Campaign stopped — every piece built so far is saved as its own project in your projects list, and the pieces are listed in the results below.');
       } else if (quotaHit) {
         setCampaignNote(
           tier === 'lifetime'
-            ? 'The render queue stopped early — pieces above are saved as projects; open any of them to export.'
-            : "Today's free export limit stopped the render queue — nothing is lost: every piece is saved above as its own project, ready to open and export. Lifetime removes the daily limit.",
+            ? 'The render queue stopped early — every piece is saved as its own project in your projects list, and the pieces are listed in the results below, ready to open and export.'
+            : "Today's free export limit stopped the render queue — nothing is lost: every piece is saved as its own project in your projects list, and the pieces are listed in the results below, ready to open and export. Lifetime removes the daily limit.",
         );
       } else if (capHit) {
-        setCampaignNote('Some pieces were not rendered because they are longer than your plan allows — every piece is saved above as its own project, ready to open and trim.');
+        // R40 P-37: the count named up front by the pre-check is the
+        // count named here — one story, start to finish.
+        setCampaignNote(
+          `${precheck.note} Every piece is saved as its own project in your projects list, and the pieces are listed in the results below — open an over-limit piece there to trim it.`,
+        );
       } else if (results.length > 0 && results.every((r) => r.status === 'done')) {
-        setCampaignNote('Campaign complete — every piece rendered, each with its post written under it.');
+        setCampaignNote('Campaign complete — every piece rendered, each with its post written with it in the results below.');
       }
     } catch (err: any) {
-      setCampaignNote(err?.message || 'The campaign could not be built. Your single Build button above still works as before.');
+      setCampaignNote(err?.message || 'The campaign could not be built. You can still build a single promo with the Build my promo button.');
     } finally {
       campaignAbortRef.current = null;
       setCampaignRunning(false);
@@ -1983,6 +2002,23 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
           </button>
           {posterOpen && (
             <div className="mt-4 space-y-3">
+              {/* R40 P-47: the purpose chips come BEFORE the photo
+                  picker — purpose first, then the photo. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">What's it for?</span>
+                {(
+                  [
+                    ['event', 'Party / Event'],
+                    ['product', 'Product'],
+                    ['business', 'Business'],
+                    ['look', 'Just the look'],
+                  ] as Array<[NoTextPurpose, string]>
+                ).map(([id, label]) => (
+                  <button key={id} type="button" onClick={() => handlePosterPurpose(id)} className={chipCls(posterPurpose === id)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
               <input
                 type="file"
                 accept="image/*"
@@ -2006,21 +2042,6 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                   )}
                 </div>
               )}
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40">What's it for?</span>
-                {(
-                  [
-                    ['event', 'Party / Event'],
-                    ['product', 'Product'],
-                    ['business', 'Business'],
-                    ['look', 'Just the look'],
-                  ] as Array<[NoTextPurpose, string]>
-                ).map(([id, label]) => (
-                  <button key={id} type="button" onClick={() => handlePosterPurpose(id)} className={chipCls(posterPurpose === id)}>
-                    {label}
-                  </button>
-                ))}
-              </div>
               {(
                 [
                   ['headline', 'Headline — e.g. ON ISLAND TIME.'],
@@ -2028,6 +2049,9 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 ] as Array<['headline' | 'sub', string]>
               ).map(([field, placeholder]) => (
                 <div key={field}>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-white/40 mb-1">
+                    {field === 'headline' ? 'Headline' : 'Sub line'}
+                  </label>
                   <div className="relative">
                     <input
                       className={`${inputCls} pr-12`}
@@ -2120,7 +2144,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                         disabled={!!posterStatus}
                         className="min-h-[40px] px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-[11px] font-bold text-white/80 disabled:opacity-50"
                       >
-                        Download {formatId}
+                        Download {formatId} (PNG)
                       </button>
                     ))}
                     <button
@@ -2555,6 +2579,19 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                 {buildLabel}
               </button>
             </div>
+            {/* R40 P-49g: while the build runs, the button's words are
+                the pipeline's real stage (Creating your project… /
+                Uploading … / Slicing … / Saving…) and this bar is
+                indeterminate — no invented percentage anywhere. */}
+            {phase === 'building' && (
+              <div
+                role="progressbar"
+                aria-label="Building your promo"
+                className="mt-3 h-1.5 w-full overflow-hidden rounded bg-white/10"
+              >
+                <div className="h-full w-full bg-gold animate-pulse" />
+              </div>
+            )}
             <p className="text-xs text-white/40 mt-3 text-center">
               Opens in the editor with the beat already on — fine-tune, then export. Free accounts carry the RiddimRoom mark.
             </p>
@@ -2787,6 +2824,15 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
             >
               {buildLabel}
             </button>
+            {phase === 'building' && (
+              <div
+                role="progressbar"
+                aria-label="Building your promo"
+                className="mt-2 h-1.5 w-full overflow-hidden rounded bg-white/10"
+              >
+                <div className="h-full w-full bg-gold animate-pulse" />
+              </div>
+            )}
           </div>
         </div>
       </main>

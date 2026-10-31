@@ -106,7 +106,7 @@ export function BackgroundRemovalButton({
           disabled={status === 'working'}
           title="Remove background — produces a transparent PNG; the original stays available via the Original option"
           className={`px-2 py-1 min-h-[24px] transition ${
-            isRemovedSelected ? 'bg-purple-500/40 text-purple-100' : 'text-white/40 hover:text-white/70'
+            isRemovedSelected ? 'bg-gold/25 text-gold' : 'text-white/40 hover:text-white/70'
           }`}
         >
           {status === 'working' ? `Removing background… ${Math.round(progress * 100)}%` : 'Background Removed'}

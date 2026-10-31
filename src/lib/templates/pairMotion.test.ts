@@ -31,7 +31,7 @@ function videoAsset(id: string, durationSeconds = 12): MediaAsset {
   };
 }
 
-/** A project holding one real camera pair, placed exactly as the camera's "Add both" places it. */
+/** A project holding one real camera pair, placed exactly as the camera's "Add as a pair" places it. */
 function projectWithPair(): Project {
   let project = createDefaultProject('uid-1');
   project = appendDualCaptureToTimeline(project, videoAsset('asset-main'), videoAsset('asset-front'), {

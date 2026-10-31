@@ -514,7 +514,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           ctx.font = `${Math.max(14, Math.round(canvas.height * 0.035))}px Arial, Helvetica, sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(el.error ? 'Media failed to load' : 'Loading…', canvas.width / 2, canvas.height / 2);
+          ctx.fillText(el.error ? 'Media failed to load' : 'Loading your video…', canvas.width / 2, canvas.height / 2);
           ctx.restore();
         }
       }

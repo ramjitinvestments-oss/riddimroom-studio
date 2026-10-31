@@ -46,6 +46,21 @@ function feedReadyProject() {
 }
 
 describe("producer's report", () => {
+  it('R40 P-49d: the loudness line leads with the plain verdict, numbers in parentheses after', () => {
+    const healthy = buildProducerReport(feedReadyProject(), { rmsDbfs: -14, peakDbfs: -1.2 });
+    const beat = healthy.checks.find((c) => c.id === 'beat')!;
+    expect(beat.detail.startsWith('Music is on at a healthy phone level (')).toBe(true);
+    expect(beat.detail).toContain('average ≈ -14 dB, peak -1.2 dB)');
+    const quiet = buildProducerReport(feedReadyProject(), { rmsDbfs: -40, peakDbfs: -9 });
+    expect(quiet.checks.find((c) => c.id === 'beat')!.detail.startsWith('Music is on, but it is very quiet')).toBe(true);
+    // No check line anywhere in the report leads with a dB number.
+    for (const report of [healthy, quiet]) {
+      for (const check of report.checks) {
+        expect(check.detail.trimStart()).not.toMatch(/^-?\d+\s*dB/);
+      }
+    }
+  });
+
   it('a feed-ready promo scores A with no fixes', () => {
     const report = buildProducerReport(feedReadyProject(), { rmsDbfs: -14, peakDbfs: -1.2 });
     expect(report.score).toBeGreaterThanOrEqual(90);

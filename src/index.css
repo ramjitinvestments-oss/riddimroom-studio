@@ -11,6 +11,13 @@
 
 :root {
   color-scheme: dark;
+  /* R40 P-50f — shared motion tokens: the standard UI durations, so
+     a fade or glide is chosen from the scale instead of invented per
+     surface. Applied first to the reel preview crossfade (the one
+     bespoke 500ms); other surfaces adopt them as they are touched. */
+  --motion-fast: 150ms;
+  --motion-standard: 300ms;
+  --motion-slow: 500ms;
 }
 
 body {

@@ -76,7 +76,7 @@ function probeVideo(file: Blob): Promise<Pick<ProbedMedia, 'durationSeconds' | '
       settle(() =>
         reject(
           new Error(
-            'Timed out reading this video\'s metadata (waited 12s). The file may use an unusual codec/container — try re-exporting it as standard H.264 MP4.',
+            'Timed out reading this video\'s details (waited 12 seconds). The file may be in an unusual format — try saving it again as a standard MP4 file.',
           ),
         ),
       );

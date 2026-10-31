@@ -50,6 +50,26 @@ function normalizeTimestamps(candidates: number[], projectDuration: number): num
 }
 
 /**
+ * R40 P-41 — the stable anchor for a hook preview: the earliest start
+ * time among the project's placed visual elements (video/image), or
+ * among all placed elements when there is no visual one, else 0.
+ * A hook preview is anchored where the hook's elements would sit over
+ * the project's own placed elements — NOT at the moving playhead — so
+ * during playback the preview's signature and timestamps never change
+ * purely because time advanced, and the focused card is not
+ * re-rendered every fraction of a second.
+ */
+export function hookPreviewAnchor(project: Project): number {
+  const visualStarts = project.items
+    .filter((item) => item.type === 'video' || item.type === 'image')
+    .map((item) => item.startTime)
+    .filter((t) => Number.isFinite(t));
+  if (visualStarts.length > 0) return Math.max(0, Math.min(...visualStarts));
+  const allStarts = project.items.map((item) => item.startTime).filter((t) => Number.isFinite(t));
+  return allStarts.length > 0 ? Math.max(0, Math.min(...allStarts)) : 0;
+}
+
+/**
  * The applied clone plus up to 3 timestamps to draw poster frames at:
  * full edits sample their packed reel (near its start, its middle,
  * near its end); hooks sample the hook window at the playhead; a
@@ -63,15 +83,21 @@ export function buildPreview(
   currentTime: number,
 ): { project: Project; timestamps: number[] } {
   if (template.kind === 'hook') {
-    const applied = applyHookToProject(project, template, currentTime);
+    // R40 P-41: the preview anchors at the hook's stable placed-element
+    // anchor (see hookPreviewAnchor), never at the moving playhead —
+    // `currentTime` is accepted for signature compatibility with the
+    // caller but deliberately not used for hooks.
+    void currentTime;
+    const anchor = hookPreviewAnchor(project);
+    const applied = applyHookToProject(project, template, anchor);
     if (project.items.length === 0 || getProjectDuration(project) <= 0 || getProjectDuration(applied) <= 0) {
       return { project: applied, timestamps: [] };
     }
     const duration = getProjectDuration(applied);
     const candidates = [
-      currentTime + 0.15,
-      currentTime + template.durationSeconds * 0.5,
-      currentTime + template.durationSeconds * 0.85,
+      anchor + 0.15,
+      anchor + template.durationSeconds * 0.5,
+      anchor + template.durationSeconds * 0.85,
     ];
     return { project: applied, timestamps: normalizeTimestamps(candidates, duration) };
   }
@@ -202,9 +228,10 @@ function itemSignaturePart(item: TimelineItem): string {
  * the watermark flag, every track's visibility/mute (a hidden track
  * renders nothing), and every item's full render-relevant state (see
  * `itemSignaturePart`) — anything that would change the applied
- * result changes the key. Hooks also fold in the playhead (rounded
- * to 0.25s), because a hook preview is anchored where it would be
- * inserted.
+ * result changes the key. Hooks also fold in their stable preview
+ * anchor (R40 P-41: the earliest placed visual element's start time —
+ * see `hookPreviewAnchor`), never the moving playhead, so advancing
+ * playback alone can never produce a new key (or a new render).
  */
 export function previewSignature(project: Project, template: StudioTemplate, currentTime: number): string {
   const itemPart = project.items.map(itemSignaturePart).join(',');
@@ -219,8 +246,8 @@ export function previewSignature(project: Project, template: StudioTemplate, cur
     itemPart,
   ].join('|');
   if (template.kind === 'hook') {
-    const rounded = Math.round(currentTime / 0.25) * 0.25;
-    return `${base}|@${rounded.toFixed(2)}`;
+    void currentTime;
+    return `${base}|@${hookPreviewAnchor(project).toFixed(2)}`;
   }
   return base;
 }

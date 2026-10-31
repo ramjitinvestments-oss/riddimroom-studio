@@ -83,11 +83,68 @@ const BLOCKED_TOKENS = [
 const SRC_DIR = dirname(fileURLToPath(import.meta.url));
 const COMPONENTS_DIR = join(SRC_DIR, 'components');
 
-/** Lib modules whose strings reach users — see the header notes. */
+/**
+ * Lib modules whose strings reach users — see the header notes.
+ *
+ * R40 P-51 — the scan now covers every lib module that exports
+ * user-facing message strings, not just the original three:
+ *   camera: twoPass (flow headings/tips), motionCoach (coach pill),
+ *     cameraControls (lock notes);
+ *   export: exportErrors (plain error sentences), producerReport
+ *     (the Producer's report lines), socialPosts (ready-to-paste
+ *     post copy);
+ *   media: uploadErrors, validate (file messages), probe (its
+ *     timeout message was reworded into plain words for this scan —
+ *     it named a codec before);
+ *   promo: suggest (the suggestion bank), vision (read-outcome
+ *     messages);
+ *   transcription: clientErrors + errors (plain failure sentences);
+ *   and: projectDurationGate (gate messages), pairLayout (pair
+ *     warnings), pip (layout names), templates/reelMeta (card
+ *     labels), legalCopy (the Privacy/Terms pages — Firebase/Google
+ *     are named there because they really are the processors; that
+ *     is honest naming, and no blocked token collides with it),
+ *     capWarning, accessBlock, accountDeletion, licensing (plan
+ *     words), projects/localDraft (the save-status line).
+ *
+ * Deliberately NOT scanned, with reasons:
+ *   - lib/export/mediabunnyExporter.ts, lib/transcription/gemini.ts,
+ *     lib/transcription/whisper.ts, lib/promo/ocrEngine.ts: engine /
+ *     provider internals — their strings are diagnostics and
+ *     provider payloads, never rendered as user copy (user-facing
+ *     failures from those paths are reworded by exportErrors /
+ *     transcription/errors, which ARE scanned).
+ *   - lib/export/quality.ts: numeric encoder configuration; its
+ *     only hits are identifier names (e.g. `baseVideoMbps`), not
+ *     copy — its user-facing tier labels are plain one-word labels.
+ */
 const USER_COPY_LIB = [
   'lib/camera/captureReceipt.ts',
   'lib/camera/dualCapture.ts',
   'lib/camera/lightMeter.ts',
+  'lib/camera/twoPass.ts',
+  'lib/camera/motionCoach.ts',
+  'lib/camera/cameraControls.ts',
+  'lib/export/exportErrors.ts',
+  'lib/export/producerReport.ts',
+  'lib/export/socialPosts.ts',
+  'lib/media/uploadErrors.ts',
+  'lib/media/validate.ts',
+  'lib/media/probe.ts',
+  'lib/promo/suggest.ts',
+  'lib/promo/vision.ts',
+  'lib/transcription/clientErrors.ts',
+  'lib/transcription/errors.ts',
+  'lib/projectDurationGate.ts',
+  'lib/pairLayout.ts',
+  'lib/pip.ts',
+  'lib/templates/reelMeta.ts',
+  'lib/legalCopy.ts',
+  'lib/capWarning.ts',
+  'lib/accessBlock.ts',
+  'lib/accountDeletion.ts',
+  'lib/licensing.ts',
+  'lib/projects/localDraft.ts',
 ] as const;
 
 function collectComponentFiles(dir: string): string[] {

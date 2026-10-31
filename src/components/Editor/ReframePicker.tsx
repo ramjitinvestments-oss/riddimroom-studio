@@ -90,7 +90,7 @@ export function ReframePicker({ item, asset, onConfirm, onCancel }: ReframePicke
         {poster ? (
           <img src={poster} alt="" className="absolute inset-0 w-full h-full" draggable={false} />
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-[11px] text-white/30">Loading still…</div>
+          <div className="absolute inset-0 flex items-center justify-center text-[11px] text-white/30">Loading photo…</div>
         )}
         <div
           className="absolute border-2 border-gold rounded-sm pointer-events-none"

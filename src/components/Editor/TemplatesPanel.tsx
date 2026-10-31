@@ -347,7 +347,16 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         }}
       >
         {visible.length === 0 ? (
-          <p className="text-[11px] text-white/30">No templates in this filter.</p>
+          <div className="flex items-center gap-2">
+            <p className="text-[11px] text-white/30">No templates in this filter.</p>
+            <button
+              type="button"
+              onClick={() => selectChip('all')}
+              className="min-h-11 px-3 rounded-lg border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-[11px] font-bold"
+            >
+              Clear the filter
+            </button>
+          </div>
         ) : (
           <div className="flex" style={{ gap: REEL_LAYOUT.gap }}>
             {visible.map((t) => {
@@ -554,7 +563,7 @@ function ReelPreviewLayer({ canvases }: { canvases: HTMLCanvasElement[] }) {
       canvas.style.width = '100%';
       canvas.style.height = '100%';
       canvas.style.objectFit = 'contain';
-      canvas.style.transition = 'opacity 500ms ease';
+      canvas.style.transition = 'opacity var(--motion-slow, 500ms) ease';
       canvas.style.opacity = i === 0 ? '1' : '0';
       host.appendChild(canvas);
     });
@@ -656,9 +665,9 @@ function ReelTemplateCard({
             <Check size={11} strokeWidth={3.5} />
           </span>
         )}
-        <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[9px] font-bold text-white/85">{model.durationLabel}</span>
+        <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] font-bold text-white/85">{model.durationLabel}</span>
         {model.frameAspect && (
-          <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[9px] font-bold text-white/85">{model.frameAspect}</span>
+          <span className="rounded-full bg-black/55 px-1.5 py-0.5 text-[10px] font-bold text-white/85">{model.frameAspect}</span>
         )}
       </span>
 
@@ -684,15 +693,15 @@ function ReelTemplateCard({
           {model.name}
         </span>
         <span className="flex items-center justify-between gap-1">
-          <span className="truncate text-[8.5px] leading-tight text-white/60">
+          <span className="truncate text-[10px] leading-tight text-white/60">
             {model.kindLabel}
             {model.slotCount ? ` · ${model.slotCount} clips` : ''}
           </span>
           {focused &&
             (applied ? (
-              <span className="shrink-0 rounded-full border border-gold/50 bg-gold/15 px-1.5 py-0.5 text-[9px] font-bold text-gold">Applied</span>
+              <span className="shrink-0 rounded-full border border-gold/50 bg-gold/15 px-1.5 py-0.5 text-[10px] font-bold text-gold">Applied</span>
             ) : (
-              <span className="shrink-0 rounded-full bg-gold px-1.5 py-0.5 text-[9px] font-bold text-black">Apply</span>
+              <span className="shrink-0 rounded-full bg-gold px-1.5 py-0.5 text-[10px] font-bold text-black">Apply</span>
             ))}
         </span>
       </span>

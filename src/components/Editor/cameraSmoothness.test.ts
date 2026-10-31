@@ -101,6 +101,26 @@ describe('WS-4 — overlayOnly review (from WS-1)', () => {
   });
 });
 
+describe('R40 P-38/P-39 — zebra first paint + level remount paint (source-level)', () => {
+  it('the zebra grid is kept in a ref and cells paint from it on mount and on toggle', () => {
+    expect(cameraSource).toContain('lastZebraCellsRef');
+    expect(cameraSource).toContain('lastZebraCellsRef.current = [...result.zebraCells]');
+    expect(cameraSource).toContain('paintZebraCell(el, i)');
+    expect(cameraSource).toContain('zebraCellRefs.current.forEach((cell, i) => paintZebraCell(cell, i))');
+  });
+
+  it('the last tilt is kept in a ref and the remounted level wrap paints it immediately', () => {
+    expect(cameraSource).toContain('lastTiltRef');
+    expect(cameraSource).toContain('lastTiltRef.current = tilt');
+    expect(cameraSource).toContain('if (tilt !== null) paintLevel(tilt)');
+  });
+
+  it('the pair-placement verb on the camera review is "Add as a pair" — "Add both" is nowhere', () => {
+    expect(cameraSource).toContain('Add as a pair');
+    expect(cameraSource).not.toContain('Add both');
+  });
+});
+
 describe('WS-4 — proven-smooth suggestion surface', () => {
   it('the suggestion renders where quality is chosen and applies only on tap', () => {
     expect(cameraSource).toContain('provenSmoothnessSuggestion');

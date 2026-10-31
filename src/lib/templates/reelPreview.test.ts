@@ -5,6 +5,7 @@ import {
   createPreviewCache,
   createPreviewScheduler,
   hasPreviewMedia,
+  hookPreviewAnchor,
   previewSignature,
 } from './reelPreview';
 import { applyFullTemplate, applyHookToProject } from './apply';
@@ -105,16 +106,18 @@ describe('R37 Phase 2 — reelPreview timestamps', () => {
     }
   });
 
-  it('hook: timestamps stay inside the hook window at the playhead', () => {
+  it('hook: timestamps stay inside the hook window at the stable placed-element anchor (R40 P-41)', () => {
     const fixture = projectWithClips(1);
     const template = getTemplate('gold-smash-intro')!; // 2.5s
-    const at = 2;
-    const { timestamps } = buildPreview(fixture, template, at);
+    const anchor = hookPreviewAnchor(fixture);
+    const { timestamps } = buildPreview(fixture, template, 2);
     expect(timestamps.length).toBeGreaterThan(0);
     for (const t of timestamps) {
-      expect(t).toBeGreaterThanOrEqual(at);
-      expect(t).toBeLessThanOrEqual(at + template.durationSeconds);
+      expect(t).toBeGreaterThanOrEqual(anchor);
+      expect(t).toBeLessThanOrEqual(anchor + template.durationSeconds);
     }
+    // The playhead argument no longer moves the window at all.
+    expect(buildPreview(fixture, template, 7.5).timestamps).toEqual(timestamps);
   });
 
   it('empty project: no preview media and no timestamps', () => {
@@ -151,12 +154,43 @@ describe('R37 Phase 2 — previewSignature', () => {
     );
   });
 
-  it('hook signatures track the playhead (≥0.25s); full signatures ignore it', () => {
+  it('hook signatures ignore the moving playhead (R40 P-41); full signatures ignore it too', () => {
     const fixture = projectWithClips(1);
     const hook = getTemplate('gold-smash-intro')!;
-    expect(previewSignature(fixture, hook, 2.5)).not.toBe(previewSignature(fixture, hook, 2));
+    expect(previewSignature(fixture, hook, 2.5)).toBe(previewSignature(fixture, hook, 2));
+    expect(previewSignature(fixture, hook, 9.75)).toBe(previewSignature(fixture, hook, 0));
     const full = getTemplate('viral-hook-story')!;
     expect(previewSignature(fixture, full, 7)).toBe(previewSignature(fixture, full, 2));
+  });
+
+  it('hook anchor derives from the placed elements’ start times — moving an element moves the anchor', () => {
+    const fixture = projectWithClips(1);
+    const video = fixture.items.find((i) => i.type === 'video')!;
+    expect(hookPreviewAnchor(fixture)).toBe(video.startTime);
+    const moved = updateItem(fixture, video.id, { startTime: video.startTime + 3, endTime: video.endTime + 3 });
+    expect(hookPreviewAnchor(moved)).toBe(video.startTime + 3);
+    const hook = getTemplate('gold-smash-intro')!;
+    expect(previewSignature(moved, hook, 0)).not.toBe(previewSignature(fixture, hook, 0));
+  });
+
+  it('scheduler: advancing currentTime during playback schedules no new hook render (R40 P-41)', async () => {
+    const fixture = projectWithClips(1);
+    const hook = getTemplate('gold-smash-intro')!;
+    let renders = 0;
+    const cache = createPreviewCache<string>(12);
+    const scheduler = createPreviewScheduler<string>(async (key) => {
+      renders += 1;
+      return `frame:${key}`;
+    }, cache);
+    const keyAt = (t: number) => previewSignature(fixture, hook, t);
+    expect(await scheduler.request(keyAt(0))).toBe(`frame:${keyAt(0)}`);
+    // Playback advances in small steps — every key is the same key.
+    for (const t of [0.35, 0.7, 1.4, 2.8, 5.6]) {
+      expect(keyAt(t)).toBe(keyAt(0));
+      expect(await scheduler.request(keyAt(t))).toBe(`frame:${keyAt(0)}`);
+    }
+    expect(renders).toBe(1);
+    expect(cache.size).toBe(1);
   });
 });
 

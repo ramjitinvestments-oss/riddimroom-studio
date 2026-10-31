@@ -493,6 +493,53 @@ export function ExportPanel() {
         </div>
       )}
 
+      {status === 'done' && producerReport && (
+        <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">Producer's report</span>
+            <span className="text-[11px] font-black text-gold">
+              {producerReport.score}/100 · Grade {producerReport.grade}
+            </span>
+          </div>
+          <p className="text-xs text-white/80 font-bold">{producerReport.headline}</p>
+          <div className="flex flex-col gap-1.5">
+            {producerReport.checks.map((check) => (
+              <div key={check.id} className="flex gap-2 items-start">
+                <span className="mt-0.5 shrink-0">
+                  {check.status === 'pass' ? (
+                    <Check size={13} strokeWidth={3} className="text-emerald-400" />
+                  ) : check.status === 'warn' ? (
+                    <AlertTriangle size={13} className="text-amber-300" />
+                  ) : check.status === 'fail' ? (
+                    <X size={13} strokeWidth={3} className="text-red-400" />
+                  ) : (
+                    <Info size={13} className="text-white/40" />
+                  )}
+                </span>
+                <p className="text-[11px] leading-snug text-white/60">
+                  <span className="font-bold text-white/85">{check.label}.</span> {check.detail}
+                </p>
+              </div>
+            ))}
+          </div>
+          {producerReport.fixes.length > 0 && (
+            <div className="border-t border-white/10 pt-2 flex flex-col gap-1">
+              <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Fix first</span>
+              {producerReport.fixes.map((fix, i) => (
+                <p key={i} className="text-[11px] text-gold/90 leading-snug">
+                  {i + 1}. {fix}
+                </p>
+              ))}
+            </div>
+          )}
+          <p className="text-[10px] text-white/60 leading-snug">
+            Measured from your project and the finished file — hook timing, captions, beat, closing ask, format.
+            Posting window tip: Caribbean audiences scroll hardest in the evening and on weekends.
+          </p>
+        </div>
+      )}
+
+      {/* R40 P-49f: the ease-check survey sits BELOW the Producer's report it asks about. */}
       {hasExportedThisSession && !easeCheckDone && (
         <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
           <div className="flex items-center justify-between gap-2">
@@ -540,52 +587,6 @@ export function ExportPanel() {
           <button onClick={submitEaseCheck} className="w-full min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-black uppercase tracking-wide">
             Submit
           </button>
-        </div>
-      )}
-
-      {status === 'done' && producerReport && (
-        <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">Producer's report</span>
-            <span className="text-[11px] font-black text-gold">
-              {producerReport.score}/100 · Grade {producerReport.grade}
-            </span>
-          </div>
-          <p className="text-xs text-white/80 font-bold">{producerReport.headline}</p>
-          <div className="flex flex-col gap-1.5">
-            {producerReport.checks.map((check) => (
-              <div key={check.id} className="flex gap-2 items-start">
-                <span className="mt-0.5 shrink-0">
-                  {check.status === 'pass' ? (
-                    <Check size={13} strokeWidth={3} className="text-emerald-400" />
-                  ) : check.status === 'warn' ? (
-                    <AlertTriangle size={13} className="text-amber-300" />
-                  ) : check.status === 'fail' ? (
-                    <X size={13} strokeWidth={3} className="text-red-400" />
-                  ) : (
-                    <Info size={13} className="text-white/40" />
-                  )}
-                </span>
-                <p className="text-[11px] leading-snug text-white/60">
-                  <span className="font-bold text-white/85">{check.label}.</span> {check.detail}
-                </p>
-              </div>
-            ))}
-          </div>
-          {producerReport.fixes.length > 0 && (
-            <div className="border-t border-white/10 pt-2 flex flex-col gap-1">
-              <span className="text-[10px] font-bold uppercase tracking-wide text-white/40">Fix first</span>
-              {producerReport.fixes.map((fix, i) => (
-                <p key={i} className="text-[11px] text-gold/90 leading-snug">
-                  {i + 1}. {fix}
-                </p>
-              ))}
-            </div>
-          )}
-          <p className="text-[10px] text-white/60 leading-snug">
-            Measured from your project and the finished file — hook timing, captions, beat, closing ask, format.
-            Posting window tip: Caribbean audiences scroll hardest in the evening and on weekends.
-          </p>
         </div>
       )}
 

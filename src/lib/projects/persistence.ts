@@ -126,6 +126,20 @@ export async function loadProject(projectId: string, ownerUid: string): Promise<
   return { project };
 }
 
+/**
+ * R40 P-53 — rename a project from the Dashboard, through the SAME
+ * update path the editor header uses: the project's `name` (and its
+ * `updatedAt`) change, and the whole project document is written
+ * back with `saveProject`. Nothing else about the project changes.
+ */
+export async function renameProject(projectId: string, ownerUid: string, name: string): Promise<Project> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Give the project a name first.');
+  const { project, error } = await loadProject(projectId, ownerUid);
+  if (!project) throw new Error(error || 'Project not found.');
+  return saveProject({ ...project, name: trimmed, updatedAt: Date.now() });
+}
+
 export async function listProjects(ownerUid: string, max = 50): Promise<ProjectSummary[]> {
   // Deliberately no `orderBy('updatedAt')` in the query itself: combined
   // with `where('ownerUid', '==', ...)` on a different field, Firestore

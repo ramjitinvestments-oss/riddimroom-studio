@@ -76,6 +76,13 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
+/**
+ * R40 P-49a — the ONE password rule message. LoginPage's own
+ * validation and the weak-password auth error below both use this
+ * exact string, so the rule is worded one way everywhere.
+ */
+export const PASSWORD_RULE_MESSAGE = 'Password must be at least 6 characters.';
+
 // Friendly error-message mapping ported verbatim from
 // riddimroom-caption's handleEmailAuthDirect catch block.
 function friendlyAuthError(err: any): string {
@@ -87,7 +94,7 @@ function friendlyAuthError(err: any): string {
     return 'This email is already in use. Try signing in instead.';
   }
   if (code === 'auth/weak-password') {
-    return 'Password should be at least 6 characters.';
+    return PASSWORD_RULE_MESSAGE;
   }
   if (code === 'auth/invalid-email') {
     return 'Please enter a valid email address.';

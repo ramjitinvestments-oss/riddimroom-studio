@@ -312,15 +312,32 @@ function EditorInner({ uid }: { uid: string }) {
     [mutate, noteCapAfterLanding],
   );
 
-  // R32 Phase 4 — a finished imported pair (MediaImportPanel pair
-  // routing): two visual files placed together as Corner PiP or
-  // Split 50/50 in one mutate (one undo step).
+  // R32 Phase 4 / R40 P-31 — an imported pair: two visual files
+  // placed together as Corner PiP or Split 50/50 in one mutate (one
+  // undo step). Since P-31 the two files first land on the timeline
+  // individually like any others, and this handler runs only when
+  // the user takes the post-import pair offer — so the items those
+  // two assets landed as are removed in the SAME mutate, and the
+  // pair placement (the existing placeImportPair machinery) replaces
+  // them. No clip is ever duplicated by accepting the offer.
   const handlePairAssetUploaded = useCallback(
     (assetA: MediaAsset, assetB: MediaAsset, options: { layout: 'pip' | 'split' }) => {
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      const placePairReplacingSingles = (p: Project): Project => {
+        let next = p;
+        for (const item of p.items) {
+          if (
+            (item.type === 'video' || item.type === 'image') &&
+            (item.mediaAssetId === assetA.id || item.mediaAssetId === assetB.id)
+          ) {
+            next = removeItem(next, item.id);
+          }
+        }
+        return placeImportPair(next, assetA, assetB, { layout: options.layout });
+      };
       const before = projectStateRef.current;
-      if (before) noteCapAfterLanding(placeImportPair(before, assetA, assetB, { layout: options.layout }));
-      mutate((p) => placeImportPair(p, assetA, assetB, { layout: options.layout }));
+      if (before) noteCapAfterLanding(placePairReplacingSingles(before));
+      mutate(placePairReplacingSingles);
       if (wasEmpty) setStep(2);
     },
     [mutate, noteCapAfterLanding],
@@ -461,7 +478,7 @@ function EditorInner({ uid }: { uid: string }) {
           setSelectedItemId(null);
           // R27 WS-M6 — a keyboard delete is a real delete: surface the
           // undo toast exactly like the inspector's Delete button does.
-          window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Clip deleted' } }));
+          window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Deleted' } }));
         }
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
@@ -779,7 +796,9 @@ function EditorInner({ uid }: { uid: string }) {
             </button>
           </React.Fragment>
         ))}
-        <span className="ml-auto hidden sm:inline text-[11px] text-white/60">
+        {/* R40 P-52: the step guidance line is visible on phones too
+            (it used to be hidden below the sm breakpoint). */}
+        <span className="ml-auto text-right text-[11px] text-white/60">
           {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, transitions, effects, captions, PiP' : 'Choose format and quality, export, done'}
         </span>
       </nav>
@@ -789,7 +808,9 @@ function EditorInner({ uid }: { uid: string }) {
           <div className="flex flex-col gap-4">{libraryPanel}</div>
           <aside className="flex flex-col gap-4">
             <TemplatesPanel currentTime={currentTime} uid={uid} />
-            <div className="hidden lg:block bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
+            {/* R40 P-52: "How it works" is reachable on phones too
+                (it used to render only on large screens). */}
+            <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">
               <p className="font-bold text-white text-sm">How it works</p>
               <p>1. Upload or record your clip.</p>
               <p>2. Edit + add captions.</p>

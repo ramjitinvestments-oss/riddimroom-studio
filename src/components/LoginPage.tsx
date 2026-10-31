@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Mail, Lock, User, ArrowRight, KeyRound, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { PASSWORD_RULE_MESSAGE, useAuth } from '../context/AuthContext';
 import BrandLogo from './BrandLogo';
 import { SupportLink } from './SupportLink';
 
@@ -43,7 +43,7 @@ export function LoginPage({ onOpenLegal }: { onOpenLegal?: (path: '/privacy' | '
         return;
       }
       if (password.length < 6) {
-        setLocalError('Password must be at least 6 characters.');
+        setLocalError(PASSWORD_RULE_MESSAGE);
         return;
       }
     } else if (mode === 'forgot') {

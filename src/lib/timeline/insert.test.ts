@@ -241,7 +241,7 @@ describe('normalizeVisualZOrder (main-clip swap keeps overlays visible)', () => 
   });
 });
 
-describe('appendDualCaptureToTimeline (R29 — dual capture "Add both")', () => {
+describe('appendDualCaptureToTimeline (R29 — dual capture "Add as a pair")', () => {
   function dualAsset(id: string): MediaAsset {
     return {
       id,

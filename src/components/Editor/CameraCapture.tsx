@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Clapperboard, PictureInPicture2 } from 'lucide-react';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
@@ -157,7 +157,7 @@ import {
  * on one `performance.now()` anchor and the measured start delta is
  * carried with the result, so the timeline insert can line the overlay
  * up with the main clip. Stopping holds BOTH recordings for review; the
- * "Add both" choice hands the pair to the caller together, while Retake
+ * "Add as a pair" choice hands the pair to the caller together, while Retake
  * re-probes back into dual mode.
  *
  * R30 (dual-probe v2 — R29 failed on the owner's Android): the probe
@@ -294,7 +294,7 @@ interface CameraCaptureProps {
    * R29 — dual-camera recording. When provided, the camera offers
    * "Record both cameras" (rear = main video, front = PiP overlay) and a
    * finished dual recording's review state hands BOTH recordings to the
-   * caller through this callback via its "Add both" choice. Omitted =
+   * caller through this callback via its "Add as a pair" choice. Omitted =
    * dual mode is never offered.
    */
   onCaptureDual?: (result: CaptureDualResult) => void;
@@ -655,6 +655,21 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const meterAdviceGateRef = useRef(createTransitionGate<string | null>());
   /** The zebra overlay's cell nodes, painted by direct DOM writes from the sampler. */
   const zebraCellRefs = useRef<Array<HTMLDivElement | null>>([]);
+  /**
+   * R40 P-38 — the last computed zebra grid, kept in a ref. The grid
+   * only mounts once a cell has flagged (`zebraAnyOn`), which is
+   * AFTER the sampler computed that grid — without this, fresh cells
+   * all started hidden and the first warning waited for the next
+   * sample (and every remount blanked for a beat). Cells now paint
+   * from this ref on mount, and the whole grid re-paints from it on
+   * any false→true toggle. Deliberately NOT cleared by stopStream:
+   * a review remount must repaint the grid as it was.
+   */
+  const lastZebraCellsRef = useRef<boolean[]>([]);
+  /** Paint one zebra cell from the last computed grid (direct DOM write). */
+  const paintZebraCell = useCallback((el: HTMLDivElement | null, i: number) => {
+    if (el) el.style.display = lastZebraCellsRef.current[i] ? 'block' : 'none';
+  }, []);
   /** True once any zebra cell is painted on — drives the overlay container's visibility class only on flips. */
   const [zebraAnyOn, setZebraAnyOn] = useState(false);
   const zebraAnyGateRef = useRef(createTransitionGate<boolean>());
@@ -696,6 +711,28 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const levelWrapRef = useRef<HTMLDivElement | null>(null);
   const horizonLineRef = useRef<HTMLDivElement | null>(null);
   const levelBubbleRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * R40 P-39 — the last known horizon tilt, kept in a ref. The level
+   * wrap unmounts during review states; when it remounts it used to
+   * start hidden and wait for the next deviceorientation event — on
+   * a phone held still, no event fires and the level stayed missing.
+   * The remounted wrap now paints this tilt immediately (see the
+   * layout effect by the orientation listener).
+   */
+  const lastTiltRef = useRef<number | null>(null);
+  /** Paint the level wrap / line / bubble from a tilt value (direct DOM writes). */
+  const paintLevel = useCallback((tilt: number) => {
+    const wrap = levelWrapRef.current;
+    const line = horizonLineRef.current;
+    const bubble = levelBubbleRef.current;
+    if (!wrap || !line || !bubble) return;
+    wrap.style.display = 'block';
+    const level = Math.abs(tilt) <= 2;
+    line.style.transform = `rotate(${-tilt}deg)`;
+    line.className = `w-28 h-0.5 rounded ${level ? 'bg-emerald-400/90' : 'bg-white/70'}`;
+    bubble.style.transform = `translate(calc(-50% + ${levelBubbleOffsetPx(tilt, 40)}px), -50%)`;
+    bubble.className = `absolute top-1/2 left-1/2 w-2.5 h-2.5 rounded-full ${level ? 'bg-emerald-400' : 'bg-gold'}`;
+  }, []);
   /** Rolling sensor buffers for the motion sampler (gyro primary, frame-diff fallback). */
   const motionBufferRef = useRef<{ gyro: GyroSample[]; diffs: number[]; lastFrame: FrameSampleInput | null }>({
     gyro: [],
@@ -1687,7 +1724,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   }, [enterDualMode]);
 
   /**
-   * R31 — two-pass "Add both": the existing dual confirm (the pair is
+   * R31 — two-pass "Add as a pair": the existing dual confirm (the pair is
    * structurally a dual pair), plus flow cleanup — the machine exits
    * after the handoff. The retained step-1 URL was already
    * transferred into `pendingDual`, so `exitTwoPass`'s URL drop is a
@@ -1822,6 +1859,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           setMeterAdviceText(advice);
         }
         if (zebraRecomputedWhile(recording)) {
+          // R40 P-38: keep the grid before painting it — the cells
+          // may not be mounted yet (the container mounts only once
+          // anyOn flips), and the mount paint reads this ref.
+          lastZebraCellsRef.current = [...result.zebraCells];
           let anyOn = false;
           result.zebraCells.forEach((flagged, i) => {
             if (flagged) anyOn = true;
@@ -1844,6 +1885,14 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       window.clearInterval(interval);
     };
   }, [warmedUp, isReady, dualMode, isStep2Phase, pendingVideo, pendingDual, error, isRecording, qualityChoice, fpsChoice, facingMode, controlCaps]);
+
+  // R40 P-38 — when the zebra container (re)mounts on a false→true
+  // toggle, paint every cell immediately from the last computed grid
+  // instead of leaving fresh hidden cells until the next sample.
+  useLayoutEffect(() => {
+    if (!zebraAnyOn || isStep2Phase || pendingVideo || pendingDual) return;
+    zebraCellRefs.current.forEach((cell, i) => paintZebraCell(cell, i));
+  }, [zebraAnyOn, isStep2Phase, pendingVideo, pendingDual, paintZebraCell]);
 
   // R32 Phase 3 — motion sampler: while the steady-start countdown
   // is up OR a recording is running, sample motion at ~4Hz. Gyro is
@@ -2019,27 +2068,33 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     if (!levelEnabled) return;
     const onOrientation = (e: DeviceOrientationEvent) => {
       const tilt = horizonTiltDegrees(e.beta, e.gamma);
+      // R40 P-39: remember the tilt even when the wrap is unmounted
+      // (review states) — the remount paint below reads it.
+      lastTiltRef.current = tilt;
       const wrap = levelWrapRef.current;
-      const line = horizonLineRef.current;
-      const bubble = levelBubbleRef.current;
-      if (!wrap || !line || !bubble) return;
+      if (!wrap) return;
       if (tilt === null) {
         wrap.style.display = 'none';
         return;
       }
-      wrap.style.display = 'block';
-      const level = Math.abs(tilt) <= 2;
-      line.style.transform = `rotate(${-tilt}deg)`;
-      line.className = `w-28 h-0.5 rounded ${level ? 'bg-emerald-400/90' : 'bg-white/70'}`;
-      bubble.style.transform = `translate(calc(-50% + ${levelBubbleOffsetPx(tilt, 40)}px), -50%)`;
-      bubble.className = `absolute top-1/2 left-1/2 w-2.5 h-2.5 rounded-full ${level ? 'bg-emerald-400' : 'bg-gold'}`;
+      paintLevel(tilt);
     };
     window.addEventListener('deviceorientation', onOrientation);
     return () => {
       window.removeEventListener('deviceorientation', onOrientation);
       if (levelWrapRef.current) levelWrapRef.current.style.display = 'none';
     };
-  }, [levelEnabled]);
+  }, [levelEnabled, paintLevel]);
+
+  // R40 P-39 — when the level wrap remounts (back from a review, or
+  // the toggle returning it), paint the last known tilt immediately
+  // instead of waiting for the next deviceorientation event — a
+  // phone held still fires none.
+  useLayoutEffect(() => {
+    if (!levelEnabled || pendingVideo || pendingDual || error) return;
+    const tilt = lastTiltRef.current;
+    if (tilt !== null) paintLevel(tilt);
+  }, [levelEnabled, pendingVideo, pendingDual, error, paintLevel]);
 
   /**
    * R32 Phase 3 — the Level toggle. Where the platform requires a
@@ -2163,6 +2218,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                 key={i}
                 ref={(el) => {
                   zebraCellRefs.current[i] = el;
+                  // R40 P-38: a fresh cell paints from the last grid
+                  // at mount — no one-sample blank beat.
+                  paintZebraCell(el, i);
                 }}
                 className="absolute"
                 style={{
@@ -2372,13 +2430,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           <p className="text-xs text-white/60 text-center">
             {twoPassPhase === 'step2-review'
               ? 'Recorded in two steps — your main video with you over it. If the sound feels off, use Line up the sound in the Overlay panel.'
-              : 'Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay. If the sound feels off, use Line up the sound in the Overlay panel.'}
+              : 'Both cameras recorded together. Add as a pair and the main camera becomes your video, with your front camera as the overlay. If the sound feels off, use Line up the sound in the Overlay panel.'}
           </p>
           <ReceiptLines receipt={pendingDual.mainReceipt} label="Main camera" />
           <ReceiptLines receipt={pendingDual.frontReceipt} label="Front camera" />
           {/* R32 Phase 4 — layout choice for the pair: Corner PiP
               (the usual overlay) or Split 50/50 (both clips as equal
-              halves). Carried into the placement by Add both. */}
+              halves). Carried into the placement by Add as a pair. */}
           <div className="flex items-center gap-2 flex-wrap justify-center">
             <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
             {(
@@ -2404,7 +2462,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
               onClick={twoPassPhase === 'step2-review' ? confirmDualTwoPass : confirmDual}
               className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
             >
-              <Clapperboard size={15} /> Add both
+              <Clapperboard size={15} /> Add as a pair
             </button>
             <button
               onClick={twoPassPhase === 'step2-review' ? retakeStep2 : discardDual}

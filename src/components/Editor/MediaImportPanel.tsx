@@ -10,8 +10,14 @@ import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 import { CameraCapture, type CaptureDualResult, type CaptureResult } from './CameraCapture';
 import { TrimSelectModal } from './TrimSelectModal';
 import { PipAddButtons } from './PipAddButtons';
-import { claimPipRequest, RECORD_PIP_EVENT, UPLOAD_PIP_EVENT } from '../../lib/pipRequests';
-import { defaultSplitOrientation, softInTileWarning } from '../../lib/pairLayout';
+import {
+  answerPipRequest,
+  claimPipRequest,
+  markPipRequestRedispatched,
+  releasePipRequestClaim,
+  RECORD_PIP_EVENT,
+  UPLOAD_PIP_EVENT,
+} from '../../lib/pipRequests';
 import { humanizeUploadError } from '../../lib/media/uploadErrors';
 
 /**
@@ -88,10 +94,13 @@ interface UploadMeta {
   startDeltaMs?: number;
   /** R32 Phase 4 — the camera review's pair layout, carried through the dual group. */
   dualLayout?: 'pip' | 'split';
-  /** R32 Phase 4 — imported-pair routing: both files share a group id; see `pairGroupsRef`. */
-  pairGroupId?: string;
-  pairRole?: 'a' | 'b';
-  pairLayout?: 'pip' | 'split';
+  /**
+   * R40 P-31 — post-import pair offer tracking: two visual files from
+   * ONE main import carry a shared batch id (and their slot in it) so
+   * the panel can offer pairing AFTER both have landed normally.
+   */
+  pairOfferBatchId?: string;
+  pairOfferIndex?: 0 | 1;
 }
 
 interface PendingTrimSelection {
@@ -99,6 +108,8 @@ interface PendingTrimSelection {
   kind: 'video' | 'audio';
   durationSeconds: number;
   purpose: UploadPurpose;
+  pairOfferBatchId?: string;
+  pairOfferIndex?: 0 | 1;
 }
 
 interface MediaImportPanelProps {
@@ -140,20 +151,16 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   const dualGroupsRef = useRef<
     Map<string, { main?: MediaAsset; front?: MediaAsset; startDeltaMs: number; layout: 'pip' | 'split'; fired: boolean }>
   >(new Map());
-  // R32 Phase 4 — imported pairs use the same hold-until-both-land
-  // group mechanism as dual pairs: neither half is placed until both
-  // assets exist, then the pair is handed over exactly once.
-  const pairGroupsRef = useRef<
-    Map<string, { a?: MediaAsset; b?: MediaAsset; layout: 'pip' | 'split'; fired: boolean }>
-  >(new Map());
-  // R32 Phase 4 — exactly two visual files picked in one main import
-  // action are held here for the "Add as a pair" choice, with their
-  // probed sizes/durations for the receipt line.
-  const [pairCandidate, setPairCandidate] = useState<{
-    files: [File, File];
-    probes: Array<{ width?: number; height?: number; durationSeconds?: number } | null>;
-  } | null>(null);
-  const [pairLayoutChoice, setPairLayoutChoice] = useState<'pip' | 'split'>('split');
+  // R40 P-31 — the pair interception is gone: two visual files import
+  // like any others, each landing on the timeline on its own. This
+  // ref only remembers WHICH two assets came from one two-file pick,
+  // so that once BOTH have landed the panel can show the quiet
+  // post-import offer below ("Use these two as a pair?").
+  const pairOfferBatchesRef = useRef<Map<string, { assets: Array<MediaAsset | undefined> }>>(new Map());
+  const [pairOffer, setPairOffer] = useState<{ assets: [MediaAsset, MediaAsset] } | null>(null);
+  // R40 P-45 — the pair layout choice everywhere: Corner PiP first
+  // and the default, then Split 50/50 (camera review + PipPanel order).
+  const [pairLayoutChoice, setPairLayoutChoice] = useState<'pip' | 'split'>('pip');
   // WS-S1 — uploads run through a bounded queue (at most
   // MAX_CONCURRENT_UPLOADS resumable uploads in flight at once) instead
   // of every picked file starting its upload immediately. Per-file
@@ -215,26 +222,6 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
             uploadMetaByUploadId.current.delete(uploadId);
             return;
           }
-          // R32 Phase 4 — imported pair: same hold-until-both rule.
-          if (meta?.pairGroupId && meta.pairRole && onPairAssetUploaded) {
-            let group = pairGroupsRef.current.get(meta.pairGroupId);
-            if (!group) {
-              group = { layout: meta.pairLayout ?? 'split', fired: false };
-              pairGroupsRef.current.set(meta.pairGroupId, group);
-            }
-            if (meta.pairRole === 'a') group.a = asset;
-            else group.b = asset;
-            if (group.a && group.b && !group.fired) {
-              group.fired = true;
-              const assetA = group.a;
-              const assetB = group.b;
-              const groupLayout = group.layout;
-              pairGroupsRef.current.delete(meta.pairGroupId);
-              onPairAssetUploaded(assetA, assetB, { layout: groupLayout });
-            }
-            uploadMetaByUploadId.current.delete(uploadId);
-            return;
-          }
           // Route by the purpose the upload started with (tweaks round):
           // overlay uploads land as PiP/corner overlays, device audio
           // lands on the music track, everything else on the main
@@ -257,6 +244,23 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
             onAssetUploaded(asset, { trimStart, trimEnd, role: 'music' });
           } else {
             onAssetUploaded(asset, hasTrim ? { trimStart, trimEnd } : undefined);
+          }
+          // R40 P-31 — AFTER this file has landed like any other, note
+          // it against its two-file batch; when the second half lands
+          // too, the quiet pair offer appears. The upload itself was
+          // never held, blocked or re-routed by the pair question.
+          if (meta?.pairOfferBatchId && meta.pairOfferIndex !== undefined && onPairAssetUploaded) {
+            let batch = pairOfferBatchesRef.current.get(meta.pairOfferBatchId);
+            if (!batch) {
+              batch = { assets: [undefined, undefined] };
+              pairOfferBatchesRef.current.set(meta.pairOfferBatchId, batch);
+            }
+            batch.assets[meta.pairOfferIndex] = asset;
+            const [landedA, landedB] = batch.assets;
+            if (landedA && landedB) {
+              pairOfferBatchesRef.current.delete(meta.pairOfferBatchId);
+              setPairOffer({ assets: [landedA, landedB] });
+            }
           }
           uploadMetaByUploadId.current.delete(uploadId);
         })
@@ -317,11 +321,14 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
    * same "never let a probe quirk block a real upload" policy.
    */
   const intakeFile = useCallback(
-    (file: File, purpose: UploadPurpose) => {
+    (file: File, purpose: UploadPurpose, pairOffer?: { batchId: string; index: 0 | 1 }) => {
+      const batchMeta = pairOffer
+        ? { pairOfferBatchId: pairOffer.batchId, pairOfferIndex: pairOffer.index }
+        : {};
       const mimeType = file.type || '';
       const kind = mediaKindForMimeType(mimeType);
       if (kind !== 'video' && kind !== 'audio') {
-        startUpload(file, { purpose });
+        startUpload(file, { purpose, ...batchMeta });
         return;
       }
       // WS-S1 — the cached probe: this result is stored under the file's
@@ -331,12 +338,12 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         .then((probed) => {
           const dur = probed.durationSeconds;
           if (typeof dur === 'number' && Number.isFinite(dur) && dur > MAX_MEDIA_SECONDS + 0.25) {
-            setPendingTrim({ file, kind, durationSeconds: dur, purpose });
+            setPendingTrim({ file, kind, durationSeconds: dur, purpose, ...batchMeta });
           } else {
-            startUpload(file, { purpose });
+            startUpload(file, { purpose, ...batchMeta });
           }
         })
-        .catch(() => startUpload(file, { purpose }));
+        .catch(() => startUpload(file, { purpose, ...batchMeta }));
     },
     [startUpload],
   );
@@ -345,28 +352,16 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
     (files: FileList | null, purpose: UploadPurpose) => {
       if (!files) return;
       const list = Array.from(files);
-      // R32 Phase 4 — exactly two visual files in ONE main import
-      // action: hold them for the "Add as a pair" choice (with a
-      // probed receipt) instead of placing them one by one.
+      // R40 P-31 — exactly two visual files in ONE main import action
+      // import like any others, one by one, with NO pair gate in front
+      // of them. They only carry a shared batch tag so the panel can
+      // offer pairing afterwards, once both have landed (see the
+      // pair-offer tracking in runUpload and the offer UI below).
       if (purpose === 'main' && onPairAssetUploaded && list.length === 2) {
         const kinds = list.map((f) => mediaKindForMimeType(f.type || ''));
         if (kinds.every((k) => k === 'video' || k === 'image')) {
-          const pairFiles: [File, File] = [list[0], list[1]];
-          setPairCandidate({ files: pairFiles, probes: [null, null] });
-          pairFiles.forEach((file, idx) => {
-            probeMediaFileCached(file, file.type || '')
-              .then((probed) => {
-                setPairCandidate((current) =>
-                  current && current.files[idx] === file
-                    ? {
-                        files: current.files,
-                        probes: current.probes.map((p, i) => (i === idx ? probed : p)),
-                      }
-                    : current,
-                );
-              })
-              .catch(() => {});
-          });
+          const batchId = generateTimelineId('pairoffer');
+          list.forEach((file, idx) => intakeFile(file, purpose, { batchId, index: idx as 0 | 1 }));
           return;
         }
       }
@@ -375,23 +370,13 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
     [intakeFile, onPairAssetUploaded],
   );
 
-  /** R32 Phase 4 — confirm the held pair: both files upload under one pair group and land together. */
-  const confirmPairCandidate = useCallback(() => {
-    if (!pairCandidate) return;
-    const groupId = generateTimelineId('pair');
-    const [fileA, fileB] = pairCandidate.files;
-    setPairCandidate(null);
-    startUpload(fileA, { purpose: 'main', pairGroupId: groupId, pairRole: 'a', pairLayout: pairLayoutChoice });
-    startUpload(fileB, { purpose: 'main', pairGroupId: groupId, pairRole: 'b', pairLayout: pairLayoutChoice });
-  }, [pairCandidate, pairLayoutChoice, startUpload]);
-
-  /** R32 Phase 4 — the pair choice declined: the two files import normally, one by one. */
-  const declinePairCandidate = useCallback(() => {
-    if (!pairCandidate) return;
-    const files = pairCandidate.files;
-    setPairCandidate(null);
-    files.forEach((file) => intakeFile(file, 'main'));
-  }, [pairCandidate, intakeFile]);
+  /** R40 P-31 — take the post-import pair offer: the two landed assets are placed as a pair. */
+  const confirmPairOffer = useCallback(() => {
+    if (!pairOffer || !onPairAssetUploaded) return;
+    const [assetA, assetB] = pairOffer.assets;
+    setPairOffer(null);
+    onPairAssetUploaded(assetA, assetB, { layout: pairLayoutChoice });
+  }, [pairOffer, pairLayoutChoice, onPairAssetUploaded]);
 
   const startCaptureUpload = useCallback(
     (result: CaptureResult, purpose: UploadPurpose) => {
@@ -466,25 +451,50 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
   // (desktop aside + mobile sheet render the same node): the first
   // RENDERED instance claims each event object, hidden duplicates
   // (a display:none aside) neither claim nor answer it.
+  // R40 P-42 — this instance's claim identity + the claims it is
+  // holding but has not answered yet. A claim is answered a beat
+  // after the action fires (once this instance has actually opened
+  // its camera / picker and is still here); if the instance unmounts
+  // before answering, the cleanup below RELEASES the claim and
+  // re-dispatches the request once, so another mounted instance can
+  // answer instead of the tap dying with this one. The dispatcher's
+  // own one-time retry (lib/pipRequests) covers the rest.
+  const pipInstanceRef = useRef<object | null>(null);
+  if (!pipInstanceRef.current) pipInstanceRef.current = {};
+  const pipHeldClaimsRef = useRef<Array<{ event: Event; name: string; timer: number }>>([]);
   useEffect(() => {
+    const instance = pipInstanceRef.current!;
     const isRendered = () => {
       const el = panelRootRef.current;
       if (!el || typeof el.getClientRects !== 'function') return true;
       return el.getClientRects().length > 0;
     };
-    const onRecordPip = (e: Event) => {
-      if (!isRendered() || !claimPipRequest(e)) return;
-      openRecordPipCamera();
+    const holdClaim = (e: Event, name: string, act: () => void) => {
+      if (!isRendered() || !claimPipRequest(e, instance)) return;
+      act();
+      const timer = window.setTimeout(() => {
+        pipHeldClaimsRef.current = pipHeldClaimsRef.current.filter((h) => h.event !== e);
+        answerPipRequest(e, instance);
+      }, 100);
+      pipHeldClaimsRef.current.push({ event: e, name, timer });
     };
-    const onUploadPip = (e: Event) => {
-      if (!isRendered() || !claimPipRequest(e)) return;
-      overlayInputRef.current?.click();
-    };
+    const onRecordPip = (e: Event) => holdClaim(e, RECORD_PIP_EVENT, openRecordPipCamera);
+    const onUploadPip = (e: Event) =>
+      holdClaim(e, UPLOAD_PIP_EVENT, () => overlayInputRef.current?.click());
     window.addEventListener(RECORD_PIP_EVENT, onRecordPip);
     window.addEventListener(UPLOAD_PIP_EVENT, onUploadPip);
     return () => {
       window.removeEventListener(RECORD_PIP_EVENT, onRecordPip);
       window.removeEventListener(UPLOAD_PIP_EVENT, onUploadPip);
+      // Unmount: free every claim this instance never answered and
+      // re-dispatch each once — a live instance can still answer it.
+      for (const held of pipHeldClaimsRef.current) {
+        window.clearTimeout(held.timer);
+        if (releasePipRequestClaim(held.event, instance) && markPipRequestRedispatched(held.event)) {
+          window.dispatchEvent(new CustomEvent(held.name));
+        }
+      }
+      pipHeldClaimsRef.current = [];
     };
   }, [openRecordPipCamera]);
 
@@ -606,44 +616,35 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
         Drag and drop video, image, or audio files here
       </div>
 
-      {/* R32 Phase 4 — the pair choice for exactly two visual files:
-          a receipt line per file (real size + duration from its own
-          metadata, plus the plain soft warning when a file is smaller
-          than the tile it would fill), a layout choice defaulting to
-          Split 50/50, then Add as a pair — or add them separately. */}
-      {pairCandidate && (
-        <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/10 px-3 py-2.5">
-          <p className="text-xs font-bold text-white">Add these two as a pair?</p>
+      {/* R40 P-31 — the pair offer, shown only AFTER two files from
+          one pick have both landed on the timeline like any others.
+          It is a quiet, dismissible secondary offer (never gold, never
+          a gate): the two files are already in the project either
+          way, and "Add as a pair" simply re-places those two landed
+          assets together. Layout order + default match every other
+          pair surface (R40 P-45): Corner PiP first, then Split 50/50. */}
+      {pairOffer && (
+        <div className="flex flex-col gap-2 rounded-lg border border-white/15 bg-white/5 px-3 py-2.5">
+          <p className="text-xs font-bold text-white">Use these two as a pair?</p>
           <ul className="flex flex-col gap-1">
-            {pairCandidate.files.map((file, idx) => {
-              const probe = pairCandidate.probes[idx];
-              const receipt = probe
-                ? `${probe.width && probe.height ? `${probe.width}×${probe.height}` : 'size not known'}${
-                    typeof probe.durationSeconds === 'number' && Number.isFinite(probe.durationSeconds)
-                      ? ` · ${probe.durationSeconds.toFixed(1)}s`
-                      : ''
-                  }`
-                : 'reading size…';
-              const warning =
-                pairLayoutChoice === 'split' && probe
-                  ? softInTileWarning(probe, canvasWidth, canvasHeight, defaultSplitOrientation(canvasWidth, canvasHeight))
-                  : null;
-              return (
-                <li key={idx} className="text-[11px] text-white/70">
-                  <span className="block truncate">
-                    {file.name} — {receipt}
-                  </span>
-                  {warning && <span className="block text-amber-300">{warning}</span>}
-                </li>
-              );
-            })}
+            {pairOffer.assets.map((asset) => (
+              <li key={asset.id} className="text-[11px] text-white/70">
+                <span className="block truncate">
+                  {asset.fileName}
+                  {asset.width && asset.height ? ` — ${asset.width}×${asset.height}` : ''}
+                  {typeof asset.durationSeconds === 'number' && Number.isFinite(asset.durationSeconds)
+                    ? ` · ${asset.durationSeconds.toFixed(1)}s`
+                    : ''}
+                </span>
+              </li>
+            ))}
           </ul>
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
             {(
               [
-                { id: 'split', label: 'Split 50/50' },
                 { id: 'pip', label: 'Corner PiP' },
+                { id: 'split', label: 'Split 50/50' },
               ] as Array<{ id: 'pip' | 'split'; label: string }>
             ).map((choice) => (
               <button
@@ -660,16 +661,16 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <button
-              onClick={confirmPairCandidate}
-              className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide"
+              onClick={confirmPairOffer}
+              className="min-h-11 px-3 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide"
             >
               Add as a pair
             </button>
             <button
-              onClick={declinePairCandidate}
-              className="min-h-11 px-3 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide"
+              onClick={() => setPairOffer(null)}
+              className="min-h-11 px-3 rounded-lg text-white/60 hover:text-white text-xs font-bold uppercase tracking-wide"
             >
-              Add separately instead
+              Not now
             </button>
           </div>
         </div>
@@ -733,9 +734,9 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
           durationSeconds={pendingTrim.durationSeconds}
           onCancel={() => setPendingTrim(null)}
           onConfirm={({ trimStart, trimEnd }) => {
-            const { file, purpose } = pendingTrim;
+            const { file, purpose, pairOfferBatchId, pairOfferIndex } = pendingTrim;
             setPendingTrim(null);
-            startUpload(file, { trimStart, trimEnd, purpose });
+            startUpload(file, { trimStart, trimEnd, purpose, pairOfferBatchId, pairOfferIndex });
           }}
         />
       )}

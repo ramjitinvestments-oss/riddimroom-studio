@@ -99,8 +99,9 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
     mutate((project) => removeItem(project, item.id));
     // R27 WS-M6 — surface the undo toast at the moment of loss
     // (EditorShell listens for 'rr:undo-toast' and offers one-tap Undo).
+    // R40 P-46: every delete path uses the one message — "Deleted".
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Item deleted' } }));
+      window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Deleted' } }));
     }
   };
 
@@ -699,7 +700,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
                 onClick={() => mutate((p) => applyCrossDissolve(p, item.id, CROSS_DISSOLVE_DURATION_SECONDS))}
                 disabled={dissolveApplied}
                 className={`min-h-11 px-2 rounded uppercase tracking-wide font-bold text-[11px] ${
-                  dissolveApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  dissolveApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-gold hover:bg-gold-bright text-black'
                 }`}
                 title="Overlap this clip with the next one on this track and cross-fade between them"
               >
@@ -730,7 +731,7 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
                   onClick={() => mutate((p) => applyTransition(p, item.id, transitionPresetForBoundary, transitionBoundaryDuration))}
                   disabled={transitionApplied}
                   className={`min-h-11 px-2 rounded uppercase tracking-wide font-bold text-[11px] shrink-0 ${
-                    transitionApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                    transitionApplied ? 'bg-white/5 text-white/30 cursor-not-allowed' : 'bg-gold hover:bg-gold-bright text-black'
                   }`}
                   title="Overlap this clip with the next one on this track and play this transition between them — both clips draw simultaneously during the overlap, real WYSIWYG in preview and export"
                 >
@@ -919,6 +920,12 @@ function CaptionInspector({ item }: { item: CaptionTimelineItem }) {
 
   const deleteWord = (index: number) => {
     patchWords(item.words.filter((_, i) => i !== index));
+    // R40 P-46 — a caption-word delete is a delete like any other:
+    // it gets the same "Deleted" undo toast (this was the known hole
+    // where a word vanished with no way back offered).
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Deleted' } }));
+    }
   };
 
   const addWord = () => {

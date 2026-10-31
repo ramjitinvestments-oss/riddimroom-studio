@@ -445,7 +445,7 @@ export interface AppendDualCaptureOptions {
 
 /**
  * R29 — place a dual-capture pair on the timeline in one call: one tap
- * in the camera review ("Add both") becomes the rear clip as the main
+ * in the camera review ("Add as a pair") becomes the rear clip as the main
  * video PLUS its own front-camera clip as a PiP overlay at the SAME
  * timeline start, with the two files' heads aligned by the measured
  * recorder start delta (`dualAlignmentTrims` — the earlier-started
