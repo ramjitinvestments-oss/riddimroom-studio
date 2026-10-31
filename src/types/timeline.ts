@@ -484,6 +484,17 @@ export interface VideoTimelineItem extends TimelineItemBase, Transform, TrimSett
   crop?: CropSettings;
   colorGrade?: ColorGradeSettings;
   fade?: FadeSettings;
+  /**
+   * R40 P-22 — "Line up the sound" for a MAIN clip: how many frames the
+   * user has shifted this clip by (the shift itself is applied to
+   * startTime/endTime — the same translation the PiP/pair nudges use —
+   * which is what preview and export read, so the two always agree;
+   * this field is only the bookkeeping that clamps the cumulative
+   * total to ±15 project frames). A main clip's sound is part of the
+   * clip itself, so the nudge moves the whole clip against the other
+   * clips — that relative shift is what lines its sound up. Absent = 0.
+   */
+  mainSyncNudgeFrames?: number;
   /** PiP overlay settings. Absent = normal full-frame video. */
   pip?: PipSettings;
   animation?: AnimationSettings;

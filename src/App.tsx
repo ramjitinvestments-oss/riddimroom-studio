@@ -43,12 +43,14 @@ function RouteLoading() {
  */
 function AppShell() {
   const { currentPath, navigateTo } = useRouter();
-  const { currentUser, userProfile, isAuthLoading, isAccountDisabled, signOut } = useAuth();
+  const { currentUser, userProfile, isAuthLoading, isAccountDisabled, accessBlockReason, signOut } = useAuth();
 
-  // UX-02: leaving the restricted screen below. AuthContext's signOut does
-  // not clear isAccountDisabled, and the gate itself already signed the
-  // user out when it set that flag — so after signing out, load the login
-  // page fresh; that is what actually returns the user to a working screen.
+  // UX-02 / R40 P-23: leaving the restricted screen below. AuthContext
+  // retains the access-block reason across sign-out (the gate itself
+  // already signed the user out when it set the reason), so this
+  // screen can name the true state; the explicit Sign out here loads
+  // the login page fresh, which is what returns the user to a working
+  // screen.
   const handleRestrictedSignOut = async () => {
     try {
       await signOut();
@@ -97,12 +99,18 @@ function AppShell() {
   }
 
   if (isAccountDisabled) {
+    // R40 P-23: the copy names the TRUE state, from the reason
+    // AuthContext retained across the sign-out. 'switched-off' needs
+    // the owner (email us); 'unreachable' means no account state was
+    // ever read, so trying again is the honest first step.
+    const unreachable = accessBlockReason === 'unreachable';
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 px-6 text-center bg-[#070707] text-white">
         <h1 className="text-lg font-black uppercase">Account access restricted</h1>
         <p className="text-sm text-white/50 max-w-sm">
-          This account can&rsquo;t use RiddimRoom Studio right now. Try again to re-check your
-          access, or sign out and sign in with a different account.
+          {unreachable
+            ? 'We couldn’t reach the server — check your connection and try again. Nothing is known to be wrong with your account.'
+            : 'Your account is switched off — email us if you think that’s wrong, or sign out and sign in with a different account.'}
         </p>
         <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
           <button

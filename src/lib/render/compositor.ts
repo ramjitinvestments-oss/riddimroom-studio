@@ -1323,7 +1323,15 @@ function drawVideoItem(
 ) {
   // Keyframe-lite (Phase 2.3): the frame's effective transform — base
   // transform unless an end transform interpolates it across the item.
-  const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
+  // R40 P-36: a HELD frame uses the item's resting (base) transform —
+  // the end transform is neutralized, exactly like the fade/exit bypass
+  // below. Interpolating to the end state here (progress clamps to 1
+  // past the item's end) made a clip whose end transform finishes at
+  // opacity 0 — or moved/scaled away — "hold" as an invisible or
+  // off-frame tail; the held frame must be the VISIBLE last frame.
+  const effective = held
+    ? { position: item.position, scale: item.scale, rotation: item.rotation, opacity: item.opacity }
+    : interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
   // R32 Phase 4: a split tile's box is its frameRect, centred in the
   // tile (an endTransform glide, if any, still moves it from there).
   const tileBox = item.frameRect ? frameRectBoxPx(item.frameRect, canvasWidth, canvasHeight) : null;
@@ -1342,11 +1350,13 @@ function drawVideoItem(
       : { w: canvasWidth * effective.scale, h: canvasHeight * effective.scale };
   const w = box.w;
   const h = box.h;
-  // R36 hold: a held item draws its FINAL state at full strength — the
-  // entrance/exit + fade machinery must not run (its `untilEnd` is
-  // negative past the item's end, which would ramp the held frame to
-  // invisible), while a continuous motion effect settles at its own
-  // final position (elapsed = the item's full duration, progress 1).
+  // R36 hold: a held item draws at full strength — the entrance/exit +
+  // fade machinery must not run (its `untilEnd` is negative past the
+  // item's end, which would ramp the held frame to invisible), while a
+  // continuous motion effect settles at its own final position
+  // (elapsed = the item's full duration, progress 1). R40 P-36: the
+  // transform is the item's resting (base) transform (see `effective`
+  // above) — never the end transform's finished state.
   const itemDuration = item.endTime - item.startTime;
   const transitionAdjustment = held ? { ...IDENTITY_ADJUSTMENT } : animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, held ? itemDuration : timeSeconds - item.startTime, itemDuration, canvasWidth, canvasHeight);
@@ -1448,7 +1458,11 @@ function drawImageItem(
   held = false,
 ) {
   // Keyframe-lite (Phase 2.3): same effective-transform treatment as video.
-  const effective = interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
+  // R40 P-36: held draws use the resting (base) transform — the end
+  // transform is neutralized, as in drawVideoItem above.
+  const effective = held
+    ? { position: item.position, scale: item.scale, rotation: item.rotation, opacity: item.opacity }
+    : interpolateTransform(item, item.endTransform, (timeSeconds - item.startTime) / Math.max(0.001, item.endTime - item.startTime));
   // R32 Phase 4: a split tile's box is its frameRect (see drawVideoItem).
   const tileBox = item.frameRect ? frameRectBoxPx(item.frameRect, canvasWidth, canvasHeight) : null;
   const centerX = tileBox
@@ -1469,8 +1483,8 @@ function drawImageItem(
       : 1;
   const w = tileBox ? tileBox.w * (effective.scale / (item.scale || 1)) : baseWidth;
   const h = tileBox ? tileBox.h * (effective.scale / (item.scale || 1)) : baseWidth * aspect;
-  // R36 hold: same rule as drawVideoItem — final state, full strength
-  // (no exit/fade ramp), motion settled at progress 1.
+  // R36 hold: same rule as drawVideoItem — resting transform, full
+  // strength (no exit/fade ramp), motion settled at progress 1.
   const itemDuration = item.endTime - item.startTime;
   const transitionAdjustment = held ? { ...IDENTITY_ADJUSTMENT } : animationFor(item, timeSeconds, canvasWidth, canvasHeight);
   const motionAdjustment = computeMotionAdjustment(item.motion, held ? itemDuration : timeSeconds - item.startTime, itemDuration, canvasWidth, canvasHeight);

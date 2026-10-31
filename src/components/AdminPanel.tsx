@@ -3,6 +3,7 @@ import { ArrowLeft, Download, Search } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import BrandLogo from './BrandLogo';
 import { FAILURE_KIND_LABELS, type FailureCountsSummary, type FailureKind } from '../lib/failureCounts';
+import type { DeletionRequestRow } from '../lib/accountDeletion';
 
 /**
  * Phase 2 (Plan v5) — the owner's Admin screen: every signup by email,
@@ -58,6 +59,26 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
   // only, no user content). Loads quietly alongside the signup list;
   // if it cannot load, the section simply stays hidden.
   const [failureSummary, setFailureSummary] = useState<FailureCountsSummary | null>(null);
+  // R40 P-27 — account deletion requests: who asked, and when. Loads
+  // quietly alongside the other readouts; hidden when it cannot load.
+  const [deletionRequests, setDeletionRequests] = useState<DeletionRequestRow[] | null>(null);
+
+  useEffect(() => {
+    if (!idToken) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/deletion-requests', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        const data = await res.json().catch(() => null);
+        if (!cancelled && res.ok && data?.success) setDeletionRequests(data.requests as DeletionRequestRow[]);
+      } catch {
+        // The readout is a help, never a blocker on the admin screen.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [idToken]);
 
   useEffect(() => {
     if (!idToken) return;
@@ -214,6 +235,27 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                 </div>
               ))}
             </div>
+          </section>
+        )}
+
+        {deletionRequests && deletionRequests.length > 0 && (
+          <section className="mb-6 rounded-xl border border-white/10 bg-white/[0.03] p-4" aria-label="Account deletion requests">
+            <h2 className="text-xs font-black uppercase tracking-wide text-white/70">Account deletion requests</h2>
+            <p className="text-xs text-white/50 mt-1">
+              To complete a request: switch the account off here (the access switches below), then delete
+              the user in the Firebase console. The app does not delete the account itself — recording the
+              request is all it does.
+            </p>
+            <ul className="mt-3 flex flex-col gap-1">
+              {deletionRequests.map((row) => (
+                <li key={row.uid} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs">
+                  <span className="font-bold text-white/80">{row.email || row.uid}</span>
+                  <span className="text-white/40">
+                    {row.requestedAt ? `Asked ${new Date(row.requestedAt).toLocaleString()}` : 'Asking date not recorded'}
+                  </span>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
 

@@ -785,21 +785,47 @@ export function setItemSpeed(project: Project, itemId: string, newSpeed: number)
 
 // ---------------------------------------------------------------------------
 // Audio fit — "Trim to project end" / "Loop to fill project" (tweaks
-// round, MusicPanel's Fit section). Both target the end of the REST of
-// the project (every item except the audio item itself): fitting never
-// grows the project, it aligns the audio item's end edge with the
-// content it accompanies. Both also default a short fade-out at the
-// fitted end when the item has none — an abrupt cut exactly at the
-// project's last frame sounds like a bug, not an ending — while
-// respecting a fade-out the user already set.
+// round, MusicPanel's Fit section). Both target the project's TRUE end:
+// fitting never grows the project, it aligns the audio item's end edge
+// with the end the export will actually have. Both also default a
+// short fade-out at the fitted end when the item has none — an abrupt
+// cut exactly at the project's last frame sounds like a bug, not an
+// ending — while respecting a fade-out the user already set.
 // ---------------------------------------------------------------------------
 
 /** Fade-out (seconds) the fit helpers default at the fitted end when the item has none. */
 export const FIT_FADE_OUT_SECONDS = 0.5;
 
-/** Latest endTime among all items except `excludeItemId` — "the end of the project this item accompanies". 0 when the item is alone on the timeline. Deliberately MAX-END semantics (not `getProjectDuration`'s R26 main-track semantics): this backs the explicit Fit-to-project tools, whose job is to align audio with everything else on the timeline, whatever track it's on. */
+/** Latest endTime among all items except `excludeItemId` — "the end of the project this item accompanies". 0 when the item is alone on the timeline. Deliberately MAX-END semantics (not `getProjectDuration`'s R26 main-track semantics): kept for consumers that genuinely need the full timeline extent (e.g. a scrollable timeline ruler that must still reach an over-long audio item). The Fit-to-project helpers below no longer use it — see `getFitTargetEnd`. */
 export function getContentEndTime(project: Project, excludeItemId?: string): number {
   return project.items.reduce((max, i) => (i.id === excludeItemId ? max : Math.max(max, i.endTime)), 0);
+}
+
+/**
+ * R40 P-35 — the end the Fit-to-project helpers aim at: the R36 project
+ * end (`getProjectDuration` — max of the main-track end and the longest
+ * video end), so "Loop to fill" fills exactly the length the export
+ * will be. Audio and text items NEVER extend this target: an over-long
+ * voiceover or text item no longer stretches the music past the real
+ * project end (the render clips audio at the project end anyway, so
+ * the old target promised a fitted length the export never delivered).
+ *
+ * Music-only fallback: when the project has NO visual content at all
+ * (no main visual item and no video item — e.g. a lone music bed),
+ * `getProjectDuration` falls back to the latest end of every item,
+ * which for a lone audio item is its own end; aiming there would make
+ * fit a no-op that can never trim an over-long bed. In that case the
+ * target is the latest end of the OTHER items (the pre-P-35 content
+ * end), and 0 — a no-op — when the item is truly alone.
+ */
+export function getFitTargetEnd(project: Project, excludeItemId?: string): number {
+  const others = project.items.filter((i) => i.id !== excludeItemId);
+  const hasVisualContent =
+    getLongestVideoEnd(project) !== null || others.some((i) => isMainVisualItem(i));
+  if (hasVisualContent) return getProjectDuration(project);
+  // No visual content: keep the fitted item's own span out of its own
+  // target (a lone bed has nothing to fit to).
+  return others.reduce((max, i) => Math.max(max, i.endTime), 0);
 }
 
 function fittedFadeOut(item: { endTime: number; startTime: number; fade: FadeSettings }, newDuration: number): number {
@@ -808,8 +834,9 @@ function fittedFadeOut(item: { endTime: number; startTime: number; fade: FadeSet
 }
 
 /**
- * "Trim to project end": aligns an audio item's end with the end of the
- * rest of the project, WITHOUT looping — the trim window moves 1:1 with
+ * "Trim to project end": aligns an audio item's end with the project's
+ * true end (R40 P-35: the R36 project end — see `getFitTargetEnd`),
+ * WITHOUT looping — the trim window moves 1:1 with
  * the end edge (audio has no speed), so trimming down drops source from
  * the tail and extending consumes source the asset actually has (never
  * past the asset's real duration, when known, and never past the
@@ -820,7 +847,7 @@ function fittedFadeOut(item: { endTime: number; startTime: number; fade: FadeSet
 export function trimAudioToProjectEnd(project: Project, itemId: string): Project {
   const item = project.items.find((i) => i.id === itemId);
   if (!item || item.type !== 'audio') return project;
-  const targetEnd = getContentEndTime(project, itemId);
+  const targetEnd = getFitTargetEnd(project, itemId);
   if (targetEnd <= item.startTime + 0.1) return project;
   const asset = project.mediaAssets[item.mediaAssetId];
   const sourceAvailable =
@@ -839,8 +866,9 @@ export function trimAudioToProjectEnd(project: Project, itemId: string): Project
 }
 
 /**
- * "Loop to fill project": stretches an audio item's timeline span to the
- * end of the rest of the project and sets `loop` — the render paths wrap
+ * "Loop to fill project": stretches an audio item's timeline span to
+ * the project's true end (R40 P-35: the R36 project end — see
+ * `getFitTargetEnd`) and sets `loop` — the render paths wrap
  * playback inside the item's (unchanged) trim window
  * (`computeLoopedSourceTime`), so a short music bed covers the whole
  * video. The end is capped at the per-item duration cap. No-op for
@@ -850,7 +878,7 @@ export function trimAudioToProjectEnd(project: Project, itemId: string): Project
 export function loopAudioToProjectEnd(project: Project, itemId: string): Project {
   const item = project.items.find((i) => i.id === itemId);
   if (!item || item.type !== 'audio') return project;
-  const targetEnd = getContentEndTime(project, itemId);
+  const targetEnd = getFitTargetEnd(project, itemId);
   if (targetEnd <= item.startTime + 0.1) return project;
   const newEnd = Math.min(targetEnd, item.startTime + MAX_MEDIA_SECONDS);
   const newDuration = newEnd - item.startTime;

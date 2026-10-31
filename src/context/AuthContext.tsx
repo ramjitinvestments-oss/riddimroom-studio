@@ -2,7 +2,10 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 import type { User as FirebaseUser, Auth } from 'firebase/auth';
 import type { GoogleAuthProvider } from 'firebase/auth';
 import { loadFirebase, scheduleFirebaseLoad } from '../lib/firebaseLoader';
+import { accessBlockForProfileOutcome, type AccessBlockReason } from '../lib/accessBlock';
 import type { ClientUserProfile } from '../types/user';
+
+export type { AccessBlockReason } from '../lib/accessBlock';
 
 /**
  * Shared authentication context/provider.
@@ -29,6 +32,12 @@ import type { ClientUserProfile } from '../types/user';
  * with its spinner. Once loaded, every behavior below is exactly as
  * before: the pending gate, the account-disabled/restricted handling,
  * sign-out and session persistence are untouched.
+ *
+ * R40 P-23 (completes R34's deferred UX-02 root fix): the bare
+ * `isAccountDisabled` boolean is now derived from a retained
+ * `accessBlockReason` (lib/accessBlock) — 'switched-off', 'pending' or
+ * 'unreachable' — which survives the gate's automatic sign-out so the
+ * restricted screen can name the true state.
  */
 
 type FirebaseAuthModule = typeof import('firebase/auth');
@@ -46,6 +55,16 @@ interface AuthContextValue {
   isAuthLoading: boolean;
   authError: string | null;
   isAccountDisabled: boolean;
+  /**
+   * R40 P-23: WHY access is blocked, when it is — 'switched-off' (the
+   * account's status says so), 'pending' (still waiting; App routes it
+   * to the PendingScreen, never the restricted screen) or
+   * 'unreachable' (the profile fetch failed before any state was
+   * known). Retained across the automatic sign-out (see below), so the
+   * restricted screen can name the true state. `isAccountDisabled`
+   * stays as the derived boolean for existing consumers.
+   */
+  accessBlockReason: AccessBlockReason | null;
   signInWithGoogle: (rememberMe: boolean) => Promise<void>;
   signUpWithEmail: (email: string, password: string, displayName: string, rememberMe: boolean) => Promise<void>;
   signInWithEmail: (email: string, password: string, rememberMe: boolean) => Promise<void>;
@@ -82,7 +101,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [idToken, setIdToken] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isAccountDisabled, setIsAccountDisabled] = useState(false);
+  const [accessBlockReason, setAccessBlockReason] = useState<AccessBlockReason | null>(null);
+  // Derived, never stored: the restricted gate is exactly the two
+  // blocking reasons ('pending' is not a block — see lib/accessBlock).
+  const isAccountDisabled = accessBlockReason === 'switched-off' || accessBlockReason === 'unreachable';
   const loadedRef = useRef<LoadedFirebase | null>(null);
   const loadPromiseRef = useRef<Promise<LoadedFirebase> | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -98,24 +120,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          setIsAccountDisabled(true);
+        // R40 P-23: classify BEFORE signing out — 403 is the account's
+        // own refusal ('switched-off'); a 401 or any other HTTP failure
+        // means no account state was ever read ('unreachable'). The
+        // reason is set first and is NOT cleared by the sign-out, so
+        // the restricted screen can still name it afterwards.
+        const reason = accessBlockForProfileOutcome({ kind: 'http-error', httpStatus: res.status });
+        if (reason) {
+          setAccessBlockReason(reason);
           await loaded.fns.signOut(loaded.auth);
         }
         return;
       }
       const data = await res.json();
       if (data.success && data.user) {
-        if (data.user.status === 'suspended' || data.user.status === 'denied') {
-          setIsAccountDisabled(true);
+        const reason = accessBlockForProfileOutcome({ kind: 'ok', status: data.user.status });
+        if (reason === 'switched-off') {
+          setAccessBlockReason('switched-off');
           await loaded.fns.signOut(loaded.auth);
           return;
         }
-        setIsAccountDisabled(false);
+        // 'pending' is recorded as the reason too (App routes it to the
+        // PendingScreen from the profile itself); an active profile
+        // clears any earlier block.
+        setAccessBlockReason(reason);
         setUserProfile(data.user);
       }
     } catch (e) {
+      // R40 P-23: a network failure used to be swallowed here, leaving
+      // the signed-in user on a bare loading/product state with no
+      // explanation. It is a block with a reason now: 'unreachable'.
       console.error('[AuthContext] fetchUserProfile failed:', e);
+      setAccessBlockReason(accessBlockForProfileOutcome({ kind: 'network-error' }));
     }
   }, []);
 
@@ -133,7 +169,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setIsAuthLoading(true);
           setCurrentUser(user);
           if (user) {
-            setIsAccountDisabled(false);
+            setAccessBlockReason(null);
             try {
               const token = await user.getIdToken(true);
               setIdToken(token);
@@ -249,6 +285,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // If Firebase has not loaded yet there is no live session to end —
     // clearing the local state is the whole job. (The restricted
     // screen's sign-out reloads to /login regardless.)
+    // R40 P-23: the access-block reason is deliberately NOT cleared
+    // here — the restricted screen renders after this sign-out and
+    // names its copy from the reason. It clears when a user signs in
+    // again (the auth-state listener resets it for a live user).
     if (loadedRef.current) {
       await loadedRef.current.fns.signOut(loadedRef.current.auth);
     }
@@ -276,6 +316,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAuthLoading,
         authError,
         isAccountDisabled,
+        accessBlockReason,
         signInWithGoogle,
         signUpWithEmail,
         signInWithEmail,

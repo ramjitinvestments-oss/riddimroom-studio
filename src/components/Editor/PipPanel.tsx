@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowLeftRight, FlipHorizontal2, Volume2, VolumeX } from 'lucide-react';
 import { useProject } from '../../context/ProjectContext';
-import { addPipOverlay, isPipItem, pipScaleForWidthPercent, pipShapeRefitZoom, pipSyncNudgePatch, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, PIP_SYNC_NUDGE_MAX_FRAMES, type PipLayoutId } from '../../lib/pip';
+import { addPipOverlay, isPipItem, mainSyncNudgeAtCap, mainSyncNudgePatch, pipScaleForWidthPercent, pipShapeRefitZoom, pipSyncNudgePatch, pipWidthPercentForScale, swapMainAndPip, PIP_LAYOUTS, MAIN_SYNC_NUDGE_MAX_FRAMES, PIP_SYNC_NUDGE_MAX_FRAMES, type PipLayoutId } from '../../lib/pip';
 import { PipRingControls, PipShapeStrip } from './PipShapeControls';
 import { PipAddButtons } from './PipAddButtons';
 import { framingSlackPx, pipBoxPx, resolveCropOffset, resolveCropZoom } from '../../lib/render/compositor';
@@ -120,6 +120,17 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
     pairCtx?.second.pair?.syncNudgeFrames ??
     (pairCtx?.second.type === 'video' ? pairCtx.second.pip?.syncNudgeFrames : undefined) ??
     0;
+
+  // R40 P-22 — the selected MAIN clip (a plain main video: not a PiP,
+  // not a pair member — pair members line up through the pair control
+  // below) gets the same "Line up the sound" nudge the overlay has.
+  const selectedMain: VideoTimelineItem | null =
+    item && item.type === 'video' && !isPipItem(item) && !pairCtx ? item : null;
+  const patchSelectedMain = (patch: Partial<VideoTimelineItem>) => {
+    if (!selectedMain) return;
+    mutate((p) => updateItem(p, selectedMain.id, patch));
+  };
+  const mainNudgeFrames = selectedMain?.mainSyncNudgeFrames ?? 0;
 
   // R24 framing (Flip / crop-zoom / crop-pan): applies to the selected
   // PiP video AND to a selected image overlay — both carry the same
@@ -272,6 +283,42 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             </span>
           </div>
           <p className="text-[10px] text-white/60 -mt-1">Dual-camera recordings can land a few frames off. If the overlay's lips move before you hear the words, tap +; after the words, tap −. Up to {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+          {Math.abs(syncNudgeFrames) >= PIP_SYNC_NUDGE_MAX_FRAMES && (
+            <p className="text-[10px] text-amber-200 -mt-1">That&rsquo;s the most it can move — {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+          )}
+        </div>
+      )}
+
+      {/* R40 P-22 — "Line up the sound" for the selected MAIN clip:
+          the same frame nudge the overlay has, shifting the main clip
+          against everything else. The cap is printed, and reaching it
+          says so — no silent caps. */}
+      {selectedMain && (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
+          <span className="font-bold uppercase tracking-wide text-white/40 text-xs">Line up the sound</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => patchSelectedMain(mainSyncNudgePatch(selectedMain, -1, project.frameRate))}
+              className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
+            >
+              − 1 frame
+            </button>
+            <button
+              onClick={() => patchSelectedMain(mainSyncNudgePatch(selectedMain, 1, project.frameRate))}
+              className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center justify-center"
+            >
+              + 1 frame
+            </button>
+            <span className="text-xs text-white/60">
+              {mainNudgeFrames === 0
+                ? 'In sync'
+                : `${mainNudgeFrames > 0 ? '+' : ''}${mainNudgeFrames} frame${Math.abs(mainNudgeFrames) === 1 ? '' : 's'}`}
+            </span>
+          </div>
+          <p className="text-[10px] text-white/60 -mt-1">If this clip&rsquo;s sound feels early or late against the other clip, tap + or − a frame at a time. Up to {MAIN_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+          {mainSyncNudgeAtCap(selectedMain) && (
+            <p className="text-[10px] text-amber-200 -mt-1">That&rsquo;s the most it can move — {MAIN_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+          )}
         </div>
       )}
 
@@ -419,6 +466,10 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
                     : `${pairNudgeFrames > 0 ? '+' : ''}${pairNudgeFrames} frame${Math.abs(pairNudgeFrames) === 1 ? '' : 's'}`}
                 </span>
               </div>
+              <p className="text-[10px] text-white/60 -mt-1">If the second clip&rsquo;s lips move before you hear the words, tap +; after the words, tap −. Up to {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+              {Math.abs(pairNudgeFrames) >= PIP_SYNC_NUDGE_MAX_FRAMES && (
+                <p className="text-[10px] text-amber-200 -mt-1">That&rsquo;s the most it can move — {PIP_SYNC_NUDGE_MAX_FRAMES} frames each way.</p>
+              )}
             </>
           )}
         </div>

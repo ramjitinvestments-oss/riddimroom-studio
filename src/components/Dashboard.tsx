@@ -5,7 +5,8 @@ import { Check, Trash2, X } from 'lucide-react';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
 import BrandLogo from './BrandLogo';
 import { useLicenseTier } from '../hooks/useLicenseTier';
-import { SupportLink } from './SupportLink';
+import { SupportLink, SUPPORT_MAILTO } from './SupportLink';
+import { requestAccountDeletion } from '../lib/accountDeletion';
 import { OPEN_PLAN_SESSION_KEY } from '../lib/upgradeRequest';
 
 /**
@@ -26,7 +27,7 @@ interface DashboardProps {
 }
 
 export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal }: DashboardProps) {
-  const { currentUser, userProfile, signOut } = useAuth();
+  const { currentUser, userProfile, signOut, idToken } = useAuth();
   const { tier } = useLicenseTier();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,6 +45,10 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState<{ ids: string[]; label: string } | null>(null);
+  // R40 P-27 — account deletion: the confirm dialog's two phases
+  // (explain + confirm, then "request is in"). Confirming records the
+  // request (fire-and-forget) — nothing is deleted by the tap itself.
+  const [deleteAccountPhase, setDeleteAccountPhase] = useState<'closed' | 'confirm' | 'done'>('closed');
   const [isDeleting, setIsDeleting] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -319,6 +324,12 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
 
         <footer className="mt-10 border-t border-white/10 pt-4 flex flex-wrap items-center justify-center gap-x-6 gap-y-1">
           <SupportLink />
+          <button
+            onClick={() => setDeleteAccountPhase('confirm')}
+            className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-red-300"
+          >
+            Delete my account
+          </button>
           {onOpenLegal && (
             <>
               <button onClick={() => onOpenLegal('/privacy')} className="min-h-11 inline-flex items-center text-xs font-bold text-white/60 hover:text-white">
@@ -405,6 +416,65 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
                 {isDeleting ? 'Deleting…' : 'Delete'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {deleteAccountPhase !== 'closed' && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => setDeleteAccountPhase('closed')}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Delete my account"
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="font-bold text-base mb-2">Delete my account?</h2>
+            {deleteAccountPhase === 'confirm' ? (
+              <>
+                <p className="text-sm text-white/50 mb-4">
+                  Deleting removes your account, your projects, and the files you uploaded. The owner
+                  completes it by hand — nothing is deleted the moment you tap, and it can&rsquo;t be
+                  undone once it&rsquo;s done.
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setDeleteAccountPhase('closed')}
+                    className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      requestAccountDeletion(idToken);
+                      setDeleteAccountPhase('done');
+                    }}
+                    className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 rounded-lg text-white"
+                  >
+                    Request deletion
+                  </button>
+                </div>
+                <a href={SUPPORT_MAILTO} className="mt-3 min-h-11 flex items-center justify-center text-xs font-bold text-gold hover:underline">
+                  or email us now
+                </a>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-white/50 mb-4">
+                  Your request is in. The owner will complete it and email you if anything is needed.
+                  You can keep using Studio until then.
+                </p>
+                <button
+                  onClick={() => setDeleteAccountPhase('closed')}
+                  className="w-full px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg"
+                >
+                  Close
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

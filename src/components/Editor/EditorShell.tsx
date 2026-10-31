@@ -29,6 +29,8 @@ import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { OPEN_PLAN_EVENT, OPEN_PLAN_SESSION_KEY } from '../../lib/upgradeRequest';
 import { saveStatusText } from '../../lib/projects/localDraft';
 import { recordFailure } from '../../lib/failureCounts';
+import { freeCapWarningForProject } from '../../lib/capWarning';
+import type { Project } from '../../types/timeline';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 
 /**
@@ -97,6 +99,20 @@ function EditorInner({ uid }: { uid: string }) {
   // copy, so an over-cap project is never a surprise at export time.
   const { tier } = useLicenseTier();
   const durationGate = project ? evaluateProjectExportGate(project, tier) : null;
+  // R40 P-32: the landing-moment Free-cap warning. Set once per
+  // landing action (import completion or a camera take — single,
+  // dual, two-step, Record PiP, overlay, pair) by the handlers below,
+  // from the project AS THE LANDING LEAVES IT, measured by the gate's
+  // own helper. Never set from a render.
+  const [capLandingWarning, setCapLandingWarning] = useState<string | null>(null);
+  const noteCapAfterLanding = useCallback(
+    (after: Project | null) => {
+      if (!after) return;
+      const warning = freeCapWarningForProject(after, tier);
+      if (warning) setCapLandingWarning(warning);
+    },
+    [tier],
+  );
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -258,12 +274,21 @@ function EditorInner({ uid }: { uid: string }) {
       // project, move the user to Step 2 (Edit) instead of leaving them
       // on the upload screen wondering what to do next.
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      // R40 P-32: judge the landing by the project it leaves behind
+      // (the insert helpers are pure — applying one here is exactly
+      // the state the mutate below produces).
+      const before = projectStateRef.current;
+      if (before) {
+        noteCapAfterLanding(
+          appendMediaToTimeline(before, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role }),
+        );
+      }
       mutate((p) =>
         appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role }),
       );
       if (wasEmpty) setStep(2);
     },
-    [mutate],
+    [mutate, noteCapAfterLanding],
   );
 
   // R29 — a finished dual-camera pair (MediaImportPanel dual routing):
@@ -273,12 +298,18 @@ function EditorInner({ uid }: { uid: string }) {
   const handleDualAssetUploaded = useCallback(
     (main: MediaAsset, overlay: MediaAsset, options: { startDeltaMs: number; layout: 'pip' | 'split' }) => {
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      const before = projectStateRef.current;
+      if (before) {
+        noteCapAfterLanding(
+          appendDualCaptureToTimeline(before, main, overlay, { startDeltaMs: options.startDeltaMs, layout: options.layout }),
+        );
+      }
       mutate((p) =>
         appendDualCaptureToTimeline(p, main, overlay, { startDeltaMs: options.startDeltaMs, layout: options.layout }),
       );
       if (wasEmpty) setStep(2);
     },
-    [mutate],
+    [mutate, noteCapAfterLanding],
   );
 
   // R32 Phase 4 — a finished imported pair (MediaImportPanel pair
@@ -287,10 +318,12 @@ function EditorInner({ uid }: { uid: string }) {
   const handlePairAssetUploaded = useCallback(
     (assetA: MediaAsset, assetB: MediaAsset, options: { layout: 'pip' | 'split' }) => {
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
+      const before = projectStateRef.current;
+      if (before) noteCapAfterLanding(placeImportPair(before, assetA, assetB, { layout: options.layout }));
       mutate((p) => placeImportPair(p, assetA, assetB, { layout: options.layout }));
       if (wasEmpty) setStep(2);
     },
-    [mutate],
+    [mutate, noteCapAfterLanding],
   );
 
   // Tweaks round — "Add Overlay" uploads (MediaImportPanel purpose
@@ -326,7 +359,22 @@ function EditorInner({ uid }: { uid: string }) {
   const handleOverlayAssetUploaded = useCallback(
     (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; muted?: boolean }) => {
       if (asset.kind === 'video' || asset.kind === 'image') overlaySelectPendingRef.current = true;
+      // R40 P-32: overlay landings (uploads and Record PiP takes alike)
+      // are judged by the same landing rule — a long overlay video is
+      // exactly how a project crosses the cap under the R36 law.
+      const before = projectStateRef.current;
       if (asset.kind === 'video') {
+        if (before) {
+          noteCapAfterLanding(
+            addPipOverlay(before, asset, {
+              layoutId: 'bottom-right',
+              atTime: currentTime,
+              trimStart: options?.trimStart,
+              trimEnd: options?.trimEnd,
+              muted: options?.muted,
+            }),
+          );
+        }
         mutate((p) =>
           addPipOverlay(p, asset, {
             layoutId: 'bottom-right',
@@ -339,6 +387,16 @@ function EditorInner({ uid }: { uid: string }) {
           }),
         );
       } else if (asset.kind === 'image') {
+        if (before) {
+          noteCapAfterLanding(
+            appendMediaToTimeline(before, asset, {
+              atTime: currentTime,
+              role: 'overlay',
+              position: { x: 82, y: 78 },
+              scale: 0.32,
+            }),
+          );
+        }
         mutate((p) =>
           appendMediaToTimeline(p, asset, {
             atTime: currentTime,
@@ -352,7 +410,7 @@ function EditorInner({ uid }: { uid: string }) {
       // timeline's Overlay lane and the PipPanel live.
       setStep(2);
     },
-    [mutate, currentTime],
+    [mutate, currentTime, noteCapAfterLanding],
   );
 
   const handleAddExistingAssetToTimeline = useCallback(
@@ -686,6 +744,21 @@ function EditorInner({ uid }: { uid: string }) {
         <p className={`px-3 sm:px-4 py-1.5 text-[11px] border-b border-white/10 shrink-0 ${durationGate.exceedsCap ? 'font-bold text-amber-300' : 'text-white/60'}`}>
           {durationGate.indicator}
         </p>
+      )}
+
+      {/* R40 P-32 — the landing-moment warning: shown once, at the
+          moment an import or take pushed this Free project over the
+          cap (in addition to the standing indicator above). */}
+      {capLandingWarning && (
+        <div className="px-3 sm:px-4 py-2 bg-amber-500/15 border-b border-amber-500/30 flex items-center gap-3 shrink-0" role="status">
+          <p className="flex-1 text-xs font-bold text-amber-200">{capLandingWarning}</p>
+          <button
+            onClick={() => setCapLandingWarning(null)}
+            className="min-h-11 px-3 inline-flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide shrink-0"
+          >
+            Got it
+          </button>
+        </div>
       )}
 
       {/* v1 3-step stepper — one clear action per screen */}

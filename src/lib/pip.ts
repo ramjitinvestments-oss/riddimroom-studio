@@ -627,3 +627,53 @@ export function pipSyncNudgePatch(
     pip: item.pip ? { ...item.pip, syncNudgeFrames: current + appliedFrames } : item.pip,
   };
 }
+
+// ---------------------------------------------------------------------------
+// R40 P-22 — "Line up the sound" for a MAIN clip
+// ---------------------------------------------------------------------------
+
+/** The most a main clip may be nudged in either direction, in project frames — the same ±15 as the PiP/pair nudges. */
+export const MAIN_SYNC_NUDGE_MAX_FRAMES = PIP_SYNC_NUDGE_MAX_FRAMES;
+
+/**
+ * The main-clip sibling of `pipSyncNudgePatch`: the SAME pure
+ * translation (startTime/endTime shift by whole project frames, the
+ * source window untouched), so preview and export — which both read
+ * start/end — agree exactly, with no render-time offset anywhere. A
+ * main clip's sound is intrinsic to the clip, so lining its sound up
+ * against an overlay or a second clip means shifting the clip itself
+ * relative to them; `mainSyncNudgeFrames` is only the bookkeeping that
+ * clamps the CUMULATIVE nudge to ±MAIN_SYNC_NUDGE_MAX_FRAMES, and the
+ * shift is further clamped so the clip never starts before time 0 (in
+ * that case only the frames that actually fit are applied and
+ * counted). Returns a `Partial` for `updateItem`; the caller owns
+ * applying it (one call = one undo step).
+ */
+export function mainSyncNudgePatch(
+  item: VideoTimelineItem,
+  deltaFrames: number,
+  frameRate: number,
+): Partial<VideoTimelineItem> {
+  const fps = Number.isFinite(frameRate) && frameRate > 0 ? frameRate : 30;
+  const frameSeconds = 1 / fps;
+  const current = item.mainSyncNudgeFrames ?? 0;
+  const wanted = Math.max(
+    -MAIN_SYNC_NUDGE_MAX_FRAMES,
+    Math.min(MAIN_SYNC_NUDGE_MAX_FRAMES, current + Math.trunc(deltaFrames)),
+  );
+  let shiftSeconds = (wanted - current) * frameSeconds;
+  if (item.startTime + shiftSeconds < 0) {
+    shiftSeconds = -item.startTime;
+  }
+  const appliedFrames = Math.round(shiftSeconds / frameSeconds);
+  return {
+    startTime: item.startTime + shiftSeconds,
+    endTime: item.endTime + shiftSeconds,
+    mainSyncNudgeFrames: current + appliedFrames,
+  };
+}
+
+/** True when a main clip's cumulative nudge sits at either ±cap — the UI prints its "max reached" note exactly then. */
+export function mainSyncNudgeAtCap(item: VideoTimelineItem): boolean {
+  return Math.abs(item.mainSyncNudgeFrames ?? 0) >= MAIN_SYNC_NUDGE_MAX_FRAMES;
+}

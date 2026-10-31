@@ -693,3 +693,63 @@ export async function fetchFailureCounts(callerUid: string, idToken: string): Pr
   const docs = await fsListDocs('failureCounts', idToken);
   return summarizeFailureCounts(docs.map((d) => ({ ...d.data, day: d.id })));
 }
+
+// ---------------------------------------------------------------------------
+// R40 P-27 — account deletion requests.
+//
+// A signed-in user who taps "Delete my account" records ONE request in
+// accountDeletionRequests/{uid} — { requestedAt, email } and nothing
+// else, written as the calling user (the same Firestore-REST pattern
+// as the failure counts above). The app itself does NOT delete
+// anything: the owner completes a request by hand — revoke the
+// account's access (Admin screen), then delete the user in the
+// Firebase console. The client copy says exactly that.
+//
+// RULES NOTE: the published firestore.rules have no branch for this
+// collection yet (default-deny), so until the release session
+// publishes one, writes are refused and the endpoint answers a calm
+// 202 with recorded:false — requests begin flowing when the rules
+// land, and the dialog's email route works today regardless.
+// ---------------------------------------------------------------------------
+
+export interface DeletionRequestRecord {
+  uid: string;
+  email: string;
+  requestedAt: string | null;
+}
+
+/** Pure: the stored fields for one deletion request. */
+export function buildDeletionRequestFields(email: string, now: Date = new Date()): { requestedAt: string; email: string } {
+  return { requestedAt: now.toISOString(), email };
+}
+
+/** Pure: fold stored request docs into readout rows, oldest request first. */
+export function summarizeDeletionRequests(
+  docs: Array<{ id: string; data: Record<string, unknown> }>,
+): DeletionRequestRecord[] {
+  return docs
+    .map((doc) => ({
+      uid: doc.id,
+      email: typeof doc.data.email === 'string' ? doc.data.email : '',
+      requestedAt: typeof doc.data.requestedAt === 'string' ? doc.data.requestedAt : null,
+    }))
+    .sort((a, b) => (a.requestedAt ?? '').localeCompare(b.requestedAt ?? ''));
+}
+
+/**
+ * Record one deletion request as the calling user. Throws when
+ * Firestore refuses — the endpoint turns that into a quiet
+ * "recorded: false", never a user-facing error.
+ */
+export async function recordDeletionRequest(uid: string, email: string, idToken: string): Promise<void> {
+  await fsPatchDoc(`accountDeletionRequests/${uid}`, buildDeletionRequestFields(email), idToken);
+}
+
+/** Admin readout: every recorded request. Refuses non-admins before listing anything. */
+export async function fetchDeletionRequests(callerUid: string, idToken: string): Promise<DeletionRequestRecord[]> {
+  if (!(await isAdminUser(callerUid, idToken))) {
+    throw new AccessToggleError('NOT_ADMIN', 'Admin access required.');
+  }
+  const docs = await fsListDocs('accountDeletionRequests', idToken);
+  return summarizeDeletionRequests(docs);
+}

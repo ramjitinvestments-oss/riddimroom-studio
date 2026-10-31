@@ -87,3 +87,24 @@ input[type='checkbox'],
 input[type='radio'] {
   accent-color: #ffd100;
 }
+
+/* R40 P-18 — reduced motion: when the user's phone asks for reduced
+   motion, app-driven CSS animation and transitions calm down.
+   Scoped and safe: transitions shrink to near-zero (state still
+   changes, just without the glide), the pulsing REC dot holds still,
+   and smooth scrolling becomes instant. JS-driven loops consult
+   lib/reducedMotion instead — CSS cannot reach them. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-pulse {
+    animation: none !important;
+  }
+  .animate-spin {
+    animation-duration: 2.4s;
+  }
+}

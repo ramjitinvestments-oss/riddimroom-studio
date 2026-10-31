@@ -497,6 +497,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   // R24 WS-P3: framing guides default ON (the camera opens on the front
   // camera, where the headroom guide matters most); toggleable any time.
   const [showGuides, setShowGuides] = useState(true);
+  /** R40 P-16 — the "Camera settings" sheet: the pre-Record controls
+      (quality, frame rate, Guides, Steady start, Level, Test my
+      camera) live behind this one button; the surface keeps only the
+      essentials (viewfinder, Record/Stop, Flip, Photo, Close,
+      Flashlight, Selfie light, the light-meter pill, Lock). */
+  const [cameraSettingsOpen, setCameraSettingsOpen] = useState(false);
   // R24 WS-P4a: the live track's zoom capability, when the platform
   // exposes one; null = no zoom control is rendered at all.
   const [zoomCapability, setZoomCapability] = useState<ZoomCapability | null>(null);
@@ -2259,7 +2265,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             </p>
             <button
               onClick={completeCountdown}
-              className="min-h-9 px-3.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold uppercase tracking-wide transition"
+              className="min-h-11 px-4 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold uppercase tracking-wide transition"
             >
               Skip
             </button>
@@ -2365,8 +2371,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         <div className="flex flex-col items-center gap-2.5 max-w-md w-full">
           <p className="text-xs text-white/60 text-center">
             {twoPassPhase === 'step2-review'
-              ? 'Recorded in two steps — your main video with you over it, already lined up.'
-              : 'Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay — already lined up.'}
+              ? 'Recorded in two steps — your main video with you over it. If the sound feels off, use Line up the sound in the Overlay panel.'
+              : 'Both cameras recorded together. Add both and the main camera becomes your video, with your front camera as the overlay. If the sound feels off, use Line up the sound in the Overlay panel.'}
           </p>
           <ReceiptLines receipt={pendingDual.mainReceipt} label="Main camera" />
           <ReceiptLines receipt={pendingDual.frontReceipt} label="Front camera" />
@@ -2578,101 +2584,145 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             )}
           </div>
         )}
-        {/* R24 WS-P1: quality + frame-rate chips. Changing a chip
-            re-acquires the stream at the new ladder (disabled while
-            recording — the stream is locked once recording starts). */}
-        <div className="flex items-center gap-2 flex-wrap justify-center">
-          <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Capture quality">
-            {(
-              [
-                { id: 'auto', label: 'Auto' },
-                { id: '4k', label: '4K' },
-                { id: 'hd', label: 'HD' },
-              ] as Array<{ id: CaptureQualityChoice; label: string }>
-            ).map((chip) => (
-              <button
-                key={chip.id}
-                onClick={() => setQualityChoice(chip.id)}
-                disabled={isRecording || dualMode || isStep2Phase}
-                aria-pressed={qualityChoice === chip.id}
-                className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
-                  qualityChoice === chip.id ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
-                }`}
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Frame rate">
-            {([60, 30] as CaptureFpsChoice[]).map((fps) => (
-              <button
-                key={fps}
-                onClick={() => {
-                  // An explicit pick this session beats any saved
-                  // device profile from here on.
-                  userFpsChoiceRef.current = true;
-                  setFpsChoice(fps);
-                }}
-                disabled={isRecording || dualMode || isStep2Phase}
-                aria-pressed={fpsChoice === fps}
-                className={`px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
-                  fpsChoice === fps ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
-                }`}
-              >
-                {fps} fps
-              </button>
-            ))}
-          </div>
-          {/* R24 WS-P3: guides toggle */}
+        {/* R40 P-16 — the pre-Record controls now live in ONE
+            "Camera settings" sheet (the app's bottom-sheet pattern).
+            On the surface stay only the essentials: the viewfinder,
+            Record/Stop, Flip, Photo, Close, Flashlight, Selfie light,
+            the light-meter pill and Lock. The sheet's own rows are
+            all 44px too (P-15). */}
+        {!isRecording && (
           <button
-            onClick={() => setShowGuides((g) => !g)}
-            aria-pressed={showGuides}
-            className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
-              showGuides ? 'bg-white/20 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'
-            }`}
+            onClick={() => setCameraSettingsOpen(true)}
+            aria-haspopup="dialog"
+            className="min-h-11 px-4 inline-flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
           >
-            Guides
+            Camera settings
           </button>
-          {/* R32 Phase 3: steady-start toggle — default on, saved on
-              this phone. Off = Record starts at once, as before. */}
-          <button
-            onClick={toggleSteadyStart}
-            aria-pressed={steadyStartEnabled}
-            className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
-              steadyStartEnabled ? 'bg-white/20 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'
-            }`}
-          >
-            Steady start
-          </button>
-          {/* R32 Phase 3: level toggle — renders only where the
-              platform exposes orientation at all. On phones that ask
-              permission first, the tap itself asks. */}
-          {deviceOrientationAvailable() && (
-            <button
-              onClick={() => void toggleLevel()}
-              aria-pressed={levelEnabled}
-              className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
-                levelEnabled ? 'bg-white/20 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'
-              }`}
+        )}
+        {cameraSettingsOpen && (
+          <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-label="Camera settings">
+            <div className="absolute inset-0 bg-black/60" onClick={() => setCameraSettingsOpen(false)} />
+            <div
+              data-camera-settings-sheet
+              className="absolute left-0 right-0 bottom-0 max-h-[80vh] overflow-y-auto bg-[#111111] rounded-t-2xl border-t border-white/10 p-4 flex flex-col gap-4"
+              style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
             >
-              Level
-            </button>
-          )}
-          {/* R32 Phase 1 — guided 10-second camera test. Single mode
-              only: it runs the normal single recorder in test mode. */}
-          {!dualMode && twoPassPhase === 'off' && !isRecording && (
-            <button
-              onClick={startCameraTest}
-              disabled={!isReady}
-              className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg bg-white/5 text-white/70 hover:bg-white/10 disabled:opacity-40 transition"
-            >
-              Test my camera
-            </button>
-          )}
-        </div>
-        <p className="text-[10px] text-white/60 text-center max-w-md">
-          Steady start: recording hasn&rsquo;t started during the count — it begins on its own once you hold still.
-        </p>
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-bold uppercase tracking-wide text-white/70">Camera settings</span>
+                <button
+                  onClick={() => setCameraSettingsOpen(false)}
+                  aria-label="Close camera settings"
+                  className="min-h-11 min-w-11 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white text-base leading-none"
+                >
+                  ×
+                </button>
+              </div>
+              {/* R24 WS-P1: quality + frame-rate chips (moved into the
+                  sheet, R40 P-16). Changing a chip re-acquires the
+                  stream at the new ladder (disabled while recording —
+                  the stream is locked once recording starts). */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Quality</span>
+                <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Capture quality">
+                  {(
+                    [
+                      { id: 'auto', label: 'Auto' },
+                      { id: '4k', label: '4K' },
+                      { id: 'hd', label: 'HD' },
+                    ] as Array<{ id: CaptureQualityChoice; label: string }>
+                  ).map((chip) => (
+                    <button
+                      key={chip.id}
+                      onClick={() => setQualityChoice(chip.id)}
+                      disabled={isRecording || dualMode || isStep2Phase}
+                      aria-pressed={qualityChoice === chip.id}
+                      className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                        qualityChoice === chip.id ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                      }`}
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Frame rate</span>
+                <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Frame rate">
+                  {([60, 30] as CaptureFpsChoice[]).map((fps) => (
+                    <button
+                      key={fps}
+                      onClick={() => {
+                        // An explicit pick this session beats any saved
+                        // device profile from here on.
+                        userFpsChoiceRef.current = true;
+                        setFpsChoice(fps);
+                      }}
+                      disabled={isRecording || dualMode || isStep2Phase}
+                      aria-pressed={fpsChoice === fps}
+                      className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                        fpsChoice === fps ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                      }`}
+                    >
+                      {fps} fps
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* R24 WS-P3: guides toggle (in the sheet, R40 P-16) */}
+              <button
+                onClick={() => setShowGuides((g) => !g)}
+                aria-pressed={showGuides}
+                className="min-h-11 px-3 w-full flex items-center justify-between rounded-lg bg-white/5 hover:bg-white/10 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                <span>Guides</span>
+                <span className={showGuides ? 'text-gold' : 'text-white/50'}>{showGuides ? 'On' : 'Off'}</span>
+              </button>
+              {/* R32 Phase 3: steady-start toggle — default on, saved
+                  on this phone. Off = Record starts at once, as before. */}
+              <div className="flex flex-col gap-1.5">
+                <button
+                  onClick={toggleSteadyStart}
+                  aria-pressed={steadyStartEnabled}
+                  className="min-h-11 px-3 w-full flex items-center justify-between rounded-lg bg-white/5 hover:bg-white/10 text-white text-xs font-bold uppercase tracking-wide transition"
+                >
+                  <span>Steady start</span>
+                  <span className={steadyStartEnabled ? 'text-gold' : 'text-white/50'}>{steadyStartEnabled ? 'On' : 'Off'}</span>
+                </button>
+                <p className="text-[10px] text-white/60">
+                  Steady start: recording hasn&rsquo;t started during the count — it begins on its own once you hold still.
+                </p>
+              </div>
+              {/* R32 Phase 3: level toggle — renders only where the
+                  platform exposes orientation at all. On phones that
+                  ask permission first, the tap itself asks. */}
+              {deviceOrientationAvailable() && (
+                <button
+                  onClick={() => void toggleLevel()}
+                  aria-pressed={levelEnabled}
+                  className="min-h-11 px-3 w-full flex items-center justify-between rounded-lg bg-white/5 hover:bg-white/10 text-white text-xs font-bold uppercase tracking-wide transition"
+                >
+                  <span>Level</span>
+                  <span className={levelEnabled ? 'text-gold' : 'text-white/50'}>{levelEnabled ? 'On' : 'Off'}</span>
+                </button>
+              )}
+              {/* R32 Phase 1 — guided 10-second camera test. Single
+                  mode only: it runs the normal single recorder in test
+                  mode. */}
+              {!dualMode && twoPassPhase === 'off' && !isRecording && (
+                <button
+                  onClick={() => {
+                    setCameraSettingsOpen(false);
+                    startCameraTest();
+                  }}
+                  disabled={!isReady}
+                  className="min-h-11 px-3 w-full inline-flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide disabled:opacity-40 transition"
+                >
+                  Test my camera
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         {/* R36 WS-4 — proven-smooth suggestion: the last take at this
             camera dropped frames, so the step below is offered with
             a one-tap apply. Shown only while the rough quality is
@@ -2683,7 +2733,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             <p className="text-[11px] text-white/70 text-center">{profileSuggestion.text}</p>
             <button
               onClick={() => setQualityChoice(profileSuggestion.suggestedQuality)}
-              className="min-h-9 px-3 flex items-center justify-center rounded-md bg-gold hover:bg-gold-bright text-black text-[11px] font-bold uppercase tracking-wide transition"
+              className="min-h-11 px-3 flex items-center justify-center rounded-md bg-gold hover:bg-gold-bright text-black text-[11px] font-bold uppercase tracking-wide transition"
             >
               {profileSuggestion.applyLabel}
             </button>
@@ -2702,7 +2752,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             </p>
             <button
               onClick={() => setTestReceipt(null)}
-              className="min-h-8 px-2.5 flex items-center justify-center rounded-md bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold"
+              className="min-h-11 px-3 flex items-center justify-center rounded-md bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold"
             >
               Done
             </button>
@@ -2744,7 +2794,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   onClick={() => void toggleLock()}
                   disabled={isRecording}
                   aria-pressed={lockedSystems.length > 0}
-                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg disabled:opacity-40 transition ${
+                  className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-lg disabled:opacity-40 transition ${
                     lockedSystems.length > 0
                       ? 'bg-gold text-black'
                       : 'bg-white/5 text-white/70 hover:bg-white/10'
@@ -2754,7 +2804,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                 </button>
               )}
               {lockedChip && (
-                <span className="px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg bg-gold/15 text-gold">
+                <span className="min-h-11 px-3 inline-flex items-center text-[11px] font-bold uppercase tracking-wide rounded-lg bg-gold/15 text-gold">
                   {lockedChip}
                 </span>
               )}
@@ -2762,7 +2812,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                 <button
                   onClick={toggleTorch}
                   aria-pressed={torchOn}
-                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                  className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
                     torchOn ? 'bg-gold text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
@@ -2774,7 +2824,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   onClick={() => setSelfieLight((v) => !v)}
                   aria-pressed={selfieLight}
                   title="A bright frame that lights your face from the screen"
-                  className={`px-2.5 py-1.5 text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
+                  className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-lg transition ${
                     selfieLight ? 'bg-gold text-black' : 'bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
@@ -2815,7 +2865,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           <button
             onClick={exitDualMode}
             disabled={isRecording}
-            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+            className="min-h-11 px-4 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
           >
             One camera
           </button>
@@ -2823,7 +2873,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           <button
             onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
             disabled={isRecording}
-            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+            className="min-h-11 px-4 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
           >
             Flip camera
           </button>
@@ -2832,7 +2882,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           <button
             onClick={() => void enterDualMode()}
             disabled={dualBusy}
-            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+            className="min-h-11 px-4 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
           >
             {dualBusy ? 'Checking cameras… this can take a few seconds' : 'Record both cameras'}
           </button>
@@ -2842,7 +2892,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         {!dualMode && !isRecording && onCaptureDual && twoPassPhase === 'off' && (
           <button
             onClick={() => enterTwoPass(false)}
-            className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white"
+            className="min-h-11 px-4 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white"
           >
             {TWO_PASS_BUTTON_LABEL}
           </button>
@@ -2850,7 +2900,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         <button
           onClick={takePhoto}
           disabled={!isReady || isRecording || dualMode || twoPassPhase !== 'off'}
-          className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
+          className="min-h-11 px-5 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
         >
           Photo
         </button>
@@ -2860,14 +2910,14 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
               beginWithSteadyStart(twoPassPhase === 'step2-live' ? startStep2Recording : startRecording)
             }
             disabled={!isReady}
-            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
+            className="min-h-11 px-5 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright disabled:opacity-40 rounded-lg text-black"
           >
             Record
           </button>
         ) : (
           <button
             onClick={stopRecording}
-            className="px-4 py-2 text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 rounded-lg text-white"
+            className="min-h-11 px-5 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 rounded-lg text-white"
           >
             Stop
           </button>
@@ -2878,7 +2928,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             stopStream();
             onClose();
           }}
-          className="px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 rounded-lg text-white/70"
+          className="min-h-11 px-4 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 rounded-lg text-white/70"
         >
           Close
         </button>

@@ -65,7 +65,7 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
   {
     heading: 'Your choices',
     paragraphs: [
-      'You can ask us what we hold about you, ask us to correct it, or ask us to delete your account and the projects and files tied to it. Email us and we will sort it out.',
+      'You can ask us what we hold about you, ask us to correct it, or ask us to delete your account and the projects and files tied to it. Email us and we will sort it out. You can also use Delete my account on your home screen in the app — that sends the owner your request, and the owner completes it by hand.',
     ],
   },
 ];

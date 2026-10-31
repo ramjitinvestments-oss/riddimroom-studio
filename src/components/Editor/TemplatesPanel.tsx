@@ -8,6 +8,7 @@ import {
 } from '../../lib/templates';
 import type { VideoTimelineItem } from '../../types/timeline';
 import { applyFullTemplate, applyHookToProject } from '../../lib/templates/apply';
+import { prefersReducedMotion, reelCrossfadeAllowed } from '../../lib/reducedMotion';
 import {
   buildPreview,
   hasPreviewMedia,
@@ -561,7 +562,9 @@ function ReelPreviewLayer({ canvases }: { canvases: HTMLCanvasElement[] }) {
   }, [canvases]);
 
   useEffect(() => {
-    if (canvases.length <= 1) return;
+    // R40 P-18: under the user's reduced-motion preference the preview
+    // never cycles — it holds the single first frame, still.
+    if (!reelCrossfadeAllowed(canvases.length, prefersReducedMotion())) return;
     const id = window.setInterval(() => {
       setActiveIndex((a) => (a + 1) % canvases.length);
     }, 1400);
