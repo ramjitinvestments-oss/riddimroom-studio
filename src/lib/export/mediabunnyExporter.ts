@@ -28,17 +28,25 @@
  * anyone until that flag is set — enablement on real user devices is a
  * separate, phone-gated decision.
  *
- * HONEST FAILURE, NO SILENT FALLBACK. When this engine IS selected, its
- * capability gate runs BEFORE any media is loaded or any frame is drawn:
- * if WebCodecs is absent, or H.264 can't be encoded at the requested
- * size/rate, or (when the project has audio) neither AAC nor Opus can be
- * encoded, the export fails immediately with a specific
+ * HONEST FAILURE. When this engine IS selected AND WebCodecs exists
+ * on the device, its capability gate runs BEFORE any media is loaded
+ * or any frame is drawn: if H.264 can't be encoded at the requested
+ * size/rate, or (when the project has audio) neither AAC nor Opus can
+ * be encoded, the export fails immediately with a specific
  * `MediabunnyCapabilityError` naming the missing capability. It never
  * quietly switches engines mid-export and never hangs waiting for an
  * encoder that doesn't exist. And if the capability CHECK itself fails
  * (the library can't load, a probe call throws), that is reported as
  * its own distinct failure ('probe-error') — never disguised as a
  * codec verdict about the device.
+ *
+ * R40 P-12 — the ONE fallback, at the entry only: if WebCodecs is
+ * entirely ABSENT at runtime (no VideoEncoder/VideoDecoder), the
+ * export never starts this engine at all — the selection point
+ * (`resolveRuntimeExportEngine` below) routes to the standard
+ * pipeline instead, so the user still gets an MP4 and never meets an
+ * engine name. Codec-level failures on a WebCodecs-capable browser
+ * keep the honest hard error above; nothing switches mid-export.
  *
  * Known limits, stated up front (see the build report): the whole MP4 is
  * assembled in memory (Mediabunny `BufferTarget`, the spike-proven
@@ -72,8 +80,8 @@ export const EXPORT_ENGINE_ENV_VAR = 'VITE_EXPORT_ENGINE';
  * else — unset, 'ffmpeg', a typo, an arbitrary string — resolves to the
  * default 'ffmpeg' engine, so a misconfigured build degrades to the
  * proven pipeline instead of to a broken one. (This is build-time
- * configuration resolution, NOT a runtime fallback: once 'mediabunny'
- * is selected, its capability failures are hard errors, never a switch.)
+ * configuration resolution. The separate RUNTIME fallback for a total
+ * WebCodecs absence lives in `resolveRuntimeExportEngine` below.)
  */
 export function resolveExportEngine(rawValue: string | undefined | null): ExportEngineId {
   return typeof rawValue === 'string' && rawValue.trim().toLowerCase() === 'mediabunny'
@@ -95,6 +103,50 @@ export function getConfiguredExportEngine(): ExportEngineId {
  */
 export function createExportRenderer(engine: ExportEngineId = getConfiguredExportEngine()): Renderer {
   return engine === 'mediabunny' ? new MediabunnyRenderer() : new Canvas2DRenderer();
+}
+
+// ---------------------------------------------------------------------------
+// R40 P-12 — runtime fallback at the selection point
+// ---------------------------------------------------------------------------
+
+/**
+ * True when this runtime provides the WebCodecs entry points the
+ * Mediabunny path is built on. A presence check only — whether the
+ * codecs themselves can encode is the capability gate's job, and its
+ * verdicts stay hard errors.
+ */
+export function webCodecsAvailable(
+  g: { VideoEncoder?: unknown; VideoDecoder?: unknown } = globalThis as { VideoEncoder?: unknown; VideoDecoder?: unknown },
+): boolean {
+  return typeof g.VideoEncoder === 'function' && typeof g.VideoDecoder === 'function';
+}
+
+export interface RuntimeExportEngine {
+  engine: ExportEngineId;
+  /** True when the configured engine was set aside because WebCodecs is absent at runtime. */
+  fellBack: boolean;
+}
+
+/**
+ * The runtime selection rule: a 'mediabunny' build on a browser with
+ * NO WebCodecs uses the standard engine, transparently — the export
+ * still delivers an MP4 and the user never meets an engine name. In
+ * every other case the configured engine stands. If the standard
+ * path is also unavailable on the device, its own honest, humanized
+ * failure is what the user sees — there is no third engine to invent.
+ */
+export function resolveRuntimeExportEngine(configured: ExportEngineId, hasWebCodecs: boolean): RuntimeExportEngine {
+  if (configured === 'mediabunny' && !hasWebCodecs) return { engine: 'ffmpeg', fellBack: true };
+  return { engine: configured, fellBack: false };
+}
+
+/** The renderer + effective engine the export entry should drive. */
+export function createRuntimeExportRenderer(
+  configured: ExportEngineId = getConfiguredExportEngine(),
+  hasWebCodecs: boolean = webCodecsAvailable(),
+): { renderer: Renderer; engine: ExportEngineId; fellBack: boolean } {
+  const resolved = resolveRuntimeExportEngine(configured, hasWebCodecs);
+  return { renderer: createExportRenderer(resolved.engine), engine: resolved.engine, fellBack: resolved.fellBack };
 }
 
 // ---------------------------------------------------------------------------

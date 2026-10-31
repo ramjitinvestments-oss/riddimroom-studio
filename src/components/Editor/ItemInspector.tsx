@@ -35,6 +35,7 @@ import {
 import { CAPTION_STYLES } from '../../lib/captions/styles';
 import { isPipItem } from '../../lib/pip';
 import { findHeldMainVisualItem } from '../../lib/render/compositor';
+import { hasDifferingSharedUse, SHARED_CLIP_NOTE } from '../../lib/sharedClip';
 import {
   TRANSITION_CATEGORIES,
   TRANSITION_INTENSITY_DEFAULT,
@@ -771,6 +772,12 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
         </div>
       )}
       {item.type !== 'caption' && <p className="text-white/30">Duration: {duration.toFixed(1)}s</p>}
+      {/* R40 P-11 (DOCUMENT verdict): one media element per asset is
+          still the model — when this item's clip is also used in a
+          differing place, say so plainly, here and nowhere else. */}
+      {project && hasDifferingSharedUse(project, item) && (
+        <p className="text-white/50">{SHARED_CLIP_NOTE}</p>
+      )}
       {willHold && item.type === 'video' && (
         <p className="text-white/50">{"This clip's last frame stays on screen until the project ends."}</p>
       )}

@@ -18,9 +18,14 @@ import {
   encodeFramesToMp4,
   withStallTimeout,
   MediabunnyCapabilityError,
+  resolveRuntimeExportEngine,
+  createRuntimeExportRenderer,
+  webCodecsAvailable,
+  MediabunnyRenderer,
   type MediabunnyCapabilityProbe,
   type MediabunnyCapabilitySettings,
 } from './mediabunnyExporter';
+import { Canvas2DRenderer } from './canvas2dRenderer';
 import {
   canEncodeVideo as mediabunnyCanEncodeVideo,
   canEncodeAudio as mediabunnyCanEncodeAudio,
@@ -618,5 +623,34 @@ describe('withStallTimeout (encode stall watchdog)', () => {
   });
   it('propagates the original rejection when work fails first', async () => {
     await expect(withStallTimeout(Promise.reject(new Error('boom')), 1000, 'stalled')).rejects.toThrow('boom');
+  });
+});
+
+describe('R40 P-12 — runtime fallback at the selection point', () => {
+  it('(a) mediabunny configured + WebCodecs present → mediabunny stands', () => {
+    expect(resolveRuntimeExportEngine('mediabunny', true)).toEqual({ engine: 'mediabunny', fellBack: false });
+    const { renderer, engine, fellBack } = createRuntimeExportRenderer('mediabunny', true);
+    expect(engine).toBe('mediabunny');
+    expect(fellBack).toBe(false);
+    expect(renderer).toBeInstanceOf(MediabunnyRenderer);
+  });
+
+  it('(b) mediabunny configured + WebCodecs absent → the standard path, transparently', () => {
+    expect(resolveRuntimeExportEngine('mediabunny', false)).toEqual({ engine: 'ffmpeg', fellBack: true });
+    const { renderer, engine, fellBack } = createRuntimeExportRenderer('mediabunny', false);
+    expect(engine).toBe('ffmpeg');
+    expect(fellBack).toBe(true);
+    expect(renderer).toBeInstanceOf(Canvas2DRenderer);
+  });
+
+  it('(c) a standard build stays standard either way', () => {
+    expect(resolveRuntimeExportEngine('ffmpeg', true)).toEqual({ engine: 'ffmpeg', fellBack: false });
+    expect(resolveRuntimeExportEngine('ffmpeg', false)).toEqual({ engine: 'ffmpeg', fellBack: false });
+  });
+
+  it('WebCodecs presence means both entry points exist', () => {
+    expect(webCodecsAvailable({ VideoEncoder: function () {}, VideoDecoder: function () {} })).toBe(true);
+    expect(webCodecsAvailable({ VideoEncoder: function () {} })).toBe(false);
+    expect(webCodecsAvailable({})).toBe(false);
   });
 });

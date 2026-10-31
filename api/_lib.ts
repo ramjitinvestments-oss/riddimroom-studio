@@ -576,3 +576,120 @@ export function toClientUser(data: UserProfile, licenseTier: 'free' | 'lifetime'
     marketingOptIn: data.marketingOptIn === true,
   };
 }
+
+// ---------------------------------------------------------------------------
+// R40 P-28 — first-party failure counts.
+//
+// The app records COUNTS ONLY of final failures — how many exports,
+// saves and caption jobs failed per day — in failureCounts/{day}
+// documents shaped { export, save, transcribe } (plain numbers). No
+// user content, no project data, no uid: a count cannot be traced
+// back to a person or a project. The write mirrors the transcription
+// quota's read-modify-write-as-the-calling-user pattern above.
+//
+// RULES NOTE: the published firestore.rules currently have no branch
+// for this collection (default-deny), so until the release session
+// publishes a branch for it, writes are refused by Firestore and the
+// endpoint answers "recorded: false" — the client is fire-and-forget
+// and silent either way, and counts simply begin flowing when the
+// rules land. Nothing here invents a way around the rules.
+// ---------------------------------------------------------------------------
+
+export type FailureKind = 'export' | 'save' | 'transcribe';
+
+export const FAILURE_COUNT_KINDS: readonly FailureKind[] = ['export', 'save', 'transcribe'];
+
+export function isFailureKind(value: unknown): value is FailureKind {
+  return value === 'export' || value === 'save' || value === 'transcribe';
+}
+
+/** The storage day for a moment: its UTC calendar day, YYYY-MM-DD. */
+export function failureDayKey(at: Date = new Date()): string {
+  return at.toISOString().slice(0, 10);
+}
+
+export interface FailureDayCounts {
+  day: string;
+  export: number;
+  save: number;
+  transcribe: number;
+  total: number;
+}
+
+function countOf(data: Record<string, unknown>, kind: FailureKind): number {
+  const v = data[kind];
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/** Pure: the full field set to write after one more `kind` failure, given the stored fields. */
+export function buildFailureIncrement(
+  existing: Record<string, unknown>,
+  kind: FailureKind,
+): { export: number; save: number; transcribe: number } {
+  return {
+    export: countOf(existing, 'export') + (kind === 'export' ? 1 : 0),
+    save: countOf(existing, 'save') + (kind === 'save' ? 1 : 0),
+    transcribe: countOf(existing, 'transcribe') + (kind === 'transcribe' ? 1 : 0),
+  };
+}
+
+export interface FailureCountsSummary {
+  today: FailureDayCounts;
+  last7Days: { export: number; save: number; transcribe: number; total: number };
+  days: FailureDayCounts[];
+}
+
+/** Pure: fold stored day documents into today + last-7-days totals (newest day first). */
+export function summarizeFailureCounts(
+  docs: Array<Record<string, unknown> & { day: string }>,
+  now: Date = new Date(),
+): FailureCountsSummary {
+  const todayKey = failureDayKey(now);
+  const windowStart = failureDayKey(new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000));
+  const byDay = new Map<string, FailureDayCounts>();
+  for (const doc of docs) {
+    if (typeof doc.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(doc.day)) continue;
+    const row: FailureDayCounts = {
+      day: doc.day,
+      export: countOf(doc, 'export'),
+      save: countOf(doc, 'save'),
+      transcribe: countOf(doc, 'transcribe'),
+      total: 0,
+    };
+    row.total = row.export + row.save + row.transcribe;
+    byDay.set(doc.day, row);
+  }
+  const days = [...byDay.values()]
+    .filter((d) => d.day >= windowStart && d.day <= todayKey)
+    .sort((a, b) => b.day.localeCompare(a.day));
+  const last7Days = { export: 0, save: 0, transcribe: 0, total: 0 };
+  for (const d of days) {
+    last7Days.export += d.export;
+    last7Days.save += d.save;
+    last7Days.transcribe += d.transcribe;
+    last7Days.total += d.total;
+  }
+  const today = byDay.get(todayKey) ?? { day: todayKey, export: 0, save: 0, transcribe: 0, total: 0 };
+  return { today, last7Days, days };
+}
+
+/**
+ * Record one failure as the calling user (read-modify-write, the
+ * quota pattern). Throws when Firestore refuses — the endpoint turns
+ * that into a quiet "recorded: false", never a user-facing error.
+ */
+export async function recordFailureCount(kind: FailureKind, idToken: string, now: Date = new Date()): Promise<void> {
+  const day = failureDayKey(now);
+  const path = `failureCounts/${day}`;
+  const existing = await fsGetDoc(path, idToken);
+  await fsPatchDoc(path, buildFailureIncrement(existing.data, kind), idToken);
+}
+
+/** Admin readout: every stored day, summarized. Refuses non-admins before listing anything. */
+export async function fetchFailureCounts(callerUid: string, idToken: string): Promise<FailureCountsSummary> {
+  if (!(await isAdminUser(callerUid, idToken))) {
+    throw new AccessToggleError('NOT_ADMIN', 'Admin access required.');
+  }
+  const docs = await fsListDocs('failureCounts', idToken);
+  return summarizeFailureCounts(docs.map((d) => ({ ...d.data, day: d.id })));
+}

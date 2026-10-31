@@ -2,19 +2,26 @@ import React, { Suspense, lazy, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './components/LoginPage';
-import { Dashboard } from './components/Dashboard';
-import { PendingScreen } from './components/PendingScreen';
 import { LegalPage } from './components/LegalPage';
 import { SupportLink } from './components/SupportLink';
 import BrandLogo from './components/BrandLogo';
 import { useRouter } from './lib/router';
 
 // R27 WS-M7 — route-level code splitting: Promo, Editor and Admin load
-// on navigation instead of up front. Dashboard, LoginPage, PendingScreen
-// and ProtectedRoute stay eager (first paint / gate surfaces).
+// on navigation instead of up front. LoginPage and ProtectedRoute stay
+// eager (first paint / gate surfaces).
+// R40 P-10 — Dashboard and PendingScreen are lazy too: both reach the
+// Firebase chunk statically (project persistence / a direct Firestore
+// write), and Firebase must not be part of the login route's first
+// download. The gate logic is unchanged — these components only ever
+// render for a signed-in user whose profile has already loaded, which
+// means Firebase has loaded by then; the Suspense fallback below is
+// the same loading screen the other lazy routes use.
 const PromoPage = lazy(() => import('./components/PromoPage').then((m) => ({ default: m.PromoPage })));
 const EditorShell = lazy(() => import('./components/Editor/EditorShell').then((m) => ({ default: m.EditorShell })));
 const AdminPanel = lazy(() => import('./components/AdminPanel').then((m) => ({ default: m.AdminPanel })));
+const Dashboard = lazy(() => import('./components/Dashboard').then((m) => ({ default: m.Dashboard })));
+const PendingScreen = lazy(() => import('./components/PendingScreen').then((m) => ({ default: m.PendingScreen })));
 
 function RouteLoading() {
   return (
@@ -82,7 +89,11 @@ function AppShell() {
   // pending, the user belongs on the pending screen — never on the
   // restricted screen below, whose wording is for other states.
   if (currentUser && userProfile && userProfile.status === 'pending' && !userProfile.isAdmin) {
-    return <PendingScreen onOpenLegal={(path) => navigateTo(path)} />;
+    return (
+      <Suspense fallback={<RouteLoading />}>
+        <PendingScreen onOpenLegal={(path) => navigateTo(path)} />
+      </Suspense>
+    );
   }
 
   if (isAccountDisabled) {
@@ -121,7 +132,11 @@ function AppShell() {
   // every route. Admins are exempt — the owner is never gated by status
   // (and his own profile may predate the status field entirely).
   if (currentUser && userProfile && userProfile.status === 'pending' && !userProfile.isAdmin) {
-    return <PendingScreen onOpenLegal={(path) => navigateTo(path)} />;
+    return (
+      <Suspense fallback={<RouteLoading />}>
+        <PendingScreen onOpenLegal={(path) => navigateTo(path)} />
+      </Suspense>
+    );
   }
 
   if (currentPath === '/admin') {
@@ -132,12 +147,14 @@ function AppShell() {
             <AdminPanel onBack={() => navigateTo('/')} />
           </Suspense>
         ) : (
-          <Dashboard
-            onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
-            onOpenAdmin={() => navigateTo('/admin')}
-            onOpenPromo={() => navigateTo('/promo')}
-            onOpenLegal={(path) => navigateTo(path)}
-          />
+          <Suspense fallback={<RouteLoading />}>
+            <Dashboard
+              onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
+              onOpenAdmin={() => navigateTo('/admin')}
+              onOpenPromo={() => navigateTo('/promo')}
+              onOpenLegal={(path) => navigateTo(path)}
+            />
+          </Suspense>
         )}
       </ProtectedRoute>
     );
@@ -167,12 +184,14 @@ function AppShell() {
           <EditorShell projectId={decodeURIComponent(editorMatch[1])} />
         </Suspense>
       ) : (
-        <Dashboard
-          onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
-          onOpenAdmin={() => navigateTo('/admin')}
-          onOpenPromo={() => navigateTo('/promo')}
-          onOpenLegal={(path) => navigateTo(path)}
-        />
+        <Suspense fallback={<RouteLoading />}>
+          <Dashboard
+            onOpenProject={(projectId) => navigateTo(`/editor/${encodeURIComponent(projectId)}`)}
+            onOpenAdmin={() => navigateTo('/admin')}
+            onOpenPromo={() => navigateTo('/promo')}
+            onOpenLegal={(path) => navigateTo(path)}
+          />
+        </Suspense>
       )}
     </ProtectedRoute>
   );

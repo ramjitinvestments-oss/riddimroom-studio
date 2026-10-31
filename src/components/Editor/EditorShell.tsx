@@ -27,6 +27,8 @@ import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { OPEN_PLAN_EVENT, OPEN_PLAN_SESSION_KEY } from '../../lib/upgradeRequest';
+import { saveStatusText } from '../../lib/projects/localDraft';
+import { recordFailure } from '../../lib/failureCounts';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
 
 /**
@@ -85,6 +87,10 @@ function EditorInner({ uid }: { uid: string }) {
     canRedo,
     projectLimitWarning,
     dismissProjectLimitWarning,
+    savePhase,
+    restoreOffer,
+    restoreDraft,
+    dismissRestoreOffer,
   } = useProject();
   // R35: proactive tier-cap line for Free users (the export gate's
   // indicator) — visible on every step, before the Export step's own
@@ -128,8 +134,10 @@ function EditorInner({ uid }: { uid: string }) {
   // R27 WS-M6 — autosave. (a) Save on step change when there are
   // unsaved edits. (b) Debounced save ~2s after edits go quiet. The
   // manual Save button stays. Refs keep the effects from re-firing on
-  // every render and from retry-looping after a failed save (a failure
-  // leaves the project object untouched, so neither effect reschedules).
+  // every render. R40 P-13: retries after a failed save are owned by
+  // ProjectContext's own backoff loop (these effects still only fire
+  // on step changes and fresh edits), and every dirty state is also
+  // kept as a device-local draft there.
   // isDirty starts false on load, so neither fires on first load.
   const saveRef = useRef(save);
   saveRef.current = save;
@@ -615,9 +623,14 @@ function EditorInner({ uid }: { uid: string }) {
               <Redo2 size={16} /> <span>Redo</span>
             </button>
           </div>
-          {saveError && <span className="text-red-400">{saveError}</span>}
           <span className="text-white/60">
-            {isSaving ? 'Saving…' : isDirty ? 'Unsaved changes' : lastSavedAt ? `Saved · ${new Date(lastSavedAt).toLocaleTimeString()}` : ''}
+            {isSaving
+              ? saveStatusText('saving', lastSavedAt, (t) => new Date(t).toLocaleTimeString())
+              : savePhase === 'retrying' || savePhase === 'waiting-offline' || savePhase === 'failed'
+                ? saveStatusText(savePhase, lastSavedAt, (t) => new Date(t).toLocaleTimeString())
+                : isDirty
+                  ? 'Unsaved changes'
+                  : saveStatusText('saved', lastSavedAt, (t) => new Date(t).toLocaleTimeString())}
           </span>
           <button
             onClick={save}
@@ -641,6 +654,31 @@ function EditorInner({ uid }: { uid: string }) {
           <button onClick={dismissProjectLimitWarning} aria-label="Dismiss" className="text-amber-200/60 hover:text-amber-100 shrink-0 min-h-8 min-w-8 flex items-center justify-center">
             <X size={14} strokeWidth={3} />
           </button>
+        </div>
+      )}
+
+      {/* R40 P-13 — a newer copy kept on this device (a save that
+          never landed, or a tab that died) is offered back in plain
+          words; restoring is one undo-able load, never silent. */}
+      {restoreOffer && (
+        <div className="mx-3 sm:mx-4 mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-white/5 border border-gold/40 px-3 py-2 text-xs text-white/85">
+          <span>
+            We saved a copy on this device at {new Date(restoreOffer.savedAt).toLocaleTimeString()} — restore it?
+          </span>
+          <span className="flex gap-2">
+            <button
+              onClick={restoreDraft}
+              className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black font-bold uppercase tracking-wide"
+            >
+              Restore
+            </button>
+            <button
+              onClick={dismissRestoreOffer}
+              className="min-h-11 px-3 rounded-lg bg-white/10 hover:bg-white/20 font-bold"
+            >
+              Keep the saved version
+            </button>
+          </span>
         </div>
       )}
 
@@ -810,10 +848,14 @@ function EditorInner({ uid }: { uid: string }) {
 }
 
 export function EditorShell({ projectId }: { projectId: string }) {
-  const { currentUser } = useAuth();
+  const { currentUser, idToken } = useAuth();
   if (!currentUser) return null;
   return (
-    <ProjectProvider projectId={projectId} ownerUid={currentUser.uid}>
+    <ProjectProvider
+      projectId={projectId}
+      ownerUid={currentUser.uid}
+      onSaveFinalFailure={() => recordFailure('save', idToken)}
+    >
       <EditorInner uid={currentUser.uid} />
     </ProjectProvider>
   );

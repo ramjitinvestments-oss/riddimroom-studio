@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Download, Search } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import BrandLogo from './BrandLogo';
+import { FAILURE_KIND_LABELS, type FailureCountsSummary, type FailureKind } from '../lib/failureCounts';
 
 /**
  * Phase 2 (Plan v5) — the owner's Admin screen: every signup by email,
@@ -53,6 +54,27 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
     row: AdminUserRow;
     access: AdminUserRow['accessState'];
   } | null>(null);
+  // R40 P-28 — "What's failing": first-party failure counts (counts
+  // only, no user content). Loads quietly alongside the signup list;
+  // if it cannot load, the section simply stays hidden.
+  const [failureSummary, setFailureSummary] = useState<FailureCountsSummary | null>(null);
+
+  useEffect(() => {
+    if (!idToken) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch('/api/admin/failure-counts', {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        const data = await res.json().catch(() => null);
+        if (!cancelled && res.ok && data?.success) setFailureSummary(data.summary as FailureCountsSummary);
+      } catch {
+        // The readout is a help, never a blocker on the admin screen.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [idToken]);
 
   const load = useCallback(async () => {
     if (!idToken) return;
@@ -179,6 +201,22 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
           day, watermark on). Premium lifts the limits — projects up to 10 minutes, unlimited exports, no watermark. Switching access off returns them to the pending screen — their projects are
           kept. Every switch asks you to confirm first. The export gives you name and email for exactly the people on screen who said yes to marketing emails — no one else is in the file.
         </p>
+        {failureSummary && (
+          <section className="mb-6 rounded-xl border border-white/10 bg-white/[0.03] p-4" aria-label="What's failing">
+            <h2 className="text-xs font-black uppercase tracking-wide text-white/70">What&rsquo;s failing</h2>
+            <p className="text-xs text-white/50 mt-1">Counts only — how many jobs failed, nothing about anyone&rsquo;s projects.</p>
+            <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+              {(Object.keys(FAILURE_KIND_LABELS) as FailureKind[]).map((kind) => (
+                <div key={kind} className="rounded-lg bg-black/30 border border-white/10 px-2 py-3">
+                  <p className="text-lg font-black">{failureSummary.today[kind]}</p>
+                  <p className="text-[11px] text-white/50">{FAILURE_KIND_LABELS[kind]} today</p>
+                  <p className="text-[11px] text-white/40">{failureSummary.last7Days[kind]} in the last 7 days</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         <div className="flex flex-wrap items-center gap-2 mb-6">
           <button
             onClick={() => setWaitingOnly((v) => !v)}

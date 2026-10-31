@@ -5,6 +5,7 @@ import { addCaptionItems } from '../../lib/timeline/insert';
 import { messageForNonJsonTranscribeResponse, messageForTranscribeFetchFailure } from '../../lib/transcription/clientErrors';
 import { getItemsByTrackType } from '../../lib/timeline/utils';
 import { requestOpenPlan } from '../../lib/upgradeRequest';
+import { recordFailure } from '../../lib/failureCounts';
 import type { VideoTimelineItem, AudioTimelineItem } from '../../types/timeline';
 
 /**
@@ -99,11 +100,13 @@ export function TranscribePanel({ uid }: { uid: string }) {
       const isJson = (res.headers.get('content-type') || '').includes('application/json');
       if (!isJson) {
         setError(messageForNonJsonTranscribeResponse());
+        recordFailure('transcribe', idToken);
         return;
       }
       const data = await res.json();
       if (!res.ok || !data.success) {
         setError(humanizeApiError(data.error) || 'Transcription failed. Check your connection and try again.');
+        recordFailure('transcribe', idToken);
         return;
       }
       if (!data.words || data.words.length === 0) {
@@ -118,6 +121,7 @@ export function TranscribePanel({ uid }: { uid: string }) {
       // user — map it to its failure class (unreadable response vs.
       // unreachable service vs. the error's own readable message).
       setError(messageForTranscribeFetchFailure(err));
+      recordFailure('transcribe', idToken);
     } finally {
       setIsTranscribing(null);
     }

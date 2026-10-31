@@ -5,7 +5,8 @@ import { validateRenderResult } from '../../lib/export/validate';
 import { humanizeExportError } from '../../lib/export/exportErrors';
 import type { RenderProgress } from '../../lib/export/renderer';
 import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
-import { createExportRenderer, getConfiguredExportEngine } from '../../lib/export/mediabunnyExporter';
+import { createRuntimeExportRenderer, getConfiguredExportEngine } from '../../lib/export/mediabunnyExporter';
+import { recordFailure } from '../../lib/failureCounts';
 import {
   EXPORT_FRAME_RATES,
   EXPORT_QUALITY_TIERS,
@@ -70,19 +71,28 @@ async function measureLoudness(blob: Blob): Promise<LoudnessReading | null> {
  * success without both `validateRenderResult` and the MP4 conversion
  * itself succeeding.
  *
- * Pre-live build 2: the renderer comes from `createExportRenderer()`.
- * The default build still selects 'ffmpeg' (Canvas2DRenderer + the
- * transcode stage above, byte-for-byte the old flow). A build with
+ * Pre-live build 2: the renderer comes from the export selection
+ * point. The default build still selects 'ffmpeg' (Canvas2DRenderer +
+ * the transcode stage above, byte-for-byte the old flow). A build with
  * VITE_EXPORT_ENGINE=mediabunny selects the Mediabunny/WebCodecs
  * engine, whose `render()` returns the finished MP4 directly — the
  * transcode stage is skipped for it (there is no WebM to convert), and
  * its capability failures surface through this panel's existing error
- * path. Engine selection never falls back at runtime: a selected
- * engine that cannot run fails the export honestly.
+ * path.
+ *
+ * R40 P-12: at this entry, a runtime with NO WebCodecs at all quietly
+ * uses the standard path instead (see `createRuntimeExportRenderer`)
+ * — the user still gets an MP4 and never meets an engine name. If
+ * both paths are unavailable, the one honest humanized message below
+ * is what stands.
+ *
+ * R40 P-28: a settled final failure (not a refusal — the duration
+ * gate and the daily limit above return before this point and are
+ * never counted) records one failure count, fire-and-forget.
  */
 export function ExportPanel() {
   const { project } = useProject();
-  const { currentUser: user } = useAuth();
+  const { currentUser: user, idToken } = useAuth();
   const [status, setStatus] = useState<'idle' | 'rendering' | 'converting' | 'done' | 'error'>('idle');
   const [progress, setProgress] = useState<RenderProgress | null>(null);
   const [convertRatio, setConvertRatio] = useState(0);
@@ -173,8 +183,8 @@ export function ExportPanel() {
     });
 
     try {
-      const engine = getConfiguredExportEngine();
-      const renderer = createExportRenderer(engine);
+      const configuredEngine = getConfiguredExportEngine();
+      const { renderer, engine } = createRuntimeExportRenderer(configuredEngine);
       const result = await renderer.render(project, {
         signal: controller.signal,
         onProgress: setProgress,
@@ -184,6 +194,7 @@ export function ExportPanel() {
       if (!validation.valid) {
         setError(humanizeExportError(validation.error));
         setStatus('error');
+        recordFailure('export', idToken);
         return;
       }
 
@@ -202,6 +213,7 @@ export function ExportPanel() {
         } catch (convertErr: any) {
           setError(humanizeExportError(convertErr));
           setStatus('error');
+          recordFailure('export', idToken);
           return;
         }
       }
@@ -218,11 +230,12 @@ export function ExportPanel() {
       } else {
         setError(humanizeExportError(err));
         setStatus('error');
+        recordFailure('export', idToken);
       }
     } finally {
       abortRef.current = null;
     }
-  }, [project, downloadUrl, busy, user, tier, resolution, frameRateChoice, qualityTier]);
+  }, [project, downloadUrl, busy, user, tier, resolution, frameRateChoice, qualityTier, idToken]);
 
   const handleCancel = () => {
     abortRef.current?.abort();

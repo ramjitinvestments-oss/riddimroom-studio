@@ -4,6 +4,16 @@ import { loadProject, saveProject } from '../lib/projects/persistence';
 import { getProjectPoster } from '../lib/media/thumbnails';
 import { emptyHistory, pushHistory, undoHistory, redoHistory, shouldCoalesce, type History } from '../lib/history';
 import { getProjectDuration, projectDurationExceedsLimit } from '../lib/timeline/utils';
+import {
+  readLocalDraft,
+  writeLocalDraft,
+  clearLocalDraft,
+  isDraftNewerThan,
+  draftSupersededBySave,
+  saveRetryDelayMs,
+  type LocalDraft,
+  type SavePhase,
+} from '../lib/projects/localDraft';
 import { MAX_MEDIA_SECONDS } from '../lib/media/constants';
 
 /**
@@ -59,6 +69,14 @@ interface ProjectContextValue {
    */
   projectLimitWarning: string | null;
   dismissProjectLimitWarning: () => void;
+  /** R40 P-13: the save lifecycle phase behind the save-state line's plain words. */
+  savePhase: SavePhase;
+  /** R40 P-13: a newer device-local copy worth offering back, or null. */
+  restoreOffer: LocalDraft | null;
+  /** R40 P-13: load the offered device copy (one undo-able step, never a silent overwrite). */
+  restoreDraft: () => void;
+  /** R40 P-13: keep the cloud-saved version and drop the device copy. */
+  dismissRestoreOffer: () => void;
 }
 
 const ProjectContext = createContext<ProjectContextValue | undefined>(undefined);
@@ -67,10 +85,13 @@ export function ProjectProvider({
   projectId,
   ownerUid,
   children,
+  onSaveFinalFailure,
 }: {
   projectId: string;
   ownerUid: string;
   children: React.ReactNode;
+  /** R40 P-28: called once when a save gives up retrying (the final failed state). */
+  onSaveFinalFailure?: () => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -84,6 +105,26 @@ export function ProjectProvider({
   const lastEditAtRef = useRef<number>(0);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [projectLimitWarning, setProjectLimitWarning] = useState<string | null>(null);
+  // R40 P-13 — local recovery + self-retrying saves.
+  const [savePhase, setSavePhaseState] = useState<SavePhase>('idle');
+  const savePhaseRef = useRef<SavePhase>('idle');
+  const setSavePhase = useCallback((phase: SavePhase) => {
+    savePhaseRef.current = phase;
+    setSavePhaseState(phase);
+  }, []);
+  const [restoreOffer, setRestoreOffer] = useState<LocalDraft | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttemptRef = useRef(0);
+  const saveRunningRef = useRef(false);
+  const finalFailureNotifiedRef = useRef(false);
+  const onSaveFinalFailureRef = useRef(onSaveFinalFailure);
+  onSaveFinalFailureRef.current = onSaveFinalFailure;
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current !== null) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -95,6 +136,18 @@ export function ProjectProvider({
         projectRef.current = result.project;
         setLastSavedAt(result.project.updatedAt);
         setIsDirty(false);
+        setSavePhase('idle');
+        // R40 P-13: a device copy NEWER than what just loaded means a
+        // save never landed (or the tab died) — offer it back instead
+        // of silently opening the older version. A draft the loaded
+        // copy already covers is superseded and cleared.
+        const draft = readLocalDraft(projectId);
+        if (isDraftNewerThan(draft, result.project.updatedAt)) {
+          setRestoreOffer(draft);
+        } else {
+          setRestoreOffer(null);
+          if (draftSupersededBySave(draft, result.project.updatedAt)) clearLocalDraft(projectId);
+        }
         // A freshly-loaded project starts with a clean slate — undoing past
         // it would have nothing meaningful to restore to.
         historyRef.current = emptyHistory();
@@ -161,7 +214,16 @@ export function ProjectProvider({
     setProjectLimitWarning(null);
     setIsDirty(true);
     setHistoryVersion((v) => v + 1);
-  }, []);
+    // R40 P-13: a new edit restarts the save-retry cycle — any pending
+    // retry is dropped (the coming autosave covers the new state) and
+    // a save that had given up gets a fresh set of attempts.
+    retryAttemptRef.current = 0;
+    finalFailureNotifiedRef.current = false;
+    clearRetryTimer();
+    if (savePhaseRef.current === 'retrying' || savePhaseRef.current === 'waiting-offline' || savePhaseRef.current === 'failed') {
+      setSavePhase('idle');
+    }
+  }, [clearRetryTimer, setSavePhase]);
 
   const dismissProjectLimitWarning = useCallback(() => setProjectLimitWarning(null), []);
 
@@ -197,11 +259,15 @@ export function ProjectProvider({
     setHistoryVersion((v) => v + 1);
   }, []);
 
-  const save = useCallback(async () => {
+  // One save attempt (poster refresh + the Firestore write, exactly
+  // as before). Returns whether the cloud copy now holds this work;
+  // the retry policy lives in `save` below, not here.
+  const performSaveAttempt = useCallback(async (): Promise<boolean> => {
     const current = projectRef.current;
-    if (!current) return;
+    if (!current) return true;
     setIsSaving(true);
     setSaveError(null);
+    setSavePhase('saving');
     try {
       // Dashboard poster refresh (polish batch 2): regenerate from the
       // project's first visual asset and ride along on this save, so the
@@ -224,12 +290,123 @@ export function ProjectProvider({
       projectRef.current = saved;
       setLastSavedAt(saved.updatedAt);
       setIsDirty(false);
+      setSavePhase('saved');
+      retryAttemptRef.current = 0;
+      finalFailureNotifiedRef.current = false;
+      // The cloud now holds this work: a device draft it covers is
+      // superseded and cleared (a NEWER draft — edited while this
+      // save was in flight — is kept).
+      const draft = readLocalDraft(saved.id);
+      if (draftSupersededBySave(draft, saved.updatedAt)) clearLocalDraft(saved.id);
+      if (restoreOffer && draftSupersededBySave(restoreOffer, saved.updatedAt)) setRestoreOffer(null);
+      return true;
     } catch (err: any) {
-      setSaveError(err?.message || 'Failed to save project.');
+      // Never surface the raw error: the save-state line speaks plain
+      // words (localDraft.saveStatusText), and the work itself is
+      // kept as a device draft below so a failure loses nothing.
+      console.error('[ProjectContext] save failed:', err?.message || err);
+      const latest = projectRef.current;
+      if (latest) writeLocalDraft({ ...latest, updatedAt: Date.now() });
+      return false;
     } finally {
       setIsSaving(false);
     }
-  }, []);
+  }, [restoreOffer]);
+
+  // R40 P-13: after the last retry the save is in its final failed
+  // state — the line says the copy is kept on this device, and the
+  // P-28 failure count fires exactly here, once, not per attempt.
+  const MAX_SAVE_RETRIES = 6;
+  const scheduleSaveRetry = useCallback(() => {
+    if (retryAttemptRef.current >= MAX_SAVE_RETRIES) {
+      setSavePhase('failed');
+      setSaveError("Couldn't save — your latest copy is kept on this device");
+      if (!finalFailureNotifiedRef.current) {
+        finalFailureNotifiedRef.current = true;
+        onSaveFinalFailureRef.current?.();
+      }
+      return;
+    }
+    const delay = saveRetryDelayMs(retryAttemptRef.current);
+    const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    setSavePhase(offline ? 'waiting-offline' : 'retrying');
+    clearRetryTimer();
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      retryAttemptRef.current += 1;
+      void (async () => {
+        if (saveRunningRef.current) { scheduleSaveRetry(); return; }
+        saveRunningRef.current = true;
+        try {
+          const ok = await performSaveAttempt();
+          if (!ok) scheduleSaveRetry();
+        } finally {
+          saveRunningRef.current = false;
+        }
+      })();
+    }, delay);
+  }, [performSaveAttempt, clearRetryTimer, setSavePhase]);
+
+  const save = useCallback(async () => {
+    if (saveRunningRef.current) return;
+    clearRetryTimer();
+    retryAttemptRef.current = 0;
+    finalFailureNotifiedRef.current = false;
+    saveRunningRef.current = true;
+    try {
+      const ok = await performSaveAttempt();
+      if (!ok) scheduleSaveRetry();
+    } finally {
+      saveRunningRef.current = false;
+    }
+  }, [performSaveAttempt, scheduleSaveRetry, clearRetryTimer]);
+
+  // R40 P-13: keep the device draft on the autosave cadence — every
+  // dirty project state is copied locally (stamped with the edit
+  // time, which is what "newer" is measured against on the next open).
+  useEffect(() => {
+    if (!project || !isDirty) return;
+    writeLocalDraft({ ...project, updatedAt: Date.now() });
+  }, [project, isDirty]);
+
+  // Coming back online hurries a waiting save along — a help, never a
+  // dependency: the backoff loop above runs either way.
+  useEffect(() => {
+    const onOnline = () => {
+      if ((savePhaseRef.current === 'waiting-offline' || savePhaseRef.current === 'retrying') && projectRef.current) {
+        void save();
+      }
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [save]);
+
+  // R40 P-13: restoring is one undo-able load — the current project is
+  // pushed onto the history stack first, so Undo brings it straight
+  // back. The restored copy is dirty: the autosave sends it to the
+  // cloud like any other edit.
+  const restoreDraft = useCallback(() => {
+    const offer = restoreOffer;
+    if (!offer) return;
+    const current = projectRef.current;
+    if (current) {
+      historyRef.current = pushHistory(historyRef.current, current, { coalesce: false });
+    }
+    lastEditAtRef.current = 0;
+    setProject(offer.project);
+    projectRef.current = offer.project;
+    setIsDirty(true);
+    setSavePhase('idle');
+    retryAttemptRef.current = 0;
+    finalFailureNotifiedRef.current = false;
+    setHistoryVersion((v) => v + 1);
+    setRestoreOffer(null);
+  }, [restoreOffer, setSavePhase]);
+
+  const dismissRestoreOffer = useCallback(() => {
+    clearLocalDraft(projectId);
+    setRestoreOffer(null);
+  }, [projectId]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- historyVersion exists solely to force this recompute
   const canUndo = historyRef.current.past.length > 0;
@@ -256,6 +433,10 @@ export function ProjectProvider({
         canRedo,
         projectLimitWarning,
         dismissProjectLimitWarning,
+        savePhase,
+        restoreOffer,
+        restoreDraft,
+        dismissRestoreOffer,
       }}
     >
       {children}
