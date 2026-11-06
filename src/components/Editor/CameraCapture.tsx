@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Clapperboard, PictureInPicture2 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
+import { recordDoorOpen, recordTakeHealthFromReceipt } from '../../lib/healthEvents';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
   buildCaptureAttempts,
@@ -484,6 +486,18 @@ function orientationPermissionNeeded(): boolean {
 }
 
 export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, overlayOnly, onClose, canvasWidth, canvasHeight }: CameraCaptureProps) {
+  // R41 WS-D health hooks (keep these two small blocks intact — see
+  // healthEvents.ts): the camera door counts once when this component
+  // mounts (CameraCapture only mounts when the camera is opened), and
+  // take health is recorded in confirmPendingVideo / confirmDual below.
+  const { idToken } = useAuth();
+  const cameraDoorCountedRef = useRef(false);
+  useEffect(() => {
+    if (idToken && !cameraDoorCountedRef.current) {
+      cameraDoorCountedRef.current = true;
+      recordDoorOpen('camera', idToken);
+    }
+  }, [idToken]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -1691,11 +1705,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     (asOverlay: boolean) => {
       if (!pendingVideo) return;
       const result: CaptureResult = { kind: 'video', blob: pendingVideo.blob, receipt: pendingVideo.receipt };
+      recordTakeHealthFromReceipt(pendingVideo.receipt, idToken);
       setPendingVideo(null);
       if (asOverlay && onCaptureAsOverlay) onCaptureAsOverlay(result);
       else onCapture(result);
     },
-    [pendingVideo, onCapture, onCaptureAsOverlay],
+    [pendingVideo, onCapture, onCaptureAsOverlay, idToken],
   );
 
   /** Review-state discard: drop the recording and return to the live camera. */
@@ -1713,9 +1728,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       startDeltaMs: pendingDual.startDeltaMs,
       layout: dualLayout,
     };
+    recordTakeHealthFromReceipt(pendingDual.mainReceipt, idToken);
     setPendingDual(null);
     onCaptureDual(payload);
-  }, [pendingDual, onCaptureDual, dualLayout]);
+  }, [pendingDual, onCaptureDual, dualLayout, idToken]);
 
   /** R29 dual review discard: drop both recordings and re-probe back into dual mode. */
   const discardDual = useCallback(() => {

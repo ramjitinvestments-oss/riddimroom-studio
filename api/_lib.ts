@@ -639,6 +639,11 @@ export interface FailureCountsSummary {
   days: FailureDayCounts[];
 }
 
+/** The full admin readout: the P-28 failure summary plus R41 health. */
+export interface AdminCountsSummary extends FailureCountsSummary {
+  health: HealthCountsSummary;
+}
+
 /** Pure: fold stored day documents into today + last-7-days totals (newest day first). */
 export function summarizeFailureCounts(
   docs: Array<Record<string, unknown> & { day: string }>,
@@ -686,12 +691,171 @@ export async function recordFailureCount(kind: FailureKind, idToken: string, now
 }
 
 /** Admin readout: every stored day, summarized. Refuses non-admins before listing anything. */
-export async function fetchFailureCounts(callerUid: string, idToken: string): Promise<FailureCountsSummary> {
+export async function fetchFailureCounts(callerUid: string, idToken: string): Promise<AdminCountsSummary> {
   if (!(await isAdminUser(callerUid, idToken))) {
     throw new AccessToggleError('NOT_ADMIN', 'Admin access required.');
   }
   const docs = await fsListDocs('failureCounts', idToken);
-  return summarizeFailureCounts(docs.map((d) => ({ ...d.data, day: d.id })));
+  const rows = docs.map((d) => ({ ...d.data, day: d.id }));
+  return { ...summarizeFailureCounts(rows), health: summarizeHealthCounts(rows) };
+}
+
+// ---------------------------------------------------------------------------
+// R41 WS-D — first-party ANALYTICS health events.
+//
+// The P-28 day documents (failureCounts/{day}) also carry aggregate
+// HEALTH counters under namespaced keys (health_*): camera-take
+// buckets, export/save successes, per-session longtask buckets and
+// door-open counts. Counts and coarse buckets only — no user content,
+// no identifiers, nothing traceable to a person or a project; the day
+// document remains the only storage. Every type and bucket value is
+// validated against the strict allowlists below server-side: anything
+// else is refused, never stored.
+// ---------------------------------------------------------------------------
+
+export type HealthEventType = 'take' | 'export' | 'save' | 'session' | 'door';
+
+export interface HealthEvent {
+  type: HealthEventType;
+  buckets: Record<string, string>;
+}
+
+/** The strict allowlist: event type → bucket name → allowed values. */
+export const HEALTH_BUCKET_ALLOWLIST: Record<HealthEventType, Record<string, readonly string[]>> = {
+  take: {
+    tier: ['2160', '1440', '1080', '720', 'low', 'unknown'],
+    fps: ['60', '30', 'other', 'unknown'],
+    drops: ['none', 'low', 'high', 'unknown'],
+    duration: ['under15', '15to60', 'over60'],
+  },
+  export: {
+    duration: ['under10', '10to60', 'over60'],
+  },
+  save: {},
+  session: {
+    total: ['0', '1to5', '6plus'],
+    over200: ['0', '1plus'],
+  },
+  door: {
+    door: ['promo', 'editor', 'poster', 'camera'],
+  },
+};
+
+export const HEALTH_EVENT_TYPES: readonly HealthEventType[] = ['take', 'export', 'save', 'session', 'door'];
+
+/** Strictly validate an untrusted health-event shape; null when anything is off. */
+export function validateHealthEvent(value: unknown): HealthEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { type, buckets } = value as { type?: unknown; buckets?: unknown };
+  if (typeof type !== 'string' || !(HEALTH_EVENT_TYPES as readonly string[]).includes(type)) return null;
+  const allow = HEALTH_BUCKET_ALLOWLIST[type as HealthEventType];
+  if (!buckets || typeof buckets !== 'object' || Array.isArray(buckets)) return null;
+  const given = buckets as Record<string, unknown>;
+  const expectedKeys = Object.keys(allow);
+  const givenKeys = Object.keys(given);
+  if (givenKeys.length !== expectedKeys.length) return null;
+  for (const key of expectedKeys) {
+    const v = given[key];
+    if (typeof v !== 'string' || !allow[key].includes(v)) return null;
+  }
+  const clean: Record<string, string> = {};
+  for (const key of expectedKeys) clean[key] = given[key] as string;
+  return { type: type as HealthEventType, buckets: clean };
+}
+
+/** The day-document counter key for one bucket of one event. */
+export function healthStorageKey(event: HealthEvent, bucketName: string): string {
+  if (event.type === 'door') return `health_door_${event.buckets.door}`;
+  return `health_${event.type}_${bucketName}_${event.buckets[bucketName]}`;
+}
+
+/** Every counter key a valid event increments (save = its single success key). */
+export function healthStorageKeysFor(event: HealthEvent): string[] {
+  if (event.type === 'save') return ['health_save_success'];
+  return Object.keys(HEALTH_BUCKET_ALLOWLIST[event.type]).map((name) => healthStorageKey(event, name));
+}
+
+/** Every health counter key that can ever appear (for zero-filled summaries). */
+export const ALL_HEALTH_STORAGE_KEYS: readonly string[] = (() => {
+  const keys: string[] = ['health_save_success'];
+  for (const type of HEALTH_EVENT_TYPES) {
+    if (type === 'save') continue;
+    for (const [name, values] of Object.entries(HEALTH_BUCKET_ALLOWLIST[type])) {
+      for (const v of values) {
+        keys.push(type === 'door' ? `health_door_${v}` : `health_${type}_${name}_${v}`);
+      }
+    }
+  }
+  return keys;
+})();
+
+function storedCount(data: Record<string, unknown>, key: string): number {
+  const v = data[key];
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/** Pure: the health fields to write after one more event, given the stored fields. */
+export function buildHealthIncrement(
+  existing: Record<string, unknown>,
+  event: HealthEvent,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const key of healthStorageKeysFor(event)) out[key] = storedCount(existing, key) + 1;
+  return out;
+}
+
+/**
+ * Record one health event as the calling user, into the SAME day
+ * document as the failure counts. Throws on an invalid event or when
+ * Firestore refuses — the endpoint turns that into "recorded: false".
+ */
+export async function recordHealthEvent(event: HealthEvent, idToken: string, now: Date = new Date()): Promise<void> {
+  const valid = validateHealthEvent(event);
+  if (!valid) throw new Error('Invalid health event.');
+  const day = failureDayKey(now);
+  const path = `failureCounts/${day}`;
+  const existing = await fsGetDoc(path, idToken);
+  await fsPatchDoc(path, buildHealthIncrement(existing.data, valid), idToken);
+}
+
+export interface HealthDayCounts {
+  day: string;
+  counts: Record<string, number>;
+}
+
+export interface HealthCountsSummary {
+  today: HealthDayCounts;
+  last14Days: Record<string, number>;
+  days: HealthDayCounts[];
+}
+
+function zeroHealthCounts(): Record<string, number> {
+  return Object.fromEntries(ALL_HEALTH_STORAGE_KEYS.map((k) => [k, 0]));
+}
+
+/** Pure: fold stored day documents into today + last-14-days health totals (newest first). */
+export function summarizeHealthCounts(
+  docs: Array<Record<string, unknown> & { day: string }>,
+  now: Date = new Date(),
+): HealthCountsSummary {
+  const todayKey = failureDayKey(now);
+  const windowStart = failureDayKey(new Date(now.getTime() - 13 * 24 * 60 * 60 * 1000));
+  const byDay = new Map<string, HealthDayCounts>();
+  for (const doc of docs) {
+    if (typeof doc.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(doc.day)) continue;
+    const counts = zeroHealthCounts();
+    for (const key of ALL_HEALTH_STORAGE_KEYS) counts[key] = storedCount(doc, key);
+    byDay.set(doc.day, { day: doc.day, counts });
+  }
+  const days = [...byDay.values()]
+    .filter((d) => d.day >= windowStart && d.day <= todayKey)
+    .sort((a, b) => b.day.localeCompare(a.day));
+  const last14Days = zeroHealthCounts();
+  for (const d of days) {
+    for (const key of ALL_HEALTH_STORAGE_KEYS) last14Days[key] += d.counts[key];
+  }
+  const today = byDay.get(todayKey) ?? { day: todayKey, counts: zeroHealthCounts() };
+  return { today, last14Days, days };
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import type { RenderProgress } from '../../lib/export/renderer';
 import { transcodeWebmToMp4 } from '../../lib/export/mp4Transcoder';
 import { createRuntimeExportRenderer, getConfiguredExportEngine } from '../../lib/export/mediabunnyExporter';
 import { recordFailure } from '../../lib/failureCounts';
+import { recordExportSuccess } from '../../lib/healthEvents';
 import {
   EXPORT_FRAME_RATES,
   EXPORT_QUALITY_TIERS,
@@ -222,6 +223,7 @@ export function ExportPanel() {
       setLastBlob(mp4Blob);
       setStatus('done');
       setHasExportedThisSession(true);
+      recordExportSuccess(result.durationSeconds, idToken);
       void measureLoudness(mp4Blob).then(setLoudness);
       if (user) recordExport(user.uid);
     } catch (err: any) {

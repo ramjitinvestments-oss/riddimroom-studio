@@ -3,6 +3,7 @@ import { ArrowLeft, Download, Search } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import BrandLogo from './BrandLogo';
 import { FAILURE_KIND_LABELS, type FailureCountsSummary, type FailureKind } from '../lib/failureCounts';
+import { HEALTH_ADMIN_GROUPS } from '../lib/healthEvents';
 import type { DeletionRequestRow } from '../lib/accountDeletion';
 
 /**
@@ -223,10 +224,11 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
           kept. Every switch asks you to confirm first. The export gives you name and email for exactly the people on screen who said yes to marketing emails — no one else is in the file.
         </p>
         {failureSummary && (
-          <section className="mb-6 rounded-xl border border-white/10 bg-white/[0.03] p-4" aria-label="What's failing">
-            <h2 className="text-xs font-black uppercase tracking-wide text-white/70">What&rsquo;s failing</h2>
-            <p className="text-xs text-white/50 mt-1">Counts only — how many jobs failed, nothing about anyone&rsquo;s projects.</p>
-            <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+          <section className="mb-6 rounded-xl border border-white/10 bg-white/[0.03] p-4" aria-label="Health">
+            <h2 className="text-xs font-black uppercase tracking-wide text-white/70">Health</h2>
+            <p className="text-xs text-white/50 mt-1">Counts only — nothing about anyone&rsquo;s projects, words or clips.</p>
+            <h3 className="text-[11px] font-black uppercase tracking-wide text-white/60 mt-4">What&rsquo;s failing</h3>
+            <div className="grid grid-cols-3 gap-2 mt-2 text-center">
               {(Object.keys(FAILURE_KIND_LABELS) as FailureKind[]).map((kind) => (
                 <div key={kind} className="rounded-lg bg-black/30 border border-white/10 px-2 py-3">
                   <p className="text-lg font-black">{failureSummary.today[kind]}</p>
@@ -235,6 +237,26 @@ export function AdminPanel({ onBack }: AdminPanelProps) {
                 </div>
               ))}
             </div>
+            {failureSummary.health &&
+              HEALTH_ADMIN_GROUPS.map((group) => (
+                <div key={group.title} className="mt-4">
+                  <h3 className="text-[11px] font-black uppercase tracking-wide text-white/60">{group.title}</h3>
+                  <ul className="mt-2 flex flex-col gap-1">
+                    {group.rows.map((row) => (
+                      <li
+                        key={row.key}
+                        className="flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-lg bg-black/30 border border-white/10 px-3 py-2 text-xs"
+                      >
+                        <span className="font-bold text-white/80">{failureSummary.health!.today.counts[row.key] ?? 0} today</span>
+                        <span className="text-white/60">{row.label}</span>
+                        <span className="text-white/40">
+                          {failureSummary.health!.last14Days[row.key] ?? 0} in the last 14 days
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
           </section>
         )}
 

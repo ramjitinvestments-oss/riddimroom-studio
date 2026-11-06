@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { recordDoorOpen } from '../lib/healthEvents';
 import { useLicenseTier } from '../hooks/useLicenseTier';
 import BrandLogo from './BrandLogo';
 import { analyzeImageFile, recipeBands, sliceBandFiles, type ArtworkAnalysis } from '../lib/promo/analyze';
@@ -208,8 +209,16 @@ interface CampaignResult {
 }
 
 export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
-  const { currentUser } = useAuth();
+  const { currentUser, idToken } = useAuth();
   const { tier } = useLicenseTier();
+  // R41 WS-D — door usage: Promo was opened (once per mount).
+  const promoDoorCountedRef = useRef(false);
+  useEffect(() => {
+    if (idToken && !promoDoorCountedRef.current) {
+      promoDoorCountedRef.current = true;
+      recordDoorOpen('promo', idToken);
+    }
+  }, [idToken]);
   const [picked, setPicked] = useState<PickedFile[]>([]);
   const [analysis, setAnalysis] = useState<ArtworkAnalysis | null>(null);
   const [recipe, setRecipe] = useState<PromoRecipeId>('kinetic-build');
@@ -443,6 +452,15 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
       /* sessionStorage unavailable — no deep-link, no behaviour change */
     }
   }, []);
+
+  // R41 WS-D — door usage: the Headline Poster builder was opened
+  // (covers both the deep-link above and the on-page card, which set
+  // the same posterOpen state).
+  const posterWasOpenRef = useRef(false);
+  useEffect(() => {
+    if (posterOpen && !posterWasOpenRef.current) recordDoorOpen('poster', idToken);
+    posterWasOpenRef.current = posterOpen;
+  }, [posterOpen, idToken]);
 
   // R21: a website profile confirmed on this device is offered again.
   useEffect(() => {

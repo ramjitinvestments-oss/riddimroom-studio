@@ -12,6 +12,8 @@
  * server cannot store the count yet, the user's work is unaffected.
  */
 
+import type { HealthCountsSummary } from './healthEvents';
+
 export type FailureKind = 'export' | 'save' | 'transcribe';
 
 export const FAILURE_KINDS: readonly FailureKind[] = ['export', 'save', 'transcribe'];
@@ -55,6 +57,8 @@ export interface FailureCountsSummary {
   today: FailureDayCounts;
   last7Days: { export: number; save: number; transcribe: number; total: number };
   days: FailureDayCounts[];
+  /** R41 WS-D — aggregate health buckets (last 14 days), when the endpoint provides them. */
+  health?: HealthCountsSummary;
 }
 
 /** Plain labels for the admin "What's failing" section. */

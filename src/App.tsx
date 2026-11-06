@@ -6,6 +6,7 @@ import { LegalPage } from './components/LegalPage';
 import { SupportLink } from './components/SupportLink';
 import BrandLogo from './components/BrandLogo';
 import { useRouter } from './lib/router';
+import { startSessionLongtaskCollector } from './lib/healthEvents';
 
 // R27 WS-M7 — route-level code splitting: Promo, Editor and Admin load
 // on navigation instead of up front. LoginPage and ProtectedRoute stay
@@ -46,7 +47,17 @@ function RouteLoading() {
  */
 function AppShell() {
   const { currentPath, navigateTo } = useRouter();
-  const { currentUser, userProfile, isAuthLoading, isAccountDisabled, accessBlockReason, signOut } = useAuth();
+  const { currentUser, userProfile, isAuthLoading, isAccountDisabled, accessBlockReason, signOut, idToken } = useAuth();
+
+  // R41 WS-D — session longtask collector: at most ONE aggregate
+  // health event per session (buckets only), no-op where unsupported.
+  const longtaskStartedRef = React.useRef(false);
+  useEffect(() => {
+    if (!idToken || longtaskStartedRef.current) return;
+    longtaskStartedRef.current = true;
+    const collector = startSessionLongtaskCollector(idToken);
+    return () => collector?.disconnect();
+  }, [idToken]);
 
   // UX-02 / R40 P-23: leaving the restricted screen below. AuthContext
   // retains the access-block reason across sign-out (the gate itself

@@ -29,6 +29,7 @@ import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { OPEN_PLAN_EVENT, OPEN_PLAN_SESSION_KEY } from '../../lib/upgradeRequest';
 import { saveStatusText } from '../../lib/projects/localDraft';
 import { recordFailure } from '../../lib/failureCounts';
+import { recordDoorOpen, recordSaveSuccess } from '../../lib/healthEvents';
 import { freeCapWarningForProject } from '../../lib/capWarning';
 import type { Project } from '../../types/timeline';
 import type { AudioTimelineItem, MediaAsset } from '../../types/timeline';
@@ -943,12 +944,21 @@ function EditorInner({ uid }: { uid: string }) {
 
 export function EditorShell({ projectId }: { projectId: string }) {
   const { currentUser, idToken } = useAuth();
+  // R41 WS-D — door usage: the editor was opened (once per mount).
+  const editorDoorCountedRef = useRef(false);
+  useEffect(() => {
+    if (idToken && !editorDoorCountedRef.current) {
+      editorDoorCountedRef.current = true;
+      recordDoorOpen('editor', idToken);
+    }
+  }, [idToken]);
   if (!currentUser) return null;
   return (
     <ProjectProvider
       projectId={projectId}
       ownerUid={currentUser.uid}
       onSaveFinalFailure={() => recordFailure('save', idToken)}
+      onSaveSuccess={() => recordSaveSuccess(idToken)}
     >
       <EditorInner uid={currentUser.uid} />
     </ProjectProvider>

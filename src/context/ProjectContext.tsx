@@ -86,12 +86,15 @@ export function ProjectProvider({
   ownerUid,
   children,
   onSaveFinalFailure,
+  onSaveSuccess,
 }: {
   projectId: string;
   ownerUid: string;
   children: React.ReactNode;
   /** R40 P-28: called once when a save gives up retrying (the final failed state). */
   onSaveFinalFailure?: () => void;
+  /** R41 WS-D: called on each successful save (the cloud copy now holds this work). */
+  onSaveSuccess?: () => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -119,6 +122,8 @@ export function ProjectProvider({
   const finalFailureNotifiedRef = useRef(false);
   const onSaveFinalFailureRef = useRef(onSaveFinalFailure);
   onSaveFinalFailureRef.current = onSaveFinalFailure;
+  const onSaveSuccessRef = useRef(onSaveSuccess);
+  onSaveSuccessRef.current = onSaveSuccess;
   const clearRetryTimer = useCallback(() => {
     if (retryTimerRef.current !== null) {
       clearTimeout(retryTimerRef.current);
@@ -291,6 +296,7 @@ export function ProjectProvider({
       setLastSavedAt(saved.updatedAt);
       setIsDirty(false);
       setSavePhase('saved');
+      onSaveSuccessRef.current?.();
       retryAttemptRef.current = 0;
       finalFailureNotifiedRef.current = false;
       // The cloud now holds this work: a device draft it covers is
