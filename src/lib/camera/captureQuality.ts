@@ -120,6 +120,289 @@ export function isLadderRetryableError(err: unknown): boolean {
   return name === 'OverconstrainedError' || name === 'NotFoundError';
 }
 
+/* ------------------------------------------------------------------ */
+/* R41 WS-B — two-stage negotiation (AUDIT F01)                        */
+/*                                                                     */
+/* Stage 1 is the existing ideal ask, byte-identical semantics. After  */
+/* the stream settles, the granted track settings are read back; when */
+/* the grant is BELOW the asked rung (short side or frame rate), ONE  */
+/* exact-constraint retry of that same rung is attempted. The stage-1  */
+/* stream is never stopped until a better-or-equal exact stream is in */
+/* hand: if the exact attempt throws, or grants less, the exact       */
+/* stream (if any) is discarded and the stage-1 stream is kept. At    */
+/* most one exact retry per rung, only at stream setup — never during */
+/* a recording (the R36 mid-take gating is untouched).                */
+/* ------------------------------------------------------------------ */
+
+/** The structural slice of a track's settings the negotiation reads. */
+export interface GrantedTrackSettings {
+  width?: number;
+  height?: number;
+  frameRate?: number;
+}
+
+/** The short side actually granted (0 when the settings carry no usable size). */
+export function grantedShortSide(settings: GrantedTrackSettings | null | undefined): number {
+  const width = settings?.width;
+  const height = settings?.height;
+  if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) return 0;
+  if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return 0;
+  return Math.min(width, height);
+}
+
+/**
+ * The frame rate actually granted, ROUNDED (0 when unknown). Rounding
+ * is deliberate: a 59.94 grant against a 60 ask is a 60 grant, not a
+ * shortfall worth an exact retry.
+ */
+export function grantedFps(settings: GrantedTrackSettings | null | undefined): number {
+  const fps = settings?.frameRate;
+  if (typeof fps !== 'number' || !Number.isFinite(fps) || fps <= 0) return 0;
+  return Math.round(fps);
+}
+
+export interface NegotiationDecision {
+  /** True when the grant fell below the asked rung and the one exact retry should run. */
+  needsExactRetry: boolean;
+  grantedShortSide: number;
+  grantedFps: number;
+  /** Which dimensions fell below the ask ('resolution' and/or 'frameRate'); empty when the grant met the ask or could not be read. */
+  belowOn: Array<'resolution' | 'frameRate'>;
+}
+
+/**
+ * Decide, from one rung's asked target and the settings the browser
+ * actually granted, whether the stage-2 exact retry runs. A grant
+ * that cannot be read (no usable size) never triggers a retry — there
+ * is nothing to compare, and disturbing a working stream on a guess
+ * is exactly what this fix must not do.
+ */
+export function negotiationDecision(
+  asked: { shortSide: number; frameRate: number },
+  granted: GrantedTrackSettings | null | undefined,
+): NegotiationDecision {
+  const short = grantedShortSide(granted);
+  const fps = grantedFps(granted);
+  const belowOn: NegotiationDecision['belowOn'] = [];
+  if (short > 0 && short < asked.shortSide) belowOn.push('resolution');
+  if (fps > 0 && fps < asked.frameRate) belowOn.push('frameRate');
+  return { needsExactRetry: belowOn.length > 0, grantedShortSide: short, grantedFps: fps, belowOn };
+}
+
+/** True when the grant is below the asked rung on resolution or frame rate (readable grants only). */
+export function isGrantBelowAsk(
+  asked: { shortSide: number; frameRate: number },
+  granted: GrantedTrackSettings | null | undefined,
+): boolean {
+  return negotiationDecision(asked, granted).needsExactRetry;
+}
+
+/**
+ * The stage-2 twin of one ladder rung: the SAME width/height/frame
+ * rate the rung asked for ideally, now asked EXACTLY. Facing mode,
+ * the project-aspect request and the audio flag are carried over
+ * unchanged — only the three negotiated dimensions change form.
+ */
+export function buildExactAttempt(attempt: CaptureAttempt): CaptureAttempt {
+  const video = (attempt.constraints.video ?? {}) as MediaTrackConstraints;
+  const idealOf = (c: ConstrainDouble | undefined): number | undefined =>
+    c && typeof c === 'object' && typeof (c as { ideal?: unknown }).ideal === 'number'
+      ? ((c as { ideal: number }).ideal as number)
+      : undefined;
+  const width = idealOf(video.width as ConstrainDouble | undefined);
+  const height = idealOf(video.height as ConstrainDouble | undefined);
+  const exactVideo: MediaTrackConstraints = { frameRate: { exact: attempt.frameRate } };
+  if (typeof video.facingMode === 'string' || (video.facingMode && typeof video.facingMode === 'object')) {
+    exactVideo.facingMode = video.facingMode;
+  }
+  if (width !== undefined) exactVideo.width = { exact: width };
+  if (height !== undefined) exactVideo.height = { exact: height };
+  if (video.aspectRatio) exactVideo.aspectRatio = video.aspectRatio;
+  return {
+    shortSide: attempt.shortSide,
+    frameRate: attempt.frameRate,
+    isFallback: attempt.isFallback,
+    constraints: { video: exactVideo, audio: attempt.constraints.audio },
+  };
+}
+
+/**
+ * Whether an exact retry's grant is WORSE than the stage-1 grant it
+ * would replace. Compared resolution-first, then frame rate: a retry
+ * that trades resolution away is worse even if its frame rate rose.
+ * An unreadable exact grant counts as worse — never swap a known
+ * stream for an unknown one.
+ */
+export function isExactGrantWorse(
+  stage1Granted: GrantedTrackSettings | null | undefined,
+  exactGranted: GrantedTrackSettings | null | undefined,
+): boolean {
+  const exactShort = grantedShortSide(exactGranted);
+  if (exactShort <= 0) return true;
+  const stage1Short = grantedShortSide(stage1Granted);
+  if (exactShort !== stage1Short) return exactShort < stage1Short;
+  return grantedFps(exactGranted) < grantedFps(stage1Granted);
+}
+
+export interface NegotiatedStream {
+  /** The stream to use: the exact-retry stream when it won, otherwise the untouched stage-1 stream. */
+  stream: MediaStream;
+  /** The final granted settings (of whichever stream won). */
+  grantedSettings: GrantedTrackSettings | null;
+  /** The granted settings of the stage-1 (ideal) stream, before any retry. */
+  stage1Settings: GrantedTrackSettings | null;
+  /** True when the one exact retry was attempted (whether it won or not). */
+  exactRetried: boolean;
+  /** True when the returned stream IS the exact-retry stream. */
+  usedExact: boolean;
+  /** The platform error name of a failed exact attempt, when it threw. */
+  exactErrorName?: string;
+}
+
+function stopStreamTracks(stream: MediaStream | null | undefined): void {
+  try {
+    stream?.getTracks().forEach((track) => track.stop());
+  } catch {
+    // Cleanup is best-effort — it must never mask the negotiation result.
+  }
+}
+
+function defaultReadSettings(stream: MediaStream): GrantedTrackSettings | null {
+  try {
+    const track = stream.getVideoTracks()[0];
+    if (!track?.getSettings) return null;
+    const s = track.getSettings() as GrantedTrackSettings;
+    return { width: s.width, height: s.height, frameRate: s.frameRate };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run the two-stage negotiation for ONE ladder rung, with the
+ * platform calls behind injectable seams (the component passes the
+ * real `getUserMedia`; tests pass fakes).
+ *
+ * - Stage 1: `getUserMedia(attempt.constraints)` — if THIS throws,
+ *   the error propagates untouched so the caller's ladder walk keeps
+ *   its existing retryable/fatal semantics.
+ * - Read-back: granted settings via `readSettings` (default: the
+ *   video track's `getSettings()`).
+ * - Grant meets the ask → the stage-1 stream is returned, no retry.
+ * - Grant below the ask → ONE exact retry. The stage-1 stream stays
+ *   alive while the exact stream is opened; only a better-or-equal
+ *   exact grant replaces it (the stage-1 tracks are then stopped).
+ *   A throw, or a worse grant, keeps the stage-1 stream exactly as
+ *   it was.
+ */
+export async function negotiateStreamAttempt(opts: {
+  attempt: CaptureAttempt;
+  getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
+  readSettings?: (stream: MediaStream) => GrantedTrackSettings | null;
+}): Promise<NegotiatedStream> {
+  const readSettings = opts.readSettings ?? defaultReadSettings;
+  const stream = await opts.getUserMedia(opts.attempt.constraints);
+  const stage1Settings = readSettings(stream);
+  const decision = negotiationDecision(
+    { shortSide: opts.attempt.shortSide, frameRate: opts.attempt.frameRate },
+    stage1Settings,
+  );
+  if (!decision.needsExactRetry) {
+    return { stream, grantedSettings: stage1Settings, stage1Settings, exactRetried: false, usedExact: false };
+  }
+  let exactStream: MediaStream;
+  try {
+    exactStream = await opts.getUserMedia(buildExactAttempt(opts.attempt).constraints);
+  } catch (err) {
+    const name = (err as { name?: string } | null)?.name;
+    return {
+      stream,
+      grantedSettings: stage1Settings,
+      stage1Settings,
+      exactRetried: true,
+      usedExact: false,
+      ...(name ? { exactErrorName: name } : {}),
+    };
+  }
+  const exactSettings = readSettings(exactStream);
+  if (isExactGrantWorse(stage1Settings, exactSettings)) {
+    stopStreamTracks(exactStream);
+    return { stream, grantedSettings: stage1Settings, stage1Settings, exactRetried: true, usedExact: false };
+  }
+  stopStreamTracks(stream);
+  return { stream: exactStream, grantedSettings: exactSettings, stage1Settings, exactRetried: true, usedExact: true };
+}
+
+/* ------------------------------------------------------------------ */
+/* R41 WS-A — census-shaped ladder                                     */
+/*                                                                     */
+/* When a per-facing capability census exists (deviceProfile), the    */
+/* ladder's FIRST rung is shaped by what the phone was measured to    */
+/* offer: the target stays 4K / the chosen frame rate, capped at the  */
+/* census maximums, so the app stops opening with an ask this         */
+/* browser has already proven it cannot grant. The remaining rungs    */
+/* are the existing ladder's lower rungs. Without a census — and for  */
+/* the user-pinned HD choice, which a census never overrides — the    */
+/* ladder is the existing generic one, unchanged. No rung ever asks   */
+/* above 2160 short side or above the chosen frame rate, and the      */
+/* chosen frame rate is itself never raised.                          */
+/* ------------------------------------------------------------------ */
+
+/** The structural slice of a facing census the ladder shaping needs. */
+export interface CensusRangeLike {
+  widthMax: number;
+  heightMax: number;
+  frameRateMax: number;
+}
+
+/** The largest short side a census says this facing can grant (0 when unreadable). */
+export function censusMaxShortSide(census: CensusRangeLike | null | undefined): number {
+  if (!census) return 0;
+  const w = census.widthMax;
+  const h = census.heightMax;
+  if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0) return 0;
+  if (typeof h !== 'number' || !Number.isFinite(h) || h <= 0) return 0;
+  return Math.min(w, h);
+}
+
+/**
+ * The capture ladder shaped by a facing census (see the section
+ * header). Returns the plain `buildCaptureAttempts` ladder unchanged
+ * when there is no usable census, when the census does not cap the
+ * opening rung, or when the user pinned HD.
+ */
+export function buildCensusAwareAttempts(
+  opts: {
+    canvasWidth: number;
+    canvasHeight: number;
+    facingMode: CaptureFacingMode;
+    quality: CaptureQualityChoice;
+    frameRate: CaptureFpsChoice;
+  },
+  census: CensusRangeLike | null | undefined,
+): CaptureAttempt[] {
+  const base = buildCaptureAttempts(opts);
+  if (!census || opts.quality === 'hd') return base;
+  const capShort = censusMaxShortSide(census);
+  const capFps =
+    typeof census.frameRateMax === 'number' && Number.isFinite(census.frameRateMax) && census.frameRateMax > 0
+      ? Math.floor(census.frameRateMax)
+      : 0;
+  if (capShort <= 0 && capFps <= 0) return base;
+  const first = base[0];
+  if (!first) return base;
+  const shapedShort = capShort > 0 ? Math.min(first.shortSide, capShort) : first.shortSide;
+  const shapedFps = capFps > 0 ? Math.min(first.frameRate, capFps) : first.frameRate;
+  if (shapedShort === first.shortSide && shapedFps === first.frameRate) return base;
+  const shaped = attemptFor(opts.canvasWidth, opts.canvasHeight, opts.facingMode, shapedShort, shapedFps, false);
+  const rest = base.filter(
+    (rung) =>
+      rung.shortSide < shapedShort || (rung.shortSide === shapedShort && rung.frameRate < shapedFps),
+  );
+  const rungs = [shaped, ...rest];
+  return rungs.map((rung, i) => ({ ...rung, isFallback: i === rungs.length - 1 }));
+}
+
 export type RecorderBitrateTier = 'uhd' | 'qhd' | 'hd';
 
 /**

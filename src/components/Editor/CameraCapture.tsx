@@ -4,8 +4,9 @@ import { useAuth } from '../../context/AuthContext';
 import { recordDoorOpen, recordTakeHealthFromReceipt } from '../../lib/healthEvents';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
-  buildCaptureAttempts,
+  buildCensusAwareAttempts,
   isLadderRetryableError,
+  negotiateStreamAttempt,
   pickRecorderMimeType,
   previewMirrorTransform,
   recorderOptionsForTrackSettings,
@@ -13,13 +14,27 @@ import {
   type CaptureFacingMode,
   type CaptureFpsChoice,
   type CaptureQualityChoice,
+  type GrantedTrackSettings,
   type ZoomCapability,
 } from '../../lib/camera/captureQuality';
 import {
   createFrameDropTracker,
+  createRawFrameSeriesRecorder,
   type FrameDropEstimate,
   type FrameDropTracker,
+  type RawFrameSeriesRecorder,
 } from '../../lib/camera/frameDrops';
+import {
+  DIAGNOSTICS_PHASES,
+  DIAGNOSTICS_TOTAL_SECONDS,
+  buildDiagnosticsEvidencePack,
+  createLongtaskCollector,
+  diagnosticsPhaseAt,
+  diagnosticsReportJson,
+  formatDiagnosticsSummary,
+  type DiagnosticsEvidencePack,
+  type LongtaskCollector,
+} from '../../lib/camera/diagnostics';
 import {
   buildCaptureReceipt,
   captureReceiptDropWarning,
@@ -47,13 +62,21 @@ import {
   type ZoomRamp,
 } from '../../lib/camera/motionCoach';
 import {
+  CENSUS_UNAVAILABLE_TEXT,
+  censusForFacing,
+  censusFromCapabilities,
+  countVideoInputs,
   deviceProfileForFacing,
+  formatCensusOfferLine,
   loadDeviceProfiles,
   provenSmoothnessSuggestion,
   saveDeviceProfile,
+  saveFacingCensus,
   shortSideClassFor,
+  withCensus,
   withTakeOutcome,
   type DeviceProfileStorage,
+  type FacingCensus,
   type SmoothnessSuggestion,
   type TakeDropOutcome,
 } from '../../lib/camera/deviceProfile';
@@ -397,7 +420,7 @@ function saveProvenProfile(
   settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
   mimeType: string,
   fallbackFps: number,
-  opts?: { quality?: CaptureQualityChoice | null; outcome?: TakeDropOutcome | null },
+  opts?: { quality?: CaptureQualityChoice | null; outcome?: TakeDropOutcome | null; census?: FacingCensus | null },
 ): void {
   const width = settings?.width ?? 0;
   const height = settings?.height ?? 0;
@@ -406,20 +429,26 @@ function saveProvenProfile(
   // caller measured one, so the profile can later offer its
   // one-step-down suggestion. Callers without a quality context
   // (dual) pass neither field and the core save is unchanged.
+  // R41 WS-A — the session census for this facing (when one was
+  // measured) rides along the same way, so the stored profile
+  // carries what this phone's browser offers per facing.
   saveDeviceProfile(
     browserLocalStorage(),
-    withTakeOutcome(
-      {
-        facing,
-        shortSideClass: shortSideClassFor(shortSide),
-        fps:
-          typeof settings?.frameRate === 'number' && settings.frameRate > 0
-            ? Math.round(settings.frameRate)
-            : fallbackFps,
-        mimeType: mimeType ?? '',
-      },
-      opts?.quality,
-      opts?.outcome,
+    withCensus(
+      withTakeOutcome(
+        {
+          facing,
+          shortSideClass: shortSideClassFor(shortSide),
+          fps:
+            typeof settings?.frameRate === 'number' && settings.frameRate > 0
+              ? Math.round(settings.frameRate)
+              : fallbackFps,
+          mimeType: mimeType ?? '',
+        },
+        opts?.quality,
+        opts?.outcome,
+      ),
+      opts?.census,
     ),
   );
 }
@@ -438,7 +467,7 @@ function provenMimeFor(facing: CaptureFacingMode): string | undefined {
  * The strings themselves come from the lib formatter.
  */
 function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: string }) {
-  const { summary, details, technicalDetails } = formatCaptureReceipt(receipt);
+  const { summary, details, technicalDetails, askedVsGranted, grantBelowAsked } = formatCaptureReceipt(receipt);
   const [showDetails, setShowDetails] = useState(false);
   // R32 Phase 3 — dropped-frame review warning: advisory only, and
   // only when the tracker actually measured drops past the threshold.
@@ -449,6 +478,12 @@ function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: str
         <p className="text-[10px] font-bold uppercase tracking-wide text-white/40">{label}</p>
       )}
       <p className="text-xs text-white/80">{summary}</p>
+      {/* R41 WS-B — asked vs granted sits in the SUMMARY area, not
+          only in Details: when the final grant fell below the
+          selected quality it is stated plainly here, in amber. */}
+      {askedVsGranted && (
+        <p className={`text-[11px] ${grantBelowAsked ? 'text-amber-300' : 'text-white/60'}`}>{askedVsGranted}</p>
+      )}
       {details && <p className="text-[11px] text-white/50">{details}</p>}
       {dropWarning && <p className="text-[11px] text-amber-300">{dropWarning}</p>}
       {technicalDetails && (
@@ -635,6 +670,60 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const testModeRef = useRef(false);
   const [isTestingCamera, setIsTestingCamera] = useState(false);
   const [testReceipt, setTestReceipt] = useState<CaptureReceipt | null>(null);
+
+  // R41 WS-B — the two-stage negotiation outcome of the CURRENT
+  // stream: what the winning rung asked, what the stage-1 stream
+  // granted, and whether the one exact retry ran / won. Read by the
+  // record paths at record start (snapshotted per take) so each
+  // receipt can state asked vs granted. Dual streams never pass
+  // through here — their pairing ladder negotiates separately.
+  const lastNegotiationRef = useRef<{
+    asked: { shortSide: number; frameRate: number; width: number; height: number };
+    granted: GrantedTrackSettings | null;
+    exactRetried: boolean;
+    usedExact: boolean;
+  } | null>(null);
+
+  // R41 WS-A — per-facing capability census. Session cache first
+  // (captured once per facing per session, at camera open), backed
+  // by the stored profiles' census fields. `censusByFacing` is the
+  // settings sheet's view of it; the ref is the capture path's.
+  const censusSessionRef = useRef<Partial<Record<CaptureFacingMode, FacingCensus>>>({});
+  const [censusByFacing, setCensusByFacing] = useState<Partial<Record<CaptureFacingMode, FacingCensus>>>(() => {
+    const stored = loadDeviceProfiles(browserLocalStorage());
+    const initial: Partial<Record<CaptureFacingMode, FacingCensus>> = {};
+    for (const facing of ['user', 'environment'] as CaptureFacingMode[]) {
+      const census = censusForFacing(stored, facing);
+      if (census) {
+        initial[facing] = census;
+        censusSessionRef.current[facing] = census;
+      }
+    }
+    return initial;
+  });
+
+  // R41 WS-A — diagnostics session ("Check camera smoothness"):
+  // intro → one guided 60s take through the NORMAL record path →
+  // evidence pack. The refs carry the collectors + per-take facts
+  // the recorder callbacks need; the state drives the panels.
+  const diagModeRef = useRef(false);
+  const diagRawRecorderRef = useRef<RawFrameSeriesRecorder | null>(null);
+  const diagLongtaskRef = useRef<LongtaskCollector | null>(null);
+  const diagAskedRef = useRef<{ shortSide: number; frameRate: number; width: number; height: number } | null>(null);
+  const diagRecorderInfoRef = useRef<{ mimeType: string; videoBitsPerSecond: number; audioBitsPerSecond: number } | null>(null);
+  const [diagIntroOpen, setDiagIntroOpen] = useState(false);
+  const [isDiagRecording, setIsDiagRecording] = useState(false);
+  const [diagResult, setDiagResult] = useState<{
+    pack: DiagnosticsEvidencePack;
+    blob: Blob;
+    url: string;
+    receipt: CaptureReceipt;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!diagResult) return;
+    return () => URL.revokeObjectURL(diagResult.url);
+  }, [diagResult]);
 
   // R32 Phase 2 — premium viewfinder state. Everything here stays
   // null/false/empty until a stream's warm-up reads real capabilities,
@@ -882,18 +971,52 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     // the next rung; the final rung is the pre-R24 permissive ideal-1080
     // request, so capture never hard-fails on resolution grounds. Any
     // other error (permission denied, no device busy, …) aborts at once.
-    const attempts = buildCaptureAttempts({
-      canvasWidth,
-      canvasHeight,
-      facingMode,
-      quality: lock?.quality ?? qualityChoice,
-      frameRate: lock?.fps ?? fpsChoice,
-    });
+    // R41 WS-A: when a census exists for this facing it shapes the
+    // ladder's first rung (measured maximums; the generic ladder is
+    // the fallback when there is none).
+    const knownCensus =
+      censusSessionRef.current[facingMode] ?? censusForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode);
+    const attempts = buildCensusAwareAttempts(
+      {
+        canvasWidth,
+        canvasHeight,
+        facingMode,
+        quality: lock?.quality ?? qualityChoice,
+        frameRate: lock?.fps ?? fpsChoice,
+      },
+      knownCensus,
+    );
     let stream: MediaStream | null = null;
     let lastError: unknown = null;
     for (const attempt of attempts) {
       try {
-        stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
+        // R41 WS-B — two-stage negotiation per rung (AUDIT F01):
+        // stage 1 is this rung's ideal ask (unchanged); after it
+        // settles, a grant below the rung earns ONE exact retry of
+        // that rung, and a working stage-1 stream is never lost to
+        // a failed or worse exact attempt. Setup only — nothing here
+        // runs during a recording.
+        const negotiated = await negotiateStreamAttempt({
+          attempt,
+          getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+        });
+        stream = negotiated.stream;
+        const askedVideo = attempt.constraints.video as MediaTrackConstraints | undefined;
+        const idealDim = (c: unknown): number =>
+          c && typeof c === 'object' && typeof (c as { ideal?: unknown }).ideal === 'number'
+            ? ((c as { ideal: number }).ideal as number)
+            : 0;
+        lastNegotiationRef.current = {
+          asked: {
+            shortSide: attempt.shortSide,
+            frameRate: attempt.frameRate,
+            width: idealDim(askedVideo?.width),
+            height: idealDim(askedVideo?.height),
+          },
+          granted: negotiated.grantedSettings,
+          exactRetried: negotiated.exactRetried,
+          usedExact: negotiated.usedExact,
+        };
         break;
       } catch (err) {
         lastError = err;
@@ -928,6 +1051,44 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       }
     } catch {
       setZoomCapability(null);
+    }
+    // R41 WS-A — per-facing capability census at camera open: read
+    // the live track's capability RANGES once per facing per session
+    // (unless a previous attempt found none — then a later open may
+    // retry). Cheap: ranges only, no extra stream. The device count
+    // comes from the enumeration (labels/count only — no deviceId
+    // is ever stored). Persisted onto the facing's proven profile
+    // when one exists; otherwise the next proven-profile save for
+    // this facing carries it (see saveProvenProfile).
+    if (!censusSessionRef.current[facingMode]) {
+      try {
+        const track = stream.getVideoTracks()[0];
+        const census = track?.getCapabilities ? censusFromCapabilities(track.getCapabilities(), 0) : null;
+        if (census) {
+          const facingAtCapture = facingMode;
+          censusSessionRef.current[facingAtCapture] = census;
+          setCensusByFacing((prev) => ({ ...prev, [facingAtCapture]: census }));
+          saveFacingCensus(browserLocalStorage(), facingAtCapture, census);
+          void (async () => {
+            try {
+              const devices = await navigator.mediaDevices?.enumerateDevices();
+              const count = countVideoInputs(devices);
+              const current = censusSessionRef.current[facingAtCapture];
+              if (devices && current && count > 0 && count !== current.deviceCount) {
+                const withCount = { ...current, deviceCount: count };
+                censusSessionRef.current[facingAtCapture] = withCount;
+                setCensusByFacing((prev) => ({ ...prev, [facingAtCapture]: withCount }));
+                saveFacingCensus(browserLocalStorage(), facingAtCapture, withCount);
+              }
+            } catch {
+              // Count is a nice-to-have census field only.
+            }
+          })();
+        }
+      } catch {
+        // Census is a measurement layer; its failure leaves the
+        // generic ladder in charge, exactly as before R41.
+      }
     }
     // R32 Phase 2 — warm-up: let auto focus / exposure / white
     // balance settle (~800ms) before reading the capabilities and
@@ -1396,7 +1557,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     [],
   );
 
-  /** R32 Phase 1 — build the honest receipt for one finished recording. */
+  /** R32 Phase 1 — build the honest receipt for one finished recording.
+   *  R41 WS-B — `negotiation`, when the caller passes it, is the
+   *  per-take snapshot of the stream's two-stage negotiation (asked
+   *  rung + exact-retry outcome), so the receipt can state asked vs
+   *  granted. Callers without one (dual) pass nothing. */
   const receiptForRecording = useCallback(
     (
       settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
@@ -1404,6 +1569,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       blob: Blob,
       startedAtMs: number,
       frameDropEstimate: FrameDropEstimate | null,
+      negotiation?: {
+        asked: { shortSide: number; frameRate: number };
+        exactRetried: boolean;
+        usedExact: boolean;
+      } | null,
     ): CaptureReceipt =>
       buildCaptureReceipt({
         trackSettings: settings ?? null,
@@ -1412,9 +1582,19 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         durationSeconds: Math.max(0, (performance.now() - startedAtMs) / 1000),
         droppedFramesEstimate: frameDropEstimate?.droppedFramesEstimate ?? null,
         expectedFramesEstimate: frameDropEstimate?.expectedFrames ?? null,
+        asked: negotiation ? negotiation.asked : null,
+        exactRetryAttempted: negotiation?.exactRetried,
+        exactRetryUsed: negotiation?.usedExact,
       }),
     [],
   );
+
+  /** The current stream's negotiation, snapshotted for one take (null for streams that never negotiated). */
+  const negotiationSnapshotForTake = useCallback(() => {
+    const n = lastNegotiationRef.current;
+    if (!n) return null;
+    return { asked: { shortSide: n.asked.shortSide, frameRate: n.asked.frameRate }, exactRetried: n.exactRetried, usedExact: n.usedExact };
+  }, []);
 
   /**
    * R29 — record BOTH cameras at once. The mic is on the rear stream
@@ -1469,6 +1649,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         outcome: rearEstimate
           ? { droppedFrames: rearEstimate.droppedFramesEstimate, expectedFrames: rearEstimate.expectedFrames }
           : null,
+        census: censusSessionRef.current['environment'] ?? null,
       });
       stopStream();
       setPendingDual({
@@ -1487,9 +1668,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     rearRecorder.onstop = handleDualStop;
     frontRecorder.onstop = handleDualStop;
     const anchorMs = performance.now();
-    rearRecorder.start();
+    // R41 F02 — 250ms timeslice: chunks stream in as the take records
+    // instead of one whole-take in-memory Blob at stop (assembly is
+    // unchanged — ondataavailable already appends in order).
+    rearRecorder.start(250);
     const rearStartMs = performance.now();
-    frontRecorder.start();
+    frontRecorder.start(250);
     const frontStartMs = performance.now();
     rearTracker = beginFrameDropTracking(videoRef.current, streamRef.current);
     dualStartRef.current = { anchorMs, rearStartMs, frontStartMs };
@@ -1513,12 +1697,50 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     }
     chunksRef.current = [];
     const settingsSnapshot = stream.getVideoTracks()[0]?.getSettings?.() ?? null;
+    // R41 WS-B — this take's asked-vs-granted snapshot, taken from
+    // the stream's negotiation before the recorder exists.
+    const negotiationSnapshot = negotiationSnapshotForTake();
     const recorder = createRecorder(stream, provenMimeFor(facingModeRef.current));
     if (!recorder) {
       // A failed start must not leave a camera test armed.
       testModeRef.current = false;
       setIsTestingCamera(false);
+      diagModeRef.current = false;
+      setIsDiagRecording(false);
       return;
+    }
+    // R41 WS-A — a diagnostics take additionally starts the RAW
+    // viewfinder frame-series recorder + the longtask collector.
+    // Both live only for this take; onstop stops them into the pack.
+    if (diagModeRef.current) {
+      diagAskedRef.current = lastNegotiationRef.current?.asked ?? null;
+      diagRecorderInfoRef.current = {
+        mimeType: recorder.mimeType,
+        videoBitsPerSecond:
+          typeof recorder.videoBitsPerSecond === 'number'
+            ? recorder.videoBitsPerSecond
+            : recorderOptionsForTrackSettings(settingsSnapshot, recorder.mimeType).videoBitsPerSecond ?? 0,
+        audioBitsPerSecond:
+          typeof recorder.audioBitsPerSecond === 'number'
+            ? recorder.audioBitsPerSecond
+            : recorderOptionsForTrackSettings(settingsSnapshot, recorder.mimeType).audioBitsPerSecond ?? 0,
+      };
+      const rawRecorder = createRawFrameSeriesRecorder();
+      if (videoRef.current) rawRecorder.start(videoRef.current);
+      diagRawRecorderRef.current = rawRecorder;
+      const longtasks = createLongtaskCollector({
+        createObserver:
+          typeof PerformanceObserver !== 'undefined'
+            ? (callback) =>
+                new PerformanceObserver((list) => callback({ getEntries: () => list.getEntries() as unknown[] }))
+            : null,
+        supportedEntryTypes:
+          typeof PerformanceObserver !== 'undefined' && Array.isArray(PerformanceObserver.supportedEntryTypes)
+            ? PerformanceObserver.supportedEntryTypes
+            : null,
+      });
+      longtasks.start();
+      diagLongtaskRef.current = longtasks;
     }
     let tracker: FrameDropTracker | null = null;
     let startedAtMs = 0;
@@ -1532,13 +1754,67 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       // settings work on this phone).
       const estimate = tracker?.stop() ?? null;
       tracker = null;
-      const receipt = receiptForRecording(settingsSnapshot, recorder.mimeType, blob, startedAtMs, estimate);
+      const receipt = receiptForRecording(settingsSnapshot, recorder.mimeType, blob, startedAtMs, estimate, negotiationSnapshot);
       saveProvenProfile(facingModeRef.current, settingsSnapshot, recorder.mimeType, fpsChoiceRef.current, {
         quality: qualityChoiceRef.current,
         outcome: estimate
           ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
           : null,
+        census: censusSessionRef.current[facingModeRef.current] ?? null,
       });
+      // R41 WS-A — a diagnostics take ends here: stop the collectors,
+      // build the evidence pack, and hold blob + pack for the result
+      // panel (download report / save clip / use / discard). The take
+      // is NOT routed to the normal review — its panel carries those
+      // same choices for this clip.
+      if (diagModeRef.current) {
+        diagModeRef.current = false;
+        setIsDiagRecording(false);
+        const frameSeries = diagRawRecorderRef.current?.stop() ?? { timestampsMs: [], presentedFrames: [] };
+        diagRawRecorderRef.current = null;
+        const longtaskSummary = diagLongtaskRef.current?.stop() ?? {
+          available: false,
+          count: 0,
+          over200Count: 0,
+          longestMs: 0,
+          entries: [],
+        };
+        diagLongtaskRef.current = null;
+        const recorderInfo = diagRecorderInfoRef.current ?? {
+          mimeType: recorder.mimeType,
+          videoBitsPerSecond: 0,
+          audioBitsPerSecond: 0,
+        };
+        diagRecorderInfoRef.current = null;
+        const pack = buildDiagnosticsEvidencePack({
+          createdAt: new Date().toISOString(),
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+          facing: facingModeRef.current,
+          qualityChoice: qualityChoiceRef.current,
+          fpsChoice: fpsChoiceRef.current,
+          durationSeconds: Math.max(0, (performance.now() - startedAtMs) / 1000),
+          asked: diagAskedRef.current,
+          granted: settingsSnapshot
+            ? {
+                width: settingsSnapshot.width ?? 0,
+                height: settingsSnapshot.height ?? 0,
+                frameRate: settingsSnapshot.frameRate ?? 0,
+              }
+            : null,
+          exactRetryAttempted: negotiationSnapshot?.exactRetried ?? false,
+          exactRetryUsed: negotiationSnapshot?.usedExact ?? false,
+          mimeType: recorderInfo.mimeType,
+          recorderVideoBitsPerSecond: recorderInfo.videoBitsPerSecond,
+          recorderAudioBitsPerSecond: recorderInfo.audioBitsPerSecond,
+          census: censusSessionRef.current[facingModeRef.current] ?? null,
+          frameSeries,
+          longtasks: longtaskSummary,
+        });
+        diagAskedRef.current = null;
+        stopStream();
+        setDiagResult({ pack, blob, url: URL.createObjectURL(blob), receipt });
+        return;
+      }
       // R32 Phase 1 — "Test my camera": the test take is measured and
       // profiled above, then DISCARDED — it never reaches a review
       // state, the timeline or the project. The live camera restarts
@@ -1569,13 +1845,14 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       stopStream();
       setPendingVideo({ blob, url: URL.createObjectURL(blob), receipt });
     };
-    recorder.start();
+    // R41 F02 — 250ms timeslice, as on the dual paths (see there).
+    recorder.start(250);
     startedAtMs = performance.now();
     tracker = beginFrameDropTracking(videoRef.current, stream);
     recorderRef.current = recorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream]);
+  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream, negotiationSnapshotForTake]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
@@ -1636,6 +1913,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     // R32 Phase 1 — step 2 records on the FRONT camera with step 1's
     // locked profile; its proven mime (when saved) is the front one.
     const settingsSnapshot = stream.getVideoTracks()[0]?.getSettings?.() ?? null;
+    // R41 WS-B — step 2's stream went through startStream too, so it
+    // carries its own negotiation snapshot for its receipt.
+    const negotiationSnapshot = negotiationSnapshotForTake();
     const recorder = createRecorder(stream, provenMimeFor('user'));
     if (!recorder) return;
     step2ChunksRef.current = [];
@@ -1658,7 +1938,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       // read as unknown rather than invented).
       const estimate = tracker?.stop() ?? null;
       tracker = null;
-      const frontReceipt = receiptForRecording(settingsSnapshot, recorder.mimeType, frontBlob, recorderStartMs, estimate);
+      const frontReceipt = receiptForRecording(settingsSnapshot, recorder.mimeType, frontBlob, recorderStartMs, estimate, negotiationSnapshot);
       const mainReceipt =
         step1ReceiptRef.current ??
         buildCaptureReceipt({ trackSettings: null, mimeType: mainBlob.type, blobSize: mainBlob.size, durationSeconds: 0 });
@@ -1667,6 +1947,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         outcome: estimate
           ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
           : null,
+        census: censusSessionRef.current['user'] ?? null,
       });
       // Transfer the retained step-1 URL into pendingDual: clearing
       // the ref hands ownership to the pendingDual effect, which
@@ -1676,7 +1957,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       stopStream();
       setPendingDual({ mainBlob, mainUrl, frontBlob, frontUrl: URL.createObjectURL(frontBlob), startDeltaMs, mainReceipt, frontReceipt });
     };
-    recorder.start();
+    // R41 F02 — 250ms timeslice, as on the other record paths.
+    recorder.start(250);
     tracker = beginFrameDropTracking(frontVideoRef.current, stream);
     const recorderStartMs = performance.now();
     recorderRef.current = recorder;
@@ -1698,7 +1980,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     }
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob, beginFrameDropTracking, receiptForRecording]);
+  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob, beginFrameDropTracking, receiptForRecording, negotiationSnapshotForTake]);
 
   /** Review-state confirm: hand the SAME CaptureResult to the normal path or the overlay path, per the user's pick. */
   const confirmPendingVideo = useCallback(
@@ -1812,6 +2094,73 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       stopRecording();
     }
   }, [isTestingCamera, isRecording, recordSeconds, stopRecording]);
+
+  /**
+   * R41 WS-A — start the diagnostics session: one guided
+   * 60-second take through the NORMAL single record path (so the
+   * evidence reflects shipped behaviour, two-stage negotiation
+   * included), flagged so its stop builds the evidence pack
+   * instead of the normal review. Uses the current camera, facing
+   * and quality selection, exactly as the intro screen states.
+   */
+  const startDiagnosticsSession = useCallback(() => {
+    if (!isReady || isRecording || countdownActive || dualMode || twoPassPhase !== 'off' || pendingVideo || pendingDual) return;
+    setDiagIntroOpen(false);
+    setDiagResult(null);
+    setTestReceipt(null);
+    diagModeRef.current = true;
+    setIsDiagRecording(true);
+    startRecording();
+  }, [isReady, isRecording, countdownActive, dualMode, twoPassPhase, pendingVideo, pendingDual, startRecording]);
+
+  // The diagnostics take auto-stops at the script's 60 seconds.
+  useEffect(() => {
+    if (isDiagRecording && isRecording && recordSeconds >= DIAGNOSTICS_TOTAL_SECONDS) {
+      stopRecording();
+    }
+  }, [isDiagRecording, isRecording, recordSeconds, stopRecording]);
+
+  /** Download a blob as a file (the report JSON / the test clip). Nothing is uploaded, ever. */
+  const downloadBlobFile = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } finally {
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }, []);
+
+  const downloadDiagnosticsReport = useCallback(() => {
+    if (!diagResult) return;
+    const json = diagnosticsReportJson(diagResult.pack);
+    downloadBlobFile(new Blob([json], { type: 'application/json' }), 'camera-smoothness-report.json');
+  }, [diagResult, downloadBlobFile]);
+
+  const downloadDiagnosticsClip = useCallback(() => {
+    if (!diagResult) return;
+    const extension = diagResult.blob.type.includes('mp4') ? 'mp4' : 'webm';
+    downloadBlobFile(diagResult.blob, `camera-smoothness-clip.${extension}`);
+  }, [diagResult, downloadBlobFile]);
+
+  /** Diagnostics result "Use this clip": the normal confirm path, health line included. */
+  const useDiagnosticsClip = useCallback(() => {
+    if (!diagResult) return;
+    const result: CaptureResult = { kind: 'video', blob: diagResult.blob, receipt: diagResult.receipt };
+    recordTakeHealthFromReceipt(diagResult.receipt, idToken);
+    setDiagResult(null);
+    onCapture(result);
+  }, [diagResult, onCapture, idToken]);
+
+  /** Diagnostics result "Discard": drop the clip + pack and return to the live camera. */
+  const discardDiagnostics = useCallback(() => {
+    setDiagResult(null);
+    void startStream();
+  }, [startStream]);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -2794,6 +3143,39 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   Test my camera
                 </button>
               )}
+              {/* R41 WS-A — "What this phone offers": the per-facing
+                  capability census in plain words, measured from
+                  this phone's own cameras at open. When the browser
+                  shares no ranges, the honest fallback line shows
+                  instead of a guess. */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">What this phone offers</span>
+                {(() => {
+                  const rearLine = formatCensusOfferLine('environment', censusByFacing['environment']);
+                  const frontLine = formatCensusOfferLine('user', censusByFacing['user']);
+                  return (
+                    <div className="flex flex-col gap-1 rounded-lg bg-white/5 px-3 py-2.5">
+                      {rearLine && <p className="text-[11px] text-white/80">{rearLine}</p>}
+                      {frontLine && <p className="text-[11px] text-white/80">{frontLine}</p>}
+                      {(!rearLine || !frontLine) && <p className="text-[11px] text-white/60">{CENSUS_UNAVAILABLE_TEXT}</p>}
+                    </div>
+                  );
+                })()}
+              </div>
+              {/* R41 WS-A — diagnostics entry: opens the guided
+                  60-second smoothness check's intro screen. */}
+              {!dualMode && twoPassPhase === 'off' && !isRecording && (
+                <button
+                  onClick={() => {
+                    setCameraSettingsOpen(false);
+                    setDiagIntroOpen(true);
+                  }}
+                  disabled={!isReady}
+                  className="min-h-11 px-3 w-full inline-flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide disabled:opacity-40 transition"
+                >
+                  Check camera smoothness
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -2830,6 +3212,111 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             >
               Done
             </button>
+          </div>
+        )}
+        {/* R41 WS-A — diagnostics intro: what the check does, in
+            plain words, before anything records. */}
+        {diagIntroOpen && !isRecording && !diagResult && (
+          <div className="flex flex-col items-center gap-2 max-w-md w-full rounded-lg bg-white/5 border border-white/15 px-3 py-3">
+            <p className="text-xs font-bold uppercase tracking-wide text-gold">Check camera smoothness</p>
+            <p className="text-[11px] text-white/80 text-center">
+              This records one 60-second clip with the camera and quality you have picked now, and measures how
+              smoothly it records. Nothing is uploaded.
+            </p>
+            <div className="flex flex-col gap-1 w-full">
+              {DIAGNOSTICS_PHASES.map((phase, i) => (
+                <p key={phase.id} className="text-[11px] text-white/70 text-center">
+                  Step {i + 1} — {phase.label} ({phase.seconds} seconds): {phase.prompt}
+                </p>
+              ))}
+            </div>
+            <p className="text-[11px] text-white/60 text-center">
+              Follow the prompts on screen while it records. At the end you can download a report and save the clip.
+            </p>
+            <div className="flex items-center gap-2.5 flex-wrap justify-center">
+              <button
+                onClick={startDiagnosticsSession}
+                disabled={!isReady}
+                className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide disabled:opacity-40 transition"
+              >
+                Start the check
+              </button>
+              <button
+                onClick={() => setDiagIntroOpen(false)}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+        )}
+        {/* R41 WS-A — the visible phase indicator during the
+            diagnostics take: which step, what to do, time left. */}
+        {isDiagRecording && isRecording && (
+          <div className="max-w-md w-full rounded-lg bg-gold/15 border border-gold/40 px-3 py-2.5 text-center" aria-live="polite">
+            {(() => {
+              const { phase, index, secondsLeftInPhase } = diagnosticsPhaseAt(recordSeconds);
+              return (
+                <>
+                  <p className="text-xs font-bold uppercase tracking-wide text-gold">
+                    Step {index + 1} of {DIAGNOSTICS_PHASES.length} — {phase.label} · {secondsLeftInPhase}s left
+                  </p>
+                  <p className="text-[11px] text-white/85">{phase.prompt}</p>
+                </>
+              );
+            })()}
+          </div>
+        )}
+        {/* R41 WS-A — diagnostics result: the plain-words evidence
+            summary plus the pack's three artefacts (report download,
+            clip save) alongside the normal use / discard choices. */}
+        {diagResult && !isRecording && (
+          <div className="flex flex-col items-center gap-2 max-w-md w-full rounded-lg bg-white/5 border border-white/15 px-3 py-3">
+            <p className="text-xs font-bold uppercase tracking-wide text-gold">Camera check — your results</p>
+            <video
+              src={diagResult.url}
+              controls
+              playsInline
+              className="w-full max-h-52 rounded-lg bg-black object-contain"
+              aria-label="Your camera check clip"
+            />
+            <div className="flex flex-col gap-0.5 w-full">
+              {formatDiagnosticsSummary(diagResult.pack).map((line) => (
+                <p key={line} className="text-[11px] text-white/80 text-center">
+                  {line}
+                </p>
+              ))}
+            </div>
+            <ReceiptLines receipt={diagResult.receipt} />
+            <div className="flex items-center gap-2.5 flex-wrap justify-center">
+              <button
+                onClick={downloadDiagnosticsReport}
+                className="min-h-11 px-3 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide transition"
+              >
+                Download report
+              </button>
+              <button
+                onClick={downloadDiagnosticsClip}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Save the test clip
+              </button>
+              <button
+                onClick={useDiagnosticsClip}
+                className="min-h-11 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold uppercase tracking-wide transition"
+              >
+                Use this clip
+              </button>
+              <button
+                onClick={discardDiagnostics}
+                className="min-h-11 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-xs font-bold uppercase tracking-wide transition"
+              >
+                Discard
+              </button>
+            </div>
+            <p className="text-[11px] text-white/50 text-center">
+              Send the report file and the clip back in chat — together they show exactly what this phone did.
+            </p>
           </div>
         )}
         {/* R24 WS-P4a: real camera zoom — rendered ONLY when the live

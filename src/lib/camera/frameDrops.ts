@@ -164,6 +164,92 @@ export interface FrameDropTracker {
   stop: () => FrameDropEstimate | null;
 }
 
+/* ------------------------------------------------------------------ */
+/* R41 WS-A — raw frame-series recorder (diagnostics)                  */
+/*                                                                     */
+/* The estimate tracker above keeps only its first/last samples. The  */
+/* diagnostics session needs the RAW series: every presented frame's  */
+/* expected-display timestamp + presented counter, so the evidence    */
+/* pack can be re-analysed later (and measured against the file).     */
+/* IMPORTANT (AUDIT F07): these are VIEWFINDER frames — rVFC reports  */
+/* frames presented by the preview element, a different pipeline      */
+/* from the MediaRecorder encoder. Nothing here measures the file.    */
+/* ------------------------------------------------------------------ */
+
+/** The raw rVFC series of one recording: parallel arrays, chronological. */
+export interface RawFrameSeries {
+  /** `expectedDisplayTime` of each presented frame, in milliseconds. */
+  timestampsMs: number[];
+  /** The cumulative `presentedFrames` counter at each sample. */
+  presentedFrames: number[];
+}
+
+export interface RawFrameSeriesRecorder {
+  /** True when rVFC exists on the element and sampling is live. */
+  readonly available: boolean;
+  /** Begin sampling. Safe to call once. */
+  start: (video: VideoFrameCallbackHost) => void;
+  /** Stop sampling and return a COPY of the raw series (empty when unavailable). */
+  stop: () => RawFrameSeries;
+  /** A copy of the series captured so far (live or after stop). */
+  series: () => RawFrameSeries;
+}
+
+/**
+ * Create a raw frame-series recorder. When the element has no rVFC,
+ * `available` stays false and `stop()` returns an EMPTY series —
+ * the absence is recorded honestly, never back-filled.
+ */
+export function createRawFrameSeriesRecorder(): RawFrameSeriesRecorder {
+  let host: VideoFrameCallbackHost | null = null;
+  let handle: number | null = null;
+  let live = false;
+  const timestampsMs: number[] = [];
+  const presentedFrames: number[] = [];
+
+  const onFrame = (_now: number, metadata: unknown) => {
+    const sample = sampleFromVideoFrameMetadata(metadata);
+    if (sample) {
+      timestampsMs.push(sample.expectedDisplayTime);
+      presentedFrames.push(sample.presentedFrames);
+    }
+    if (live && host && typeof host.requestVideoFrameCallback === 'function') {
+      handle = host.requestVideoFrameCallback(onFrame);
+    }
+  };
+
+  const snapshot = (): RawFrameSeries => ({ timestampsMs: [...timestampsMs], presentedFrames: [...presentedFrames] });
+
+  return {
+    get available() {
+      return live;
+    },
+    start(video: VideoFrameCallbackHost) {
+      if (live) return;
+      if (!video || typeof video.requestVideoFrameCallback !== 'function') return;
+      host = video;
+      live = true;
+      handle = video.requestVideoFrameCallback(onFrame);
+    },
+    stop() {
+      if (live && host) {
+        live = false;
+        if (handle !== null && typeof host.cancelVideoFrameCallback === 'function') {
+          try {
+            host.cancelVideoFrameCallback(handle);
+          } catch {
+            // Best-effort detach only.
+          }
+        }
+        handle = null;
+        host = null;
+      }
+      return snapshot();
+    },
+    series: snapshot,
+  };
+}
+
 /**
  * Create a frame-drop tracker for one recording at a known nominal
  * frame rate. The tracker retains only the first and last samples

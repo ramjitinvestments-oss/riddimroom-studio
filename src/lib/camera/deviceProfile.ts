@@ -48,6 +48,30 @@ export interface DeviceProfile {
   lastDroppedFrames?: number;
   /** R36 WS-4 — the last take's expected-frame count for the same window, when measured. */
   lastExpectedFrames?: number;
+  /**
+   * R41 WS-A — the per-facing capability census captured from this
+   * facing's live track (`getCapabilities()` ranges), when one was
+   * measured. Ranges only — never a deviceId.
+   */
+  census?: FacingCensus;
+}
+
+/**
+ * R41 WS-A — one facing's capability census: the RANGES the browser
+ * exposes for the live track (width / height / frame rate min–max),
+ * plus how many video inputs the browser listed at capture time.
+ * Counts and ranges only — deviceIds are never stored, matching
+ * this store's privacy posture.
+ */
+export interface FacingCensus {
+  widthMin: number;
+  widthMax: number;
+  heightMin: number;
+  heightMax: number;
+  frameRateMin: number;
+  frameRateMax: number;
+  /** How many video-input devices the browser listed (a count, never ids). */
+  deviceCount: number;
 }
 
 /** Map of profile key → profile, as persisted. */
@@ -88,14 +112,53 @@ function isValidProfile(value: unknown): value is DeviceProfile {
 
 const QUALITY_CHOICES: readonly string[] = ['auto', '4k', 'hd'];
 
+function usableRangeNumber(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
 /**
- * Copy the OPTIONAL R36 smoothness fields of a parsed profile,
- * keeping only well-typed values — a malformed optional field is
- * dropped on its own and never costs the (valid) core profile, so
- * stores written by older builds parse exactly as before.
+ * Validate + sanitise a stored census. Returns null when the shape
+ * is unusable (no readable maximum at all) — a malformed census is
+ * dropped on its own and never costs the core profile it rode on.
+ */
+export function sanitiseFacingCensus(value: unknown): FacingCensus | null {
+  if (!value || typeof value !== 'object') return null;
+  const c = value as Partial<FacingCensus>;
+  const widthMax = usableRangeNumber(c.widthMax);
+  const heightMax = usableRangeNumber(c.heightMax);
+  const frameRateMax = usableRangeNumber(c.frameRateMax);
+  if ((widthMax === null || widthMax <= 0) && (heightMax === null || heightMax <= 0) && (frameRateMax === null || frameRateMax <= 0)) {
+    return null;
+  }
+  const num = (v: unknown) => {
+    const n = usableRangeNumber(v);
+    return n === null ? 0 : Math.round(n * 100) / 100;
+  };
+  return {
+    widthMin: num(c.widthMin),
+    widthMax: num(c.widthMax),
+    heightMin: num(c.heightMin),
+    heightMax: num(c.heightMax),
+    frameRateMin: num(c.frameRateMin),
+    frameRateMax: num(c.frameRateMax),
+    deviceCount:
+      typeof c.deviceCount === 'number' && Number.isFinite(c.deviceCount) && c.deviceCount >= 0
+        ? Math.round(c.deviceCount)
+        : 0,
+  };
+}
+
+/**
+ * Copy the OPTIONAL fields of a parsed profile (R36 smoothness +
+ * R41 census), keeping only well-typed values — a malformed
+ * optional field is dropped on its own and never costs the (valid)
+ * core profile, so stores written by older builds parse exactly as
+ * before.
  */
 function optionalProfileFields(value: DeviceProfile): Partial<DeviceProfile> {
   const out: Partial<DeviceProfile> = {};
+  const census = sanitiseFacingCensus((value as { census?: unknown }).census);
+  if (census) out.census = census;
   if (typeof value.lastQuality === 'string' && QUALITY_CHOICES.includes(value.lastQuality)) {
     out.lastQuality = value.lastQuality;
   }
@@ -297,6 +360,105 @@ export function provenSmoothnessSuggestion(
 }
 
 /* ------------------------------------------------------------------ */
+/* R41 WS-A — per-facing capability census                             */
+/* ------------------------------------------------------------------ */
+
+/** One capability value as `getCapabilities()` may expose it: a range, a bare number, or absent. */
+type CapabilityRangeLike = { min?: unknown; max?: unknown } | number | undefined | null;
+
+function rangeOf(value: CapabilityRangeLike): { min: number; max: number } {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return { min: value, max: value };
+  if (value && typeof value === 'object') {
+    const min = usableRangeNumber((value as { min?: unknown }).min);
+    const max = usableRangeNumber((value as { max?: unknown }).max);
+    return { min: min ?? 0, max: max ?? 0 };
+  }
+  return { min: 0, max: 0 };
+}
+
+/**
+ * Build a facing census from a live track's `getCapabilities()`
+ * RANGES. Returns null when the browser exposes no usable range at
+ * all (no width, height or frame-rate maximum) — the honest "this
+ * browser doesn't share the range" case, never a guessed census.
+ * `deviceCount` is the caller's video-input COUNT (labels/count
+ * only — no deviceId ever enters this shape).
+ */
+export function censusFromCapabilities(capabilities: unknown, deviceCount: number): FacingCensus | null {
+  if (!capabilities || typeof capabilities !== 'object') return null;
+  const caps = capabilities as { width?: CapabilityRangeLike; height?: CapabilityRangeLike; frameRate?: CapabilityRangeLike };
+  const width = rangeOf(caps.width);
+  const height = rangeOf(caps.height);
+  const frameRate = rangeOf(caps.frameRate);
+  if (width.max <= 0 && height.max <= 0 && frameRate.max <= 0) return null;
+  return sanitiseFacingCensus({
+    widthMin: width.min,
+    widthMax: width.max,
+    heightMin: height.min,
+    heightMax: height.max,
+    frameRateMin: frameRate.min,
+    frameRateMax: frameRate.max,
+    deviceCount:
+      typeof deviceCount === 'number' && Number.isFinite(deviceCount) && deviceCount >= 0 ? Math.round(deviceCount) : 0,
+  });
+}
+
+/** Count video inputs from an enumeration — the ONLY fact the census takes from it (never ids). */
+export function countVideoInputs(devices: readonly { kind?: string }[] | null | undefined): number {
+  if (!devices) return 0;
+  return devices.filter((d) => d?.kind === 'videoinput').length;
+}
+
+/** The most recent census stored for a facing (across its size-class entries), or null. */
+export function censusForFacing(profiles: DeviceProfileMap, facing: CaptureFacingMode): FacingCensus | null {
+  let found: FacingCensus | null = null;
+  for (const profile of Object.values(profiles)) {
+    if (profile.facing === facing && profile.census) found = profile.census;
+  }
+  return found;
+}
+
+/** Return a copy of `profile` carrying `census` (an unusable census leaves the profile unchanged). */
+export function withCensus(profile: DeviceProfile, census: FacingCensus | null | undefined): DeviceProfile {
+  const clean = sanitiseFacingCensus(census);
+  if (!clean) return { ...profile };
+  return { ...profile, census: clean };
+}
+
+/** The plain fallback shown when the browser shares no camera ranges. */
+export const CENSUS_UNAVAILABLE_TEXT =
+  "This browser doesn't share the camera's full range — we'll measure it from a test recording instead";
+
+/** The largest short side a census offers (0 when it carries no size range). */
+export function censusMaxShortSideValue(census: FacingCensus | null | undefined): number {
+  if (!census) return 0;
+  if (census.widthMax > 0 && census.heightMax > 0) return Math.min(census.widthMax, census.heightMax);
+  return Math.max(census.widthMax, census.heightMax);
+}
+
+function censusSizeWord(shortSide: number): string {
+  if (shortSide >= 2000) return '4K';
+  if (shortSide > 0) return `${Math.round(shortSide)}p`;
+  return '';
+}
+
+/**
+ * The settings sheet's plain line for one facing, e.g.
+ * "Back camera: up to 4K, up to 60 frames a second". Null when the
+ * census carries neither a size nor a frame-rate maximum — the
+ * caller shows `CENSUS_UNAVAILABLE_TEXT` instead.
+ */
+export function formatCensusOfferLine(facing: CaptureFacingMode, census: FacingCensus | null | undefined): string | null {
+  if (!census) return null;
+  const parts: string[] = [];
+  const sizeWord = censusSizeWord(censusMaxShortSideValue(census));
+  if (sizeWord) parts.push(`up to ${sizeWord}`);
+  if (census.frameRateMax > 0) parts.push(`up to ${Math.round(census.frameRateMax)} frames a second`);
+  if (parts.length === 0) return null;
+  return `${facing === 'environment' ? 'Back camera' : 'Front camera'}: ${parts.join(', ')}`;
+}
+
+/* ------------------------------------------------------------------ */
 /* Storage (thin wrappers over the pure helpers)                       */
 /* ------------------------------------------------------------------ */
 
@@ -327,5 +489,32 @@ export function saveDeviceProfile(
     storage.setItem(DEVICE_PROFILE_STORAGE_KEY, serializeDeviceProfiles(next));
   } catch {
     // Private-mode / quota failures must never break recording.
+  }
+}
+
+/**
+ * R41 WS-A — persist a facing census by attaching it to that
+ * facing's most recent proven profile (the profile shape carries
+ * the census; see the header). Returns true when a profile existed
+ * to carry it. When none exists yet, nothing is written — the
+ * caller keeps the census for the session, and the next proven
+ * profile saved for that facing carries it (the component's
+ * save path attaches the session census). No fake "proven" profile
+ * is ever invented to hold a census. Best-effort, never throws.
+ */
+export function saveFacingCensus(
+  storage: DeviceProfileStorage | null | undefined,
+  facing: CaptureFacingMode,
+  census: FacingCensus | null | undefined,
+): boolean {
+  const clean = sanitiseFacingCensus(census);
+  if (!storage || !clean) return false;
+  try {
+    const existing = deviceProfileForFacing(loadDeviceProfiles(storage), facing);
+    if (!existing) return false;
+    saveDeviceProfile(storage, withCensus(existing, clean));
+    return true;
+  } catch {
+    return false;
   }
 }

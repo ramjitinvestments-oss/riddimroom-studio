@@ -45,6 +45,18 @@ export interface CaptureReceipt {
    * Present only alongside a measured dropped-frame estimate.
    */
   expectedFramesEstimate?: number;
+  /**
+   * R41 WS-B — the ASKED rung's short side (the two-stage
+   * negotiation's stage-1 target), 0 when the take carried no ask
+   * (dual pairings, which negotiate on their own ladder).
+   */
+  askedShortSide: number;
+  /** R41 WS-B — the ASKED rung's frame rate (0 when no ask was recorded). */
+  askedFps: number;
+  /** R41 WS-B — true when the one exact-constraint retry ran for this take's stream. */
+  exactRetryAttempted?: boolean;
+  /** R41 WS-B — true when the exact retry's stream is the one that recorded. */
+  exactRetryUsed?: boolean;
 }
 
 export interface CaptureReceiptInput {
@@ -56,6 +68,11 @@ export interface CaptureReceiptInput {
   droppedFramesEstimate?: number | null;
   /** The tracker's expected-frame count for the same window — omitted (like the estimate) when unmeasured. */
   expectedFramesEstimate?: number | null;
+  /** R41 WS-B — the asked rung (short side + frame rate) this take's stream was negotiated from, when known. */
+  asked?: { shortSide: number; frameRate: number } | null;
+  /** R41 WS-B — the two-stage negotiation outcome for this take's stream, when known. */
+  exactRetryAttempted?: boolean;
+  exactRetryUsed?: boolean;
 }
 
 /** Build a receipt from the raw facts of one finished recording. */
@@ -85,7 +102,17 @@ export function buildCaptureReceipt(input: CaptureReceiptInput): CaptureReceipt 
       typeof input.durationSeconds === 'number' && Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
         ? input.durationSeconds
         : 0,
+    askedShortSide:
+      typeof input.asked?.shortSide === 'number' && Number.isFinite(input.asked.shortSide) && input.asked.shortSide > 0
+        ? Math.round(input.asked.shortSide)
+        : 0,
+    askedFps:
+      typeof input.asked?.frameRate === 'number' && Number.isFinite(input.asked.frameRate) && input.asked.frameRate > 0
+        ? Math.round(input.asked.frameRate)
+        : 0,
   };
+  if (input.exactRetryAttempted) receipt.exactRetryAttempted = true;
+  if (input.exactRetryUsed) receipt.exactRetryUsed = true;
   const dropped = input.droppedFramesEstimate;
   if (typeof dropped === 'number' && Number.isFinite(dropped) && dropped >= 0) {
     receipt.droppedFramesEstimate = Math.round(dropped);
@@ -188,6 +215,70 @@ export function formatTechnicalDetails(receipt: CaptureReceipt): string {
 }
 // BLOCKLIST-TECHNICAL-END
 
+/**
+ * R41 WS-B — the plain resolution label for a short side: the 2160
+ * class reads "4K" (the name the quality chips use); every other
+ * class reads by its pixels. Empty when the side is unknown.
+ */
+export function resolutionLabelForShortSide(shortSide: number): string {
+  if (typeof shortSide !== 'number' || !Number.isFinite(shortSide) || shortSide <= 0) return '';
+  if (shortSide >= 2000) return '4K';
+  return `${Math.round(shortSide)}p`;
+}
+
+/**
+ * R41 WS-B — whether a receipt's final grant fell below what was
+ * asked: granted short side below the asked short side, or granted
+ * frame rate below the asked frame rate. A take with no recorded
+ * ask, or no readable grant, is never called below — no comparison,
+ * no claim.
+ */
+export function receiptGrantBelowAsked(receipt: CaptureReceipt): boolean {
+  if (!receipt || receipt.askedShortSide <= 0) return false;
+  const grantedShort =
+    receipt.actualWidth > 0 && receipt.actualHeight > 0 ? Math.min(receipt.actualWidth, receipt.actualHeight) : 0;
+  if (grantedShort <= 0) return false;
+  if (grantedShort < receipt.askedShortSide) return true;
+  if (receipt.askedFps > 0 && receipt.actualFps > 0 && receipt.actualFps < receipt.askedFps) return true;
+  return false;
+}
+
+/**
+ * R41 WS-B — the plain asked-vs-granted line, e.g.
+ * "Asked: 4K · 60 — Phone gave: 4K · 60 ✓" when the phone delivered,
+ * or "Asked: 4K · 60 — Phone gave: 1080p · 60 — that's this browser's
+ * limit on this camera" when the final grant fell below the ask.
+ * Null when either side cannot be stated honestly.
+ */
+export function askedVsGrantedLine(
+  asked: { shortSide: number; frameRate: number } | null | undefined,
+  granted: { shortSide: number; frameRate: number } | null | undefined,
+): string | null {
+  const askedLabel = resolutionLabelForShortSide(asked?.shortSide ?? 0);
+  const grantedLabel = resolutionLabelForShortSide(granted?.shortSide ?? 0);
+  if (!askedLabel || !grantedLabel) return null;
+  const askedFps = typeof asked?.frameRate === 'number' && asked.frameRate > 0 ? Math.round(asked.frameRate) : 0;
+  const grantedFps = typeof granted?.frameRate === 'number' && granted.frameRate > 0 ? Math.round(granted.frameRate) : 0;
+  const askedPart = askedFps > 0 ? `${askedLabel} · ${askedFps}` : askedLabel;
+  const grantedPart = grantedFps > 0 ? `${grantedLabel} · ${grantedFps}` : grantedLabel;
+  const below =
+    (granted?.shortSide ?? 0) < (asked?.shortSide ?? 0) ||
+    (askedFps > 0 && grantedFps > 0 && grantedFps < askedFps);
+  return below
+    ? `Asked: ${askedPart} — Phone gave: ${grantedPart} — that's this browser's limit on this camera`
+    : `Asked: ${askedPart} — Phone gave: ${grantedPart} ✓`;
+}
+
+/** The receipt's own asked-vs-granted line (null when the take carried no ask). */
+export function captureReceiptAskedVsGranted(receipt: CaptureReceipt): string | null {
+  const grantedShort =
+    receipt.actualWidth > 0 && receipt.actualHeight > 0 ? Math.min(receipt.actualWidth, receipt.actualHeight) : 0;
+  return askedVsGrantedLine(
+    { shortSide: receipt.askedShortSide, frameRate: receipt.askedFps },
+    { shortSide: grantedShort, frameRate: receipt.actualFps },
+  );
+}
+
 export interface FormattedCaptureReceipt {
   /** e.g. "Recorded: 1080p · 30fps · high quality" */
   summary: string;
@@ -195,6 +286,14 @@ export interface FormattedCaptureReceipt {
   details: string;
   /** Technical line for the "Details" expander only. */
   technicalDetails: string;
+  /**
+   * R41 WS-B — the asked-vs-granted line for the review SUMMARY
+   * area (never only inside Details); null when the take carried
+   * no recorded ask.
+   */
+  askedVsGranted: string | null;
+  /** R41 WS-B — true when the final grant fell below the user's selected quality. */
+  grantBelowAsked: boolean;
 }
 
 /**
@@ -235,7 +334,13 @@ export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureR
   const verdict = captureReceiptSmoothnessVerdict(receipt);
   const details = verdict ? (plainDetails ? `${plainDetails} · ${verdict}` : verdict) : plainDetails;
 
-  return { summary, details, technicalDetails: formatTechnicalDetails(receipt) };
+  return {
+    summary,
+    details,
+    technicalDetails: formatTechnicalDetails(receipt),
+    askedVsGranted: captureReceiptAskedVsGranted(receipt),
+    grantBelowAsked: receiptGrantBelowAsked(receipt),
+  };
 }
 
 /**
