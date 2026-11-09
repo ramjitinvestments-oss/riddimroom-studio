@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
+  COACH_INTERVAL_IDLE_MS,
+  COACH_INTERVAL_RECORDING_MS,
   COACH_MIN_CHANGE_MS,
   METER_INTERVAL_IDLE_MS,
   METER_INTERVAL_RECORDING_MS,
+  coachIntervalMs,
   countdownDisplayForElapsed,
   createCoachGate,
   createTransitionGate,
   meterIntervalMs,
+  motionSampleAccepted,
   zebraRecomputedWhile,
 } from './readoutGate';
 import type { MotionLevel } from './motionCoach';
@@ -141,6 +145,32 @@ describe('meter schedule', () => {
     expect(METER_INTERVAL_RECORDING_MS).toBe(1000);
     expect(zebraRecomputedWhile(false)).toBe(true);
     expect(zebraRecomputedWhile(true)).toBe(false);
+  });
+});
+
+describe('coach schedule — R41 Step 3 Rung A, Part 2 (in-take painter diet)', () => {
+  it('coachIntervalMs is 250ms idle and 1000ms while recording', () => {
+    expect(coachIntervalMs(false)).toBe(COACH_INTERVAL_IDLE_MS);
+    expect(COACH_INTERVAL_IDLE_MS).toBe(250);
+    expect(coachIntervalMs(true)).toBe(COACH_INTERVAL_RECORDING_MS);
+    expect(COACH_INTERVAL_RECORDING_MS).toBe(1000);
+  });
+
+  it('motionSampleAccepted accepts every sample when not recording', () => {
+    expect(motionSampleAccepted(0, 0, false)).toBe(true);
+    expect(motionSampleAccepted(5000, 5001, false)).toBe(true);
+    expect(motionSampleAccepted(5000, 5000, false)).toBe(true);
+  });
+
+  it('motionSampleAccepted accepts the first sample while recording (no sample yet)', () => {
+    expect(motionSampleAccepted(0, 1234, true)).toBe(true);
+    expect(motionSampleAccepted(Number.NEGATIVE_INFINITY, 1234, true)).toBe(true);
+  });
+
+  it('motionSampleAccepted throttles to ~1Hz while recording', () => {
+    expect(motionSampleAccepted(2000, 2999, true)).toBe(false);
+    expect(motionSampleAccepted(2000, 3000, true)).toBe(true);
+    expect(motionSampleAccepted(2000, 4500, true)).toBe(true);
   });
 });
 

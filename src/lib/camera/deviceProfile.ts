@@ -19,6 +19,7 @@
  * $0 rule: no dependencies.
  */
 
+import { PROVEN_FPS_CEILING_MIN_SHORT_SIDE } from './captureQuality';
 import type { CaptureFacingMode, CaptureQualityChoice } from './captureQuality';
 import { shouldWarnAboutDroppedFrames } from './frameDrops';
 
@@ -54,6 +55,12 @@ export interface DeviceProfile {
    * measured. Ranges only — never a deviceId.
    */
   census?: FacingCensus;
+  /**
+   * R41 Step 3 Rung A: the fps a high-resolution grant actually delivered
+   * when a higher fps was asked and refused — learned from a completed
+   * take's negotiation; absent = nothing proven.
+   */
+  provenFpsCeiling?: number;
 }
 
 /**
@@ -159,6 +166,13 @@ function optionalProfileFields(value: DeviceProfile): Partial<DeviceProfile> {
   const out: Partial<DeviceProfile> = {};
   const census = sanitiseFacingCensus((value as { census?: unknown }).census);
   if (census) out.census = census;
+  if (
+    typeof value.provenFpsCeiling === 'number' &&
+    Number.isFinite(value.provenFpsCeiling) &&
+    value.provenFpsCeiling > 0
+  ) {
+    out.provenFpsCeiling = Math.round(value.provenFpsCeiling);
+  }
   if (typeof value.lastQuality === 'string' && QUALITY_CHOICES.includes(value.lastQuality)) {
     out.lastQuality = value.lastQuality;
   }
@@ -459,6 +473,107 @@ export function formatCensusOfferLine(facing: CaptureFacingMode, census: FacingC
 }
 
 /* ------------------------------------------------------------------ */
+/* R41 Step 3 Rung A — proven fps ceiling                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Return a copy of `profile` carrying `ceiling` (rounded) when it is a
+ * positive finite number; a null/invalid ceiling returns a copy with
+ * the field deleted.
+ */
+export function withProvenFpsCeiling(
+  profile: DeviceProfile,
+  ceiling: number | null | undefined,
+): DeviceProfile {
+  const next: DeviceProfile = { ...profile };
+  if (typeof ceiling === 'number' && Number.isFinite(ceiling) && ceiling > 0) {
+    next.provenFpsCeiling = Math.round(ceiling);
+  } else {
+    delete next.provenFpsCeiling;
+  }
+  return next;
+}
+
+/**
+ * The most recent proven fps ceiling stored for a facing (across its
+ * size-class entries), or null. The LAST entry in iteration order for
+ * that facing carrying a valid field wins (mirrors censusForFacing);
+ * the field is validated on read (finite, > 0).
+ */
+export function provenFpsCeilingForFacing(
+  profiles: DeviceProfileMap,
+  facing: CaptureFacingMode,
+): number | null {
+  let found: number | null = null;
+  for (const profile of Object.values(profiles)) {
+    if (
+      profile.facing === facing &&
+      typeof profile.provenFpsCeiling === 'number' &&
+      Number.isFinite(profile.provenFpsCeiling) &&
+      profile.provenFpsCeiling > 0
+    ) {
+      found = Math.round(profile.provenFpsCeiling);
+    }
+  }
+  return found;
+}
+
+/** The update a completed take's negotiation implies for the proven fps ceiling. */
+export type ProvenCeilingUpdate = { kind: 'set'; ceiling: number } | { kind: 'clear' } | { kind: 'none' };
+
+/**
+ * Decide what one take's asked-vs-granted negotiation proves:
+ * - below the high-resolution short side, or an unreadable grant → none;
+ * - a grant below the ask at a high-resolution rung → set the granted fps;
+ * - a 60+ ask fully granted → clear (the ceiling is disproven);
+ * - anything else → none.
+ */
+export function provenCeilingUpdate(input: {
+  askedShortSide: number;
+  askedFps: number;
+  grantedFps: number;
+}): ProvenCeilingUpdate {
+  const { askedShortSide, askedFps, grantedFps } = input;
+  if (
+    typeof askedShortSide !== 'number' ||
+    !Number.isFinite(askedShortSide) ||
+    askedShortSide < PROVEN_FPS_CEILING_MIN_SHORT_SIDE
+  ) {
+    return { kind: 'none' };
+  }
+  if (typeof grantedFps !== 'number' || !Number.isFinite(grantedFps) || grantedFps <= 0) {
+    return { kind: 'none' };
+  }
+  if (grantedFps < askedFps) return { kind: 'set', ceiling: Math.round(grantedFps) };
+  if (askedFps >= 60 && grantedFps >= askedFps) return { kind: 'clear' };
+  return { kind: 'none' };
+}
+
+/**
+ * A new map with the proven fps ceiling stripped from every entry of
+ * `facing` (other facings untouched).
+ */
+export function withoutProvenFpsCeiling(
+  profiles: DeviceProfileMap,
+  facing: CaptureFacingMode,
+): DeviceProfileMap {
+  const next: DeviceProfileMap = { ...profiles };
+  for (const [key, profile] of Object.entries(next)) {
+    if (profile.facing === facing && profile.provenFpsCeiling !== undefined) {
+      const copy: DeviceProfile = { ...profile };
+      delete copy.provenFpsCeiling;
+      next[key] = copy;
+    }
+  }
+  return next;
+}
+
+/** The fps chips' plain advisory line for a proven ceiling. */
+export function provenFpsCeilingText(ceiling: number): string {
+  return `This phone's browser gives ${ceiling} at this size — asking for that directly`;
+}
+
+/* ------------------------------------------------------------------ */
 /* Storage (thin wrappers over the pure helpers)                       */
 /* ------------------------------------------------------------------ */
 
@@ -516,5 +631,28 @@ export function saveFacingCensus(
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * R41 Step 3 Rung A — clear the stored proven fps ceiling for a
+ * facing (a 60fps grant disproved it). Mirrors saveFacingCensus's
+ * storage-wrapper pattern: load → strip → persist only if changed.
+ * Best-effort: storage failures are swallowed.
+ */
+export function clearProvenFpsCeiling(
+  storage: DeviceProfileStorage | null | undefined,
+  facing: CaptureFacingMode,
+): void {
+  if (!storage) return;
+  try {
+    const existing = loadDeviceProfiles(storage);
+    const hasCeiling = Object.values(existing).some(
+      (profile) => profile.facing === facing && profile.provenFpsCeiling !== undefined,
+    );
+    if (!hasCeiling) return;
+    storage.setItem(DEVICE_PROFILE_STORAGE_KEY, serializeDeviceProfiles(withoutProvenFpsCeiling(existing, facing)));
+  } catch {
+    // Private-mode / quota failures must never break recording.
   }
 }

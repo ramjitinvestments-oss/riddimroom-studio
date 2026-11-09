@@ -403,6 +403,67 @@ export function buildCensusAwareAttempts(
   return rungs.map((rung, i) => ({ ...rung, isFallback: i === rungs.length - 1 }));
 }
 
+/* ------------------------------------------------------------------ */
+/* R41 Step 3 Rung A — proven fps ceiling                              */
+/*                                                                     */
+/* A completed take can teach the ladder that a high-resolution rung  */
+/* never actually grants the fps it asks for (see deviceProfile's      */
+/* `provenFpsCeiling`). Applying that ceiling shapes the ask so the    */
+/* next session asks for the proven fps directly, instead of asking    */
+/* high and silently receiving less.                                   */
+/* ------------------------------------------------------------------ */
+
+/** Rungs at/above this short side are the "high-resolution" rungs the proven ceiling governs. */
+export const PROVEN_FPS_CEILING_MIN_SHORT_SIDE = 1440;
+
+/**
+ * Cap a ladder at a proven fps ceiling. Composes AFTER census shaping
+ * (so the ceiling = min of census cap and proven ceiling on the opening
+ * rung emerges from that order): callers pass census-shaped attempts in.
+ *
+ * A null/undefined/non-finite/non-positive ceiling returns `attempts`
+ * unchanged. Otherwise every attempt with shortSide >=
+ * PROVEN_FPS_CEILING_MIN_SHORT_SIDE and frameRate > ceiling is copied
+ * with frameRate = ceiling and constraints.video.frameRate =
+ * { ideal: ceiling } (all other constraint fields preserved). Attempts
+ * below that short side or already at/below the ceiling pass through
+ * untouched (same object). Identical (shortSide, frameRate) pairs are
+ * deduped keeping the first occurrence, and isFallback is remapped so
+ * exactly the last rung is true. Never raises any fps.
+ */
+export function applyProvenFpsCeiling(
+  attempts: CaptureAttempt[],
+  ceiling: number | null | undefined,
+): CaptureAttempt[] {
+  if (typeof ceiling !== 'number' || !Number.isFinite(ceiling) || ceiling <= 0) return attempts;
+  const cappedFps = ceiling;
+  const shaped: CaptureAttempt[] = [];
+  const seen = new Set<string>();
+  for (const attempt of attempts) {
+    let next = attempt;
+    if (attempt.shortSide >= PROVEN_FPS_CEILING_MIN_SHORT_SIDE && attempt.frameRate > cappedFps) {
+      const video = attempt.constraints.video;
+      const videoConstraints =
+        video && typeof video === 'object'
+          ? { ...(video as MediaTrackConstraints), frameRate: { ideal: cappedFps } }
+          : video;
+      next = {
+        ...attempt,
+        frameRate: cappedFps,
+        constraints: { ...attempt.constraints, video: videoConstraints },
+      };
+    }
+    const key = `${next.shortSide}:${next.frameRate}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    shaped.push(next);
+  }
+  return shaped.map((rung, i) => {
+    const isFallback = i === shaped.length - 1;
+    return rung.isFallback === isFallback ? rung : { ...rung, isFallback };
+  });
+}
+
 export type RecorderBitrateTier = 'uhd' | 'qhd' | 'hd';
 
 /**

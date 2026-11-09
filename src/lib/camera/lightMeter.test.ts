@@ -102,6 +102,37 @@ describe('analyzeLightSample', () => {
     expect(r.meanLuma).toBeCloseTo(30 / 255, 5);
   });
 
+  it('computeZebra:false keeps state/meanLuma/clippedFraction identical and returns an all-false grid', () => {
+    // A frame with real zebra: fully white reads blowing-out with
+    // every cell flagged under the default call.
+    const input = { data: grayFrame(48, 48, 255), width: 48, height: 48 };
+    const withZebra = analyzeLightSample(input);
+    const withoutZebra = analyzeLightSample({ ...input, computeZebra: false });
+    expect(withZebra.zebraCells.some((c) => c === true)).toBe(true);
+    expect(withoutZebra.state).toBe(withZebra.state);
+    expect(withoutZebra.meanLuma).toBe(withZebra.meanLuma);
+    expect(withoutZebra.clippedFraction).toBe(withZebra.clippedFraction);
+    expect(withoutZebra.zebraCells).toHaveLength(LIGHT_GRID_COLS * LIGHT_GRID_ROWS);
+    expect(withoutZebra.zebraCells.every((c) => c === false)).toBe(true);
+  });
+
+  it('computeZebra:false matches the default call on a partially clipped frame too', () => {
+    const data = grayFrame(96, 96, 128);
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) setPixel(data, 96, x, y, 255);
+    const withZebra = analyzeLightSample({ data, width: 96, height: 96 });
+    const withoutZebra = analyzeLightSample({ data, width: 96, height: 96, computeZebra: false });
+    expect(withZebra.zebraCells.filter(Boolean)).toHaveLength(1);
+    expect(withoutZebra.state).toBe(withZebra.state);
+    expect(withoutZebra.meanLuma).toBe(withZebra.meanLuma);
+    expect(withoutZebra.clippedFraction).toBe(withZebra.clippedFraction);
+    expect(withoutZebra.zebraCells.every((c) => c === false)).toBe(true);
+  });
+
+  it('omitting computeZebra still computes real zebra cells (the default)', () => {
+    const r = analyzeLightSample({ data: grayFrame(48, 48, 255), width: 48, height: 48 });
+    expect(r.zebraCells.every((c) => c === true)).toBe(true);
+  });
+
   it('returns the no-signal result for invalid input instead of inventing a warning', () => {
     const empty = analyzeLightSample({ data: new Uint8ClampedArray(0), width: 0, height: 0 });
     expect(empty.state).toBe('good');

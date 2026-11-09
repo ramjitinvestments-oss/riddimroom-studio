@@ -4,7 +4,9 @@ import { useAuth } from '../../context/AuthContext';
 import { recordDoorOpen, recordTakeHealthFromReceipt } from '../../lib/healthEvents';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
+  applyProvenFpsCeiling,
   buildCensusAwareAttempts,
+  grantedFps,
   isLadderRetryableError,
   negotiateStreamAttempt,
   pickRecorderMimeType,
@@ -65,15 +67,20 @@ import {
   CENSUS_UNAVAILABLE_TEXT,
   censusForFacing,
   censusFromCapabilities,
+  clearProvenFpsCeiling,
   countVideoInputs,
   deviceProfileForFacing,
   formatCensusOfferLine,
   loadDeviceProfiles,
+  provenCeilingUpdate,
+  provenFpsCeilingForFacing,
+  provenFpsCeilingText,
   provenSmoothnessSuggestion,
   saveDeviceProfile,
   saveFacingCensus,
   shortSideClassFor,
   withCensus,
+  withProvenFpsCeiling,
   withTakeOutcome,
   type DeviceProfileStorage,
   type FacingCensus,
@@ -81,10 +88,12 @@ import {
   type TakeDropOutcome,
 } from '../../lib/camera/deviceProfile';
 import {
+  coachIntervalMs,
   countdownDisplayForElapsed,
   createCoachGate,
   createTransitionGate,
   meterIntervalMs,
+  motionSampleAccepted,
   zebraRecomputedWhile,
 } from '../../lib/camera/readoutGate';
 import {
@@ -420,7 +429,12 @@ function saveProvenProfile(
   settings: { width?: number; height?: number; frameRate?: number } | null | undefined,
   mimeType: string,
   fallbackFps: number,
-  opts?: { quality?: CaptureQualityChoice | null; outcome?: TakeDropOutcome | null; census?: FacingCensus | null },
+  opts?: {
+    quality?: CaptureQualityChoice | null;
+    outcome?: TakeDropOutcome | null;
+    census?: FacingCensus | null;
+    ceiling?: number;
+  },
 ): void {
   const width = settings?.width ?? 0;
   const height = settings?.height ?? 0;
@@ -432,23 +446,29 @@ function saveProvenProfile(
   // R41 WS-A — the session census for this facing (when one was
   // measured) rides along the same way, so the stored profile
   // carries what this phone's browser offers per facing.
+  // R41 Step 3 Rung A — a proven fps ceiling learned from this take
+  // rides along the same way, as the outermost wrap (absent/invalid
+  // values leave the fresh profile without the field, unchanged).
   saveDeviceProfile(
     browserLocalStorage(),
-    withCensus(
-      withTakeOutcome(
-        {
-          facing,
-          shortSideClass: shortSideClassFor(shortSide),
-          fps:
-            typeof settings?.frameRate === 'number' && settings.frameRate > 0
-              ? Math.round(settings.frameRate)
-              : fallbackFps,
-          mimeType: mimeType ?? '',
-        },
-        opts?.quality,
-        opts?.outcome,
+    withProvenFpsCeiling(
+      withCensus(
+        withTakeOutcome(
+          {
+            facing,
+            shortSideClass: shortSideClassFor(shortSide),
+            fps:
+              typeof settings?.frameRate === 'number' && settings.frameRate > 0
+                ? Math.round(settings.frameRate)
+                : fallbackFps,
+            mimeType: mimeType ?? '',
+          },
+          opts?.quality,
+          opts?.outcome,
+        ),
+        opts?.census,
       ),
-      opts?.census,
+      opts?.ceiling,
     ),
   );
 }
@@ -864,10 +884,18 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   // (a review appearing is the moment a new outcome was just saved).
   // A suggestion only — applying it is the user's one tap below.
   const [profileSuggestion, setProfileSuggestion] = useState<SmoothnessSuggestion | null>(null);
+  // R41 Step 3 Rung A — the proven fps ceiling for the current facing
+  // (for the fps chips' advisory line), refreshed on the same cadence
+  // as the smoothness suggestion; and whether the user has explicitly
+  // picked an fps this session (which silences that advisory line and,
+  // via userFpsChoiceRef, the ceiling shaping in startStream).
+  const [provenCeiling, setProvenCeiling] = useState<number | null>(null);
+  const [fpsPickedExplicitly, setFpsPickedExplicitly] = useState(false);
   useEffect(() => {
     setProfileSuggestion(
       provenSmoothnessSuggestion(loadDeviceProfiles(browserLocalStorage()), facingMode),
     );
+    setProvenCeiling(provenFpsCeilingForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode));
   }, [facingMode, pendingVideo, pendingDual, testReceipt]);
 
   const step2PlaybackRef = useRef<HTMLVideoElement>(null);
@@ -976,15 +1004,25 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     // the fallback when there is none).
     const knownCensus =
       censusSessionRef.current[facingMode] ?? censusForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode);
-    const attempts = buildCensusAwareAttempts(
-      {
-        canvasWidth,
-        canvasHeight,
-        facingMode,
-        quality: lock?.quality ?? qualityChoice,
-        frameRate: lock?.fps ?? fpsChoice,
-      },
-      knownCensus,
+    // R41 Step 3 Rung A — the proven fps ceiling shapes the census-shaped
+    // ladder next (ceiling = min of the census cap and the proven ceiling
+    // on the opening rung emerges from that order), unless the user has
+    // explicitly picked an fps this session. This applies identically
+    // when a two-pass lock is present: the lock carries quality/fps and
+    // the ceiling shapes the ask in both passes, exactly like the census
+    // shaping already does.
+    const attempts = applyProvenFpsCeiling(
+      buildCensusAwareAttempts(
+        {
+          canvasWidth,
+          canvasHeight,
+          facingMode,
+          quality: lock?.quality ?? qualityChoice,
+          frameRate: lock?.fps ?? fpsChoice,
+        },
+        knownCensus,
+      ),
+      userFpsChoiceRef.current ? null : provenFpsCeilingForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode),
     );
     let stream: MediaStream | null = null;
     let lastError: unknown = null;
@@ -1755,12 +1793,21 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       const estimate = tracker?.stop() ?? null;
       tracker = null;
       const receipt = receiptForRecording(settingsSnapshot, recorder.mimeType, blob, startedAtMs, estimate, negotiationSnapshot);
+      const ceilingUpdate = negotiationSnapshot
+        ? provenCeilingUpdate({
+            askedShortSide: negotiationSnapshot.asked.shortSide,
+            askedFps: negotiationSnapshot.asked.frameRate,
+            grantedFps: grantedFps(settingsSnapshot),
+          })
+        : ({ kind: 'none' } as const);
+      if (ceilingUpdate.kind === 'clear') clearProvenFpsCeiling(browserLocalStorage(), facingModeRef.current);
       saveProvenProfile(facingModeRef.current, settingsSnapshot, recorder.mimeType, fpsChoiceRef.current, {
         quality: qualityChoiceRef.current,
         outcome: estimate
           ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
           : null,
         census: censusSessionRef.current[facingModeRef.current] ?? null,
+        ceiling: ceilingUpdate.kind === 'set' ? ceilingUpdate.ceiling : undefined,
       });
       // R41 WS-A — a diagnostics take ends here: stop the collectors,
       // build the evidence pack, and hold blob + pack for the result
@@ -1942,12 +1989,21 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       const mainReceipt =
         step1ReceiptRef.current ??
         buildCaptureReceipt({ trackSettings: null, mimeType: mainBlob.type, blobSize: mainBlob.size, durationSeconds: 0 });
+      const ceilingUpdate = negotiationSnapshot
+        ? provenCeilingUpdate({
+            askedShortSide: negotiationSnapshot.asked.shortSide,
+            askedFps: negotiationSnapshot.asked.frameRate,
+            grantedFps: grantedFps(settingsSnapshot),
+          })
+        : ({ kind: 'none' } as const);
+      if (ceilingUpdate.kind === 'clear') clearProvenFpsCeiling(browserLocalStorage(), 'user');
       saveProvenProfile('user', settingsSnapshot, recorder.mimeType, fpsChoiceRef.current, {
         quality: twoPassLockRef.current?.quality ?? qualityChoiceRef.current,
         outcome: estimate
           ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
           : null,
         census: censusSessionRef.current['user'] ?? null,
+        ceiling: ceilingUpdate.kind === 'set' ? ceilingUpdate.ceiling : undefined,
       });
       // Transfer the retained step-1 URL into pendingDual: clearing
       // the ref hands ownership to the pendingDual effect, which
@@ -2211,7 +2267,16 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         ctx.drawImage(video, 0, 0, width, height);
         const image = ctx.getImageData(0, 0, width, height);
         if (cancelled) return;
-        const result = analyzeLightSample({ data: image.data, width, height, format: 'rgba' });
+        // R41 Step 3 Rung A, Part 2 (F05) — while recording the zebra
+        // result is discarded under the zebraRecomputedWhile gate
+        // below, so don't pay for the per-cell zebra maths at all.
+        const result = analyzeLightSample({
+          data: image.data,
+          width,
+          height,
+          format: 'rgba',
+          computeZebra: zebraRecomputedWhile(recording),
+        });
         lightResultRef.current = result;
         if (lightStateGateRef.current.push(result.state)) {
           setLightState(result.state);
@@ -2275,9 +2340,18 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     buffer.diffs = [];
     buffer.lastFrame = null;
     levelHistoryRef.current = [];
+    // R41 Step 3 Rung A, Part 2 (F03/F04) — while recording, sensor
+    // events enter the buffer at most ~1Hz; before a take (the
+    // countdown) every event is accepted, exactly as before. This
+    // timestamp is owned by this effect and resets on every setup
+    // (the effect re-runs when isRecording flips).
+    let lastAcceptedMotionMs = 0;
     const onMotion = (e: DeviceMotionEvent) => {
       const sample = gyroSampleFromRotationRate(e.rotationRate);
       if (sample) {
+        const nowMs = performance.now();
+        if (!motionSampleAccepted(lastAcceptedMotionMs, nowMs, isRecording)) return;
+        lastAcceptedMotionMs = nowMs;
         buffer.gyro.push(sample);
         if (buffer.gyro.length > 12) buffer.gyro.shift();
       }
@@ -2318,7 +2392,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       levelHistoryRef.current = [...levelHistoryRef.current.slice(-39), level];
     };
     tick();
-    const interval = window.setInterval(tick, 250);
+    // R41 Step 3 Rung A, Part 2 — 250ms before a take (countdown
+    // included), at most ~1Hz while recording; isRecording is a dep,
+    // so the interval is re-created the moment recording flips.
+    const interval = window.setInterval(tick, coachIntervalMs(isRecording));
     return () => {
       window.removeEventListener('devicemotion', onMotion);
       window.clearInterval(interval);
@@ -2358,7 +2435,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         next.tone === 'good' ? 'bg-emerald-600/85' : next.tone === 'warn' ? 'bg-amber-600/90' : 'bg-red-600/90'
       }`;
       pill.style.display = 'block';
-    }, 250);
+      // R41 Step 3 Rung A, Part 2 — this effect only runs while
+      // recording, so coachIntervalMs(isRecording) is the ~1Hz
+      // in-take cadence here; the pill clears when recording stops.
+    }, coachIntervalMs(isRecording));
     return () => window.clearInterval(interval);
   }, [isRecording]);
 
@@ -2432,6 +2512,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   useEffect(() => {
     if (!levelEnabled) return;
     const onOrientation = (e: DeviceOrientationEvent) => {
+      // R41 Step 3 Rung A, Part 2 (F03) — orientation-driven writes
+      // are SUSPENDED while recording: the level freezes at its last
+      // pre-take painting and resumes on the next event after stop.
+      if (isRecordingRef.current) return;
       const tilt = horizonTiltDegrees(e.beta, e.gamma);
       // R40 P-39: remember the tilt even when the wrap is unmounted
       // (review states) — the remount paint below reads it.
@@ -3078,6 +3162,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                         // An explicit pick this session beats any saved
                         // device profile from here on.
                         userFpsChoiceRef.current = true;
+                        setFpsPickedExplicitly(true);
                         setFpsChoice(fps);
                       }}
                       disabled={isRecording || dualMode || isStep2Phase}
@@ -3090,6 +3175,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                     </button>
                   ))}
                 </div>
+                {/* R41 Step 3 Rung A — proven fps ceiling advisory (see provenFpsCeilingText). */}
+                {provenCeiling !== null && !fpsPickedExplicitly && qualityChoice !== 'hd' && (
+                  <p className="text-[11px] text-white/70 text-center">{provenFpsCeilingText(provenCeiling)}</p>
+                )}
               </div>
               {/* R24 WS-P3: guides toggle (in the sheet, R40 P-16) */}
               <button

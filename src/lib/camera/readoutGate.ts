@@ -159,3 +159,31 @@ export function meterIntervalMs(isRecording: boolean): number {
 export function zebraRecomputedWhile(isRecording: boolean): boolean {
   return !isRecording;
 }
+
+/* ------------------------------------------------------------------ */
+/* Coach schedule (R41 Step 3 Rung A, Part 2 — in-take painter diet)  */
+/* ------------------------------------------------------------------ */
+
+/** Coach sampling / pill interval before a take — the full ~4Hz rate. */
+export const COACH_INTERVAL_IDLE_MS = 250;
+/** Coach sampling / pill interval DURING a take — at most once a second. */
+export const COACH_INTERVAL_RECORDING_MS = 1000;
+
+/** The coach's interval for the current phase (mirrors meterIntervalMs). */
+export function coachIntervalMs(isRecording: boolean): number {
+  return isRecording ? COACH_INTERVAL_RECORDING_MS : COACH_INTERVAL_IDLE_MS;
+}
+
+/**
+ * Whether a devicemotion sample may enter the coach's rolling buffer.
+ * Before a take every sample is accepted, exactly as before. While
+ * recording, samples are accepted at most once per
+ * COACH_INTERVAL_RECORDING_MS so the sensor-event stream stops
+ * competing with the encoder. A `lastAcceptedMs` of 0 or -Infinity
+ * (no sample accepted yet) always accepts.
+ */
+export function motionSampleAccepted(lastAcceptedMs: number, nowMs: number, isRecording: boolean): boolean {
+  if (!isRecording) return true;
+  if (!Number.isFinite(lastAcceptedMs) || lastAcceptedMs <= 0) return true;
+  return nowMs - lastAcceptedMs >= COACH_INTERVAL_RECORDING_MS;
+}

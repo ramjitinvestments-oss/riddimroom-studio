@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const cameraSource = readFileSync(join(HERE, 'CameraCapture.tsx'), 'utf8');
+const diagnosticsSource = readFileSync(join(HERE, '../../lib/camera/diagnostics.ts'), 'utf8');
+const frameDropsSource = readFileSync(join(HERE, '../../lib/camera/frameDrops.ts'), 'utf8');
 
 describe('R41 F02 — every record path records with a 250ms timeslice', () => {
   it('all four record-path start calls use start(250)', () => {
@@ -88,5 +90,129 @@ describe('R41 WS-A — census + diagnostics wiring', () => {
   it('the diagnostics take goes through the normal record path (startRecording), not a side recorder', () => {
     const start = cameraSource.slice(cameraSource.indexOf('const startDiagnosticsSession'));
     expect(start.slice(0, 900)).toContain('startRecording()');
+  });
+});
+
+describe('R41 Step 3 Rung A — proven fps ceiling wiring', () => {
+  it('startStream gates applyProvenFpsCeiling on userFpsChoiceRef', () => {
+    expect(cameraSource).toContain('applyProvenFpsCeiling');
+    expect(cameraSource).toContain(
+      'userFpsChoiceRef.current ? null : provenFpsCeilingForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode)',
+    );
+    const startStream = cameraSource.slice(cameraSource.indexOf('const startStream'));
+    const window = startStream.slice(0, startStream.indexOf('let stream: MediaStream | null = null'));
+    expect(window).toContain('buildCensusAwareAttempts');
+    expect(window).toContain('applyProvenFpsCeiling');
+    // The ceiling composes AFTER (around) the census shaping.
+    expect(window.indexOf('applyProvenFpsCeiling')).toBeLessThan(window.indexOf('buildCensusAwareAttempts'));
+  });
+
+  it('saveProvenProfile wraps the built profile with withProvenFpsCeiling as the outermost wrap', () => {
+    expect(cameraSource).toContain('withProvenFpsCeiling');
+    expect(cameraSource).toContain('ceiling?: number');
+    const save = cameraSource.slice(cameraSource.indexOf('function saveProvenProfile'));
+    const window = save.slice(0, save.indexOf('/** The proven recorder mime'));
+    expect(window.indexOf('withProvenFpsCeiling')).toBeLessThan(window.indexOf('withCensus'));
+    expect(window).toContain('opts?.ceiling');
+  });
+
+  it('both take-end save sites (single + step 2, not dual) compute provenCeilingUpdate and pass ceiling', () => {
+    expect(cameraSource.split('provenCeilingUpdate').length - 1).toBeGreaterThanOrEqual(3); // import + 2 sites
+    expect(cameraSource.split('const ceilingUpdate = negotiationSnapshot').length - 1).toBe(2);
+    expect(cameraSource.split("ceiling: ceilingUpdate.kind === 'set' ? ceilingUpdate.ceiling : undefined").length - 1).toBe(2);
+    expect(cameraSource).toContain('grantedFps(settingsSnapshot)');
+    expect(cameraSource).toContain('askedShortSide: negotiationSnapshot.asked.shortSide');
+    expect(cameraSource).toContain('askedFps: negotiationSnapshot.asked.frameRate');
+  });
+
+  it("a 'clear' update invokes clearProvenFpsCeiling for the facing being saved, at both sites", () => {
+    expect(cameraSource.split('clearProvenFpsCeiling').length - 1).toBeGreaterThanOrEqual(3); // import + 2 sites
+    expect(cameraSource).toContain(
+      "if (ceilingUpdate.kind === 'clear') clearProvenFpsCeiling(browserLocalStorage(), facingModeRef.current);",
+    );
+    expect(cameraSource).toContain("if (ceilingUpdate.kind === 'clear') clearProvenFpsCeiling(browserLocalStorage(), 'user');");
+    // The clear runs BEFORE its save at each site.
+    const singleClear = cameraSource.indexOf('clearProvenFpsCeiling(browserLocalStorage(), facingModeRef.current)');
+    expect(cameraSource.slice(singleClear, singleClear + 400)).toContain('saveProvenProfile(facingModeRef.current');
+    const step2Clear = cameraSource.indexOf("clearProvenFpsCeiling(browserLocalStorage(), 'user')");
+    expect(cameraSource.slice(step2Clear, step2Clear + 400)).toContain("saveProvenProfile('user'");
+  });
+
+  it('the fps chip onClick sets the explicit-pick state alongside the ref', () => {
+    expect(cameraSource).toContain('setFpsPickedExplicitly(true)');
+    const chip = cameraSource.slice(cameraSource.indexOf('userFpsChoiceRef.current = true;'));
+    expect(chip.slice(0, 200)).toContain('setFpsPickedExplicitly(true)');
+    expect(chip.slice(0, 200)).toContain('setFpsChoice(fps)');
+  });
+
+  it('provenFpsCeilingText is rendered under the fps chips, gated on ceiling / explicit pick / quality', () => {
+    expect(cameraSource).toContain('provenFpsCeilingText(provenCeiling)');
+    expect(cameraSource).toContain("provenCeiling !== null && !fpsPickedExplicitly && qualityChoice !== 'hd'");
+    const fpsGroup = cameraSource.slice(cameraSource.indexOf('aria-label="Frame rate"'));
+    const afterChips = fpsGroup.slice(fpsGroup.indexOf('{fps} fps'));
+    expect(afterChips.slice(0, 1200)).toContain('provenFpsCeilingText(provenCeiling)');
+    // The ceiling state refreshes alongside the profile suggestion.
+    expect(cameraSource).toContain(
+      'setProvenCeiling(provenFpsCeilingForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode));',
+    );
+  });
+});
+
+describe('R41 Step 3 Rung A, Part 2 — in-take painter diet (F03/F04/F05)', () => {
+  it('the meter skips the zebra maths while recording via computeZebra', () => {
+    expect(cameraSource).toContain('computeZebra: zebraRecomputedWhile(recording)');
+  });
+
+  it('the devicemotion push is gated by motionSampleAccepted before it reaches the buffer', () => {
+    expect(cameraSource).toContain('motionSampleAccepted(lastAcceptedMotionMs, nowMs, isRecording)');
+    const onMotion = cameraSource.slice(cameraSource.indexOf('const onMotion'));
+    const handler = onMotion.slice(0, onMotion.indexOf("window.addEventListener('devicemotion'"));
+    expect(handler).toContain('motionSampleAccepted');
+    expect(handler.indexOf('motionSampleAccepted')).toBeLessThan(handler.indexOf('buffer.gyro.push'));
+    // The last-accepted timestamp is owned by the effect and reset on setup.
+    expect(cameraSource).toContain('let lastAcceptedMotionMs = 0;');
+  });
+
+  it('both coach intervals use coachIntervalMs (sampler tick + pill)', () => {
+    expect(cameraSource).toContain('window.setInterval(tick, coachIntervalMs(isRecording))');
+    expect(cameraSource).toContain('}, coachIntervalMs(isRecording));');
+    expect(cameraSource.split('coachIntervalMs(').length - 1).toBeGreaterThanOrEqual(3); // import-free call sites + tick + pill
+  });
+
+  it('the orientation handler suspends on isRecordingRef before any paintLevel write', () => {
+    const onOrientation = cameraSource.slice(cameraSource.indexOf('const onOrientation'));
+    const handler = onOrientation.slice(0, onOrientation.indexOf("window.addEventListener('deviceorientation'"));
+    expect(handler).toContain('if (isRecordingRef.current) return;');
+    expect(handler.indexOf('isRecordingRef.current')).toBeLessThan(handler.indexOf('paintLevel(tilt)'));
+  });
+
+  it('the pre-take countdown interval is NOT dieted (it never runs during a take)', () => {
+    // The countdown effect still polls at its full 150ms rate; the
+    // diet keys on isRecording only, never on countdown state.
+    const countdown = cameraSource.slice(cameraSource.indexOf('countdownDisplayGateRef.current.reset()'));
+    expect(countdown.slice(0, countdown.indexOf('completeCountdown();') + 200)).toContain('}, 150);');
+    expect(countdown.slice(0, 900)).not.toContain('coachIntervalMs');
+  });
+
+  it('EXEMPTION — the diagnostics instruments carry no painter-diet references', () => {
+    for (const source of [diagnosticsSource, frameDropsSource]) {
+      expect(source).not.toContain('coachIntervalMs');
+      expect(source).not.toContain('motionSampleAccepted');
+      expect(source).not.toContain('computeZebra');
+    }
+  });
+
+  it('EXEMPTION — the diagnostics start block still starts the longtask collector + raw recorder, ungated', () => {
+    const block = cameraSource.slice(cameraSource.indexOf('const rawRecorder = createRawFrameSeriesRecorder()'));
+    const startBlock = block.slice(0, block.indexOf('diagLongtaskRef.current = longtasks;') + 60);
+    expect(startBlock).toContain('rawRecorder.start(videoRef.current)');
+    expect(startBlock).toContain('createLongtaskCollector');
+    expect(startBlock).toContain('longtasks.start()');
+    expect(startBlock).not.toContain('isRecording');
+    expect(startBlock).not.toContain('coachIntervalMs');
+    expect(startBlock).not.toContain('motionSampleAccepted');
+    expect(startBlock).not.toContain('computeZebra');
+    // Normal-take frame-drop tracking is untouched.
+    expect(cameraSource).toContain('beginFrameDropTracking');
   });
 });

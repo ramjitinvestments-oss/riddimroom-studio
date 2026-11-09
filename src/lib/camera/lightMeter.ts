@@ -76,6 +76,16 @@ export interface LightSampleInput {
   width: number;
   height: number;
   format?: 'rgba' | 'gray';
+  /**
+   * Whether to do the per-cell zebra bookkeeping (default true —
+   * every existing caller is unchanged). When false (R41 Step 3
+   * Rung A, Part 2: the meter still samples during a take, but the
+   * zebra grid is frozen and its result discarded), the cell
+   * bookkeeping is skipped entirely, state / meanLuma /
+   * clippedFraction are computed identically, and `zebraCells`
+   * comes back all-false at the usual length.
+   */
+  computeZebra?: boolean;
 }
 
 const NO_SIGNAL_RESULT: LightMeterResult = {
@@ -97,9 +107,10 @@ export function analyzeLightSample(input: LightSampleInput): LightMeterResult {
   const pixelCount = Math.min(width * height, Math.floor(data.length / bytesPerPixel));
   if (pixelCount <= 0) return { ...NO_SIGNAL_RESULT, zebraCells: [...NO_SIGNAL_RESULT.zebraCells] };
 
+  const computeZebra = input.computeZebra !== false;
   const cellCount = LIGHT_GRID_COLS * LIGHT_GRID_ROWS;
-  const cellPixels = new Array<number>(cellCount).fill(0);
-  const cellClipped = new Array<number>(cellCount).fill(0);
+  const cellPixels = computeZebra ? new Array<number>(cellCount).fill(0) : null;
+  const cellClipped = computeZebra ? new Array<number>(cellCount).fill(0) : null;
   let lumaSum = 0;
   let clippedTotal = 0;
 
@@ -113,23 +124,27 @@ export function analyzeLightSample(input: LightSampleInput): LightMeterResult {
       luma = 0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2];
     }
     lumaSum += luma;
-    const px = i % width;
-    const py = Math.floor(i / width);
-    const col = Math.min(LIGHT_GRID_COLS - 1, Math.floor((px / width) * LIGHT_GRID_COLS));
-    const row = Math.min(LIGHT_GRID_ROWS - 1, Math.floor((py / height) * LIGHT_GRID_ROWS));
-    const cell = row * LIGHT_GRID_COLS + col;
-    cellPixels[cell] += 1;
-    if (luma >= LIGHT_CLIP_LUMA) {
-      clippedTotal += 1;
-      cellClipped[cell] += 1;
+    const clipped = luma >= LIGHT_CLIP_LUMA;
+    if (clipped) clippedTotal += 1;
+    if (cellPixels && cellClipped) {
+      const px = i % width;
+      const py = Math.floor(i / width);
+      const col = Math.min(LIGHT_GRID_COLS - 1, Math.floor((px / width) * LIGHT_GRID_COLS));
+      const row = Math.min(LIGHT_GRID_ROWS - 1, Math.floor((py / height) * LIGHT_GRID_ROWS));
+      const cell = row * LIGHT_GRID_COLS + col;
+      cellPixels[cell] += 1;
+      if (clipped) cellClipped[cell] += 1;
     }
   }
 
   const meanLuma = lumaSum / pixelCount / 255;
   const clippedFraction = clippedTotal / pixelCount;
-  const zebraCells = cellPixels.map((count, idx) =>
-    count > 0 ? cellClipped[idx] / count > LIGHT_ZEBRA_CELL_FRACTION : false,
-  );
+  const zebraCells =
+    cellPixels && cellClipped
+      ? cellPixels.map((count, idx) =>
+          count > 0 ? cellClipped[idx] / count > LIGHT_ZEBRA_CELL_FRACTION : false,
+        )
+      : new Array<boolean>(cellCount).fill(false);
 
   const state: LightState =
     clippedFraction >= LIGHT_BLOWING_OUT_FRACTION
