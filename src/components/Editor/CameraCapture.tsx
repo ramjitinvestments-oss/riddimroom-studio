@@ -4,10 +4,11 @@ import { useAuth } from '../../context/AuthContext';
 import { recordDoorOpen, recordTakeHealthFromReceipt } from '../../lib/healthEvents';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
+  acquireCameraStream,
   applyProvenFpsCeiling,
   buildCensusAwareAttempts,
+  flipFailureNoticeText,
   grantedFps,
-  isLadderRetryableError,
   negotiateStreamAttempt,
   pickRecorderMimeType,
   previewMirrorTransform,
@@ -577,6 +578,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const [zoomCapability, setZoomCapability] = useState<ZoomCapability | null>(null);
   const [zoomValue, setZoomValue] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  // R41 Step 3 (flip fix) — the plain-words notice shown when a camera
+  // flip could not land and the working camera was kept instead. A
+  // separate state from `error` on purpose: the restore re-opens the
+  // working camera through startStream, which clears `error` at entry
+  // — the notice must survive that so the owner is told the flip
+  // failed rather than left guessing why the picture never changed.
+  const [flipNotice, setFlipNotice] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   /** R36 WS-4 — ref mirror of `isRecording` for timer/sampler closures and constraint gates. */
   const isRecordingRef = useRef(false);
@@ -682,6 +690,19 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   }, [fpsChoice]);
   /** True once the user taps an fps chip this session — a saved device profile never overrides an explicit choice. */
   const userFpsChoiceRef = useRef(false);
+  // R41 Step 3 (flip fix) — startStream concurrency guard + the facing
+  // of the last stream that actually opened. startStream is async and
+  // several callers can overlap (the mount effect, the R32 profile-fps
+  // effect restarting the stream a tick later, a flip during an
+  // in-flight open): without a generation check, the call that
+  // resolved LAST won — stopping nothing (stopStream only stops the
+  // stream in streamRef) and leaking its rival's stream, which kept
+  // holding its camera and made later flips contend for a busy HAL.
+  // Every startStream entry bumps the generation; a call that finds
+  // itself superseded stops its own stream and bows out silently.
+  const streamGenerationRef = useRef(0);
+  /** The facing of the last successfully opened single-camera stream — the camera a failed flip restores. */
+  const workingFacingRef = useRef<CaptureFacingMode>('user');
   /** Two-step lock: the quality + fps captured when step 1 started recording; step 2 must reuse them. */
   const twoPassLockRef = useRef<{ quality: CaptureQualityChoice; fps: CaptureFpsChoice } | null>(null);
   /** The step-1 take's receipt, carried into the step-2 (pendingDual) review. */
@@ -976,6 +997,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   }, []);
 
   const startStream = useCallback(async (override?: { quality: CaptureQualityChoice; fps: CaptureFpsChoice }) => {
+    // R41 Step 3 (flip fix) — claim a new generation FIRST: any older
+    // startStream still awaiting getUserMedia is superseded from this
+    // moment and will stop its own stream instead of leaking it or
+    // overwriting this call's bookkeeping when it resolves late.
+    const myGeneration = ++streamGenerationRef.current;
     setError(null);
     setIsReady(false);
     stopStream();
@@ -1024,56 +1050,104 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       ),
       userFpsChoiceRef.current ? null : provenFpsCeilingForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode),
     );
-    let stream: MediaStream | null = null;
-    let lastError: unknown = null;
-    for (const attempt of attempts) {
-      try {
-        // R41 WS-B — two-stage negotiation per rung (AUDIT F01):
-        // stage 1 is this rung's ideal ask (unchanged); after it
-        // settles, a grant below the rung earns ONE exact retry of
-        // that rung, and a working stage-1 stream is never lost to
-        // a failed or worse exact attempt. Setup only — nothing here
-        // runs during a recording.
-        const negotiated = await negotiateStreamAttempt({
-          attempt,
-          getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
-        });
-        stream = negotiated.stream;
-        const askedVideo = attempt.constraints.video as MediaTrackConstraints | undefined;
-        const idealDim = (c: unknown): number =>
-          c && typeof c === 'object' && typeof (c as { ideal?: unknown }).ideal === 'number'
-            ? ((c as { ideal: number }).ideal as number)
-            : 0;
-        lastNegotiationRef.current = {
-          asked: {
-            shortSide: attempt.shortSide,
-            frameRate: attempt.frameRate,
-            width: idealDim(askedVideo?.width),
-            height: idealDim(askedVideo?.height),
-          },
-          granted: negotiated.grantedSettings,
-          exactRetried: negotiated.exactRetried,
-          usedExact: negotiated.usedExact,
-        };
-        break;
-      } catch (err) {
-        lastError = err;
-        if (!isLadderRetryableError(err)) break;
+    // R41 WS-B — two-stage negotiation per rung (AUDIT F01): stage 1
+    // is the rung's ideal ask (unchanged); after it settles, a grant
+    // below the rung earns ONE exact retry of that rung, and a working
+    // stage-1 stream is never lost to a failed or worse exact attempt.
+    // Setup only — nothing here runs during a recording.
+    //
+    // R41 Step 3 (flip fix) — the walk itself now lives in
+    // acquireCameraStream (captureQuality): contention errors
+    // (NotReadableError / AbortError — the camera still releasing, or
+    // held by a leaked stream) fall through rungs instead of aborting
+    // the ladder; if every negotiated rung fails, the ladder runs
+    // bare (no exact retry — its second concurrent open is itself a
+    // contention source), then a plain facingMode-only ask. A flip
+    // therefore lands unless the camera itself refuses every form.
+    let acquired: Awaited<ReturnType<typeof acquireCameraStream>>;
+    try {
+      acquired = await acquireCameraStream({
+        attempts,
+        facingMode,
+        getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+        negotiate: (attempt) =>
+          negotiateStreamAttempt({ attempt, getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c) }),
+      });
+    } catch (err) {
+      // A superseded call stays silent: the newer call owns the screen.
+      if (myGeneration !== streamGenerationRef.current) return;
+      if (facingMode !== workingFacingRef.current) {
+        // The ask was a FLIP (or a two-pass facing change) and even
+        // the plain ask refused: revert the facing state to the last
+        // camera that actually opened — the effect re-runs
+        // startStream for it, restoring a working picture — and say
+        // plainly that the switch failed. Never a dead screen, never
+        // a silent stay.
+        setFlipNotice(flipFailureNoticeText(facingMode, workingFacingRef.current));
+        setFacingMode(workingFacingRef.current);
+        return;
       }
-    }
-    if (!stream) {
-      const err: any = lastError;
+      const e: any = err;
       setError(
-        err?.name === 'NotAllowedError'
+        e?.name === 'NotAllowedError'
           ? 'Camera/microphone access was denied. Allow access in your browser settings, or use file upload instead.'
-          : `Could not start the camera: ${err?.message || err}`,
+          : `Could not start the camera: ${e?.message || e}`,
       );
       return;
     }
+    if (myGeneration !== streamGenerationRef.current) {
+      // Superseded while the camera was opening: stop OUR stream (it
+      // was never put in streamRef, so nothing else will ever stop
+      // it — leaving it live is the leak this guard exists to close)
+      // and let the newer call's stream win.
+      acquired.stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // Best-effort cleanup of a stream nobody will use.
+        }
+      });
+      return;
+    }
+    const stream = acquired.stream;
+    {
+      const attempt = acquired.attempt;
+      const askedVideo = attempt.constraints.video as MediaTrackConstraints | undefined;
+      const idealDim = (c: unknown): number =>
+        c && typeof c === 'object' && typeof (c as { ideal?: unknown }).ideal === 'number'
+          ? ((c as { ideal: number }).ideal as number)
+          : 0;
+      lastNegotiationRef.current = {
+        asked: {
+          shortSide: attempt.shortSide,
+          frameRate: attempt.frameRate,
+          width: idealDim(askedVideo?.width),
+          height: idealDim(askedVideo?.height),
+        },
+        granted: acquired.grantedSettings,
+        exactRetried: acquired.negotiated?.exactRetried ?? false,
+        usedExact: acquired.negotiated?.usedExact ?? false,
+      };
+    }
+    workingFacingRef.current = facingMode;
     streamRef.current = stream;
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
       await videoRef.current.play().catch(() => {});
+    }
+    if (myGeneration !== streamGenerationRef.current) {
+      // Superseded during play(): the newer call owns streamRef and
+      // the screen now — stop only OUR tracks (never stopStream(),
+      // which would kill the newer call's stream) and bow out before
+      // the census/warm-up bookkeeping can run against this stream.
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // Best-effort cleanup of a stream nobody will use.
+        }
+      });
+      return;
     }
     // R24 WS-P4a: surface the track's real zoom capability, if any.
     // Silent absence elsewhere (notably iOS Safari) — no control renders.
@@ -2856,6 +2930,23 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             {error}
           </div>
         )}
+        {/* R41 Step 3 (flip fix) — a failed flip keeps the working
+            camera live; this banner is how the owner knows the switch
+            didn't happen. Dismissible; also cleared on the next flip
+            attempt. */}
+        {flipNotice && !error && (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2 max-w-[92%] rounded-lg bg-amber-500/95 px-3 py-2 text-center text-xs font-semibold text-black shadow-lg">
+            <span>{flipNotice}</span>
+            <button
+              type="button"
+              onClick={() => setFlipNotice(null)}
+              aria-label="Dismiss"
+              className="shrink-0 rounded px-1.5 py-0.5 text-sm font-bold leading-none hover:bg-black/10"
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
 
       {/* R31 — two-pass step headings, above whichever controls the
@@ -3521,7 +3612,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           </button>
         ) : isStep2Phase ? null : (
           <button
-            onClick={() => setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))}
+            onClick={() => {
+              // A fresh flip attempt clears any earlier flip-failure
+              // notice; if this one fails too, startStream raises a
+              // new one when it restores the working camera.
+              setFlipNotice(null);
+              setFacingMode((m) => (m === 'user' ? 'environment' : 'user'));
+            }}
             disabled={isRecording}
             className="min-h-11 px-4 inline-flex items-center justify-center text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 disabled:opacity-40 rounded-lg text-white"
           >

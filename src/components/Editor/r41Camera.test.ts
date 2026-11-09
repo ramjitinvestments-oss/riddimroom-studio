@@ -100,7 +100,7 @@ describe('R41 Step 3 Rung A — proven fps ceiling wiring', () => {
       'userFpsChoiceRef.current ? null : provenFpsCeilingForFacing(loadDeviceProfiles(browserLocalStorage()), facingMode)',
     );
     const startStream = cameraSource.slice(cameraSource.indexOf('const startStream'));
-    const window = startStream.slice(0, startStream.indexOf('let stream: MediaStream | null = null'));
+    const window = startStream.slice(0, startStream.indexOf('acquireCameraStream({'));
     expect(window).toContain('buildCensusAwareAttempts');
     expect(window).toContain('applyProvenFpsCeiling');
     // The ceiling composes AFTER (around) the census shaping.
@@ -214,5 +214,43 @@ describe('R41 Step 3 Rung A, Part 2 — in-take painter diet (F03/F04/F05)', () 
     expect(startBlock).not.toContain('computeZebra');
     // Normal-take frame-drop tracking is untouched.
     expect(cameraSource).toContain('beginFrameDropTracking');
+  });
+});
+
+describe('R41 Step 3 (flip fix) — flip-proof stream acquisition wiring', () => {
+  it('startStream acquires through acquireCameraStream with the two-stage negotiation as its seam', () => {
+    expect(cameraSource).toContain('acquireCameraStream');
+    expect(cameraSource).toContain('negotiate: (attempt) =>');
+    expect(cameraSource).toContain('negotiateStreamAttempt');
+    // The old inline walk — and its two-error-only predicate — is gone
+    // from the component: contention errors no longer abort the ladder.
+    expect(cameraSource).not.toContain('isLadderRetryableError');
+  });
+
+  it('startStream is generation-guarded: a superseded call stops its own stream and bows out', () => {
+    expect(cameraSource).toContain('streamGenerationRef');
+    expect(cameraSource).toContain('const myGeneration = ++streamGenerationRef.current;');
+    expect(cameraSource).toContain('if (myGeneration !== streamGenerationRef.current) return;');
+    // The superseded stream is stopped directly, never via stopStream
+    // (which would kill the newer call's stream).
+    expect(cameraSource).toContain('acquired.stream.getTracks().forEach((track) => {');
+  });
+
+  it('a fully-failed flip reverts to the last working facing and raises the plain-words notice', () => {
+    expect(cameraSource).toContain('workingFacingRef');
+    expect(cameraSource).toContain('setFlipNotice(flipFailureNoticeText(facingMode, workingFacingRef.current));');
+    expect(cameraSource).toContain('setFacingMode(workingFacingRef.current);');
+    // Only a successful open moves the working-facing marker.
+    expect(cameraSource).toContain('workingFacingRef.current = facingMode;');
+  });
+
+  it('the flip button clears a stale notice before toggling, and the notice renders dismissibly', () => {
+    const labelAt = cameraSource.indexOf('Flip camera');
+    const buttonWindow = cameraSource.slice(Math.max(0, labelAt - 700), labelAt);
+    expect(buttonWindow).toContain('setFlipNotice(null);');
+    expect(buttonWindow).toContain("setFacingMode((m) => (m === 'user' ? 'environment' : 'user'))");
+    // The notice itself renders from state with its own dismiss.
+    expect(cameraSource).toContain('{flipNotice && !error && (');
+    expect(cameraSource).toContain("{flipNotice}");
   });
 });

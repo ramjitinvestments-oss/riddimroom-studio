@@ -464,6 +464,146 @@ export function applyProvenFpsCeiling(
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* R41 Step 3 — flip-proof stream acquisition                          */
+/*                                                                     */
+/* Field failure (owner's S25 Ultra, Rung A build): "Camera won't     */
+/* flip to rear camera." The single-camera walk had three holes the   */
+/* dual path had already learned to avoid:                            */
+/*                                                                     */
+/* 1. The ladder only fell through rungs on OverconstrainedError /    */
+/*    NotFoundError. On a single-camera-at-a-time HAL, switching      */
+/*    cameras while the previous camera is still releasing (or a      */
+/*    leaked stream still holds it) rejects with NotReadableError,    */
+/*    and a raced camera-service abort with AbortError — the exact    */
+/*    pair dualCapture.isDualRetryableError already treats as         */
+/*    "step down and try the next thing". Here they aborted the       */
+/*    whole ladder on rung 1 — after startStream had ALREADY stopped  */
+/*    the working stream — leaving a dead screen on a facing state    */
+/*    that no longer matched any open camera.                         */
+/* 2. startStream had no concurrency guard: two overlapping calls     */
+/*    (e.g. the mount-time stream and the R32 profile-fps effect's    */
+/*    restart a tick later) could both hold streams; stopStream only  */
+/*    ever stops the stream in streamRef, so the loser's stream       */
+/*    LEAKED — still holding its camera — and whichever call resolved */
+/*    last overwrote the bookkeeping, whatever the screen said. A     */
+/*    leaked front stream makes every later rear open contend for a   */
+/*    busy HAL. (The component now carries the generation guard;      */
+/*    this module carries the walk it guards.)                        */
+/* 3. There was no last-resort ask: when every shaped rung failed,    */
+/*    capture simply gave up instead of asking for the facing alone.  */
+/*                                                                     */
+/* The walk below fixes 1 and 3 in pure, testable form:               */
+/* - Pass 1: the negotiated ladder exactly as before (ideal ask +     */
+/*   one exact retry per rung), except fallthrough errors now         */
+/*   include the contention pair. Fatal errors (permission and        */
+/*   friends) still abort immediately — no plainer ask fixes those.   */
+/* - Pass 2: the same ladder WITHOUT negotiation — the exact retry's  */
+/*   second concurrent open is itself a contention source on this     */
+/*   HAL class, so dropping it is a genuine step down, not a repeat.  */
+/* - Pass 3: the plain ask — facingMode only, the browser picks a     */
+/*   safe size. Only when even this throws does acquisition fail.     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Errors that mean "this ask didn't land — fall through to the next
+ * rung / the next pass". Wider than `isLadderRetryableError` (kept
+ * untouched for its existing callers/tests) by the contention pair
+ * the dual path already documented: `NotReadableError` (camera busy
+ * or still releasing) and `AbortError` (raced camera-service abort).
+ * `NotAllowedError` is deliberately NOT here: a permission denial is
+ * identical at every rung and every pass.
+ */
+export function isStreamFallthroughError(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  return (
+    name === 'OverconstrainedError' ||
+    name === 'NotFoundError' ||
+    name === 'NotReadableError' ||
+    name === 'AbortError'
+  );
+}
+
+/**
+ * The last-resort attempt: facing mode ONLY — no size, no frame rate,
+ * no aspect — so the browser picks whatever that camera safely
+ * offers. shortSide/frameRate are 0 ("no target"): bookkeeping built
+ * on it must rely on the granted read-back, never on the ask.
+ */
+export function buildPlainFacingAttempt(facingMode: CaptureFacingMode): CaptureAttempt {
+  return {
+    shortSide: 0,
+    frameRate: 0,
+    isFallback: true,
+    constraints: { video: { facingMode }, audio: true },
+  };
+}
+
+/** The granted settings of an already-open stream (the negotiation's read-back, exported for the fallback passes). */
+export function readGrantedSettings(stream: MediaStream): GrantedTrackSettings | null {
+  return defaultReadSettings(stream);
+}
+
+/** The plain-words notice shown when a camera flip could not land and the working camera was kept. */
+export function flipFailureNoticeText(requested: CaptureFacingMode, working: CaptureFacingMode): string {
+  const name = (f: CaptureFacingMode): string => (f === 'environment' ? 'back' : 'front');
+  return `Couldn't switch to the ${name(requested)} camera — you're still on the ${name(working)} camera.`;
+}
+
+export interface AcquiredCameraStream {
+  /** The stream to use. */
+  stream: MediaStream;
+  /** The attempt that produced it (the plain attempt on pass 3). */
+  attempt: CaptureAttempt;
+  /** The two-stage negotiation outcome — pass 1 only; null on the fallback passes. */
+  negotiated: NegotiatedStream | null;
+  /** The granted settings read back from the winning stream. */
+  grantedSettings: GrantedTrackSettings | null;
+  /** Which pass produced the stream: 1 negotiated ladder, 2 bare ladder, 3 plain facing-only ask. */
+  pass: 1 | 2 | 3;
+}
+
+/**
+ * Acquire a camera stream flip-proof: negotiated ladder → bare
+ * ladder → plain facing-only ask (see the section header). Resolves
+ * with the first stream any pass produces; rejects with the plain
+ * ask's error when every pass failed, or immediately with a fatal
+ * (non-fallthrough) error from passes 1–2. The platform calls sit
+ * behind injectable seams exactly like `negotiateStreamAttempt`'s.
+ */
+export async function acquireCameraStream(opts: {
+  attempts: CaptureAttempt[];
+  facingMode: CaptureFacingMode;
+  getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
+  negotiate?: (attempt: CaptureAttempt) => Promise<NegotiatedStream>;
+}): Promise<AcquiredCameraStream> {
+  const negotiate =
+    opts.negotiate ??
+    ((attempt: CaptureAttempt) => negotiateStreamAttempt({ attempt, getUserMedia: opts.getUserMedia }));
+  // Pass 1 — the negotiated ladder (ideal ask + one exact retry per rung).
+  for (const attempt of opts.attempts) {
+    try {
+      const negotiated = await negotiate(attempt);
+      return { stream: negotiated.stream, attempt, negotiated, grantedSettings: negotiated.grantedSettings, pass: 1 };
+    } catch (err) {
+      if (!isStreamFallthroughError(err)) throw err;
+    }
+  }
+  // Pass 2 — the same ladder bare: no exact retry, no second open.
+  for (const attempt of opts.attempts) {
+    try {
+      const stream = await opts.getUserMedia(attempt.constraints);
+      return { stream, attempt, negotiated: null, grantedSettings: readGrantedSettings(stream), pass: 2 };
+    } catch (err) {
+      if (!isStreamFallthroughError(err)) throw err;
+    }
+  }
+  // Pass 3 — the plain ask: facing mode only, browser's safe size.
+  const plain = buildPlainFacingAttempt(opts.facingMode);
+  const stream = await opts.getUserMedia(plain.constraints);
+  return { stream, attempt: plain, negotiated: null, grantedSettings: readGrantedSettings(stream), pass: 3 };
+}
+
 export type RecorderBitrateTier = 'uhd' | 'qhd' | 'hd';
 
 /**
