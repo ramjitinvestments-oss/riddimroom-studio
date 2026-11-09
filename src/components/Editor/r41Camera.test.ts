@@ -254,3 +254,66 @@ describe('R41 Step 3 (flip fix) — flip-proof stream acquisition wiring', () =>
     expect(cameraSource).toContain("{flipNotice}");
   });
 });
+
+describe('R41 Step 3 Rungs B + C — steadying wiring + the diagnostics-raw guarantee', () => {
+  const steadyTakeSource = readFileSync(join(HERE, '../../lib/camera/steadyTake.ts'), 'utf8');
+
+  it('every project-media save path routes its take through the steady step', () => {
+    // The single-camera stop, the dual stop (BOTH takes), the
+    // two-pass step-2 stop, and the diagnostics "Use this clip"
+    // confirm — five call sites await the steady helper.
+    expect(cameraSource).toContain("import { steadyCameraTake } from '../../lib/camera/steadyTake';");
+    expect(cameraSource).toContain('const steadyTakeForProject = useCallback(');
+    expect(cameraSource.split('await steadyTakeForProject(').length - 1).toBe(5);
+    // The helper targets the take's own granted rate and restates
+    // the receipt with the outcome for the saved file.
+    expect(cameraSource).toContain('steadyCameraTake(blob, { targetFps: receipt.actualFps })');
+    expect(cameraSource).toContain("timingOutcome: outcome.status === 'steadied' ? 'steadied' : 'original'");
+  });
+
+  it('the steadying state covers the surface while a take is prepared', () => {
+    expect(cameraSource).toContain('const [steadyingTake, setSteadyingTake] = useState(false);');
+    expect(cameraSource).toContain('Steadying your take…');
+    expect(cameraSource).toContain('Evening out the frame timing before it joins your project.');
+  });
+
+  it('the receipt lines render: timing outcome + orientation note (neither amber)', () => {
+    expect(cameraSource).toContain('{orientationNote && <p className="text-[11px] text-white/60">{orientationNote}</p>}');
+    expect(cameraSource).toContain('{timingLine && <p className="text-[11px] text-white/60">{timingLine}</p>}');
+  });
+
+  it('the negotiation snapshot carries the orientation verdict into the receipt', () => {
+    expect(cameraSource).toContain('orientationMismatch: boolean;');
+    expect(cameraSource).toContain('orientationMismatch: negotiation?.orientationMismatch,');
+    expect(cameraSource).toContain('acquired.negotiated?.orientationMismatch ??');
+  });
+
+  it('GUARANTEE: the diagnostics "Save the test clip" download delivers the RAW recorded blob — no steadying anywhere near it', () => {
+    const downloadAt = cameraSource.indexOf('const downloadDiagnosticsClip');
+    const useAt = cameraSource.indexOf('const useDiagnosticsClip');
+    expect(downloadAt).toBeGreaterThan(-1);
+    expect(useAt).toBeGreaterThan(downloadAt);
+    const downloadBody = cameraSource.slice(downloadAt, useAt);
+    expect(downloadBody).toContain('downloadBlobFile(diagResult.blob');
+    expect(downloadBody).not.toContain('steadyTakeForProject');
+    expect(downloadBody).not.toContain('steadyCameraTake');
+    // And the steady module itself never touches the diagnostics
+    // evidence path: no import of it, no reference to it.
+    expect(steadyTakeSource).not.toContain("from './diagnostics'");
+    expect(steadyTakeSource).not.toContain('diagResult');
+    expect(diagnosticsSource).not.toContain('steadyCameraTake');
+  });
+
+  it('the diagnostics RUN holds the RAW recorded blob and returns before any steadying hook', () => {
+    // In the recorder's onstop, the diagnostics branch stores the
+    // recorder's own assembled blob — object-identical, unsteadied —
+    // and returns; the steady step lives only in the project-media
+    // tail below it.
+    const diagResultAt = cameraSource.indexOf('setDiagResult({ pack, blob, url: URL.createObjectURL(blob), receipt });');
+    const steadyAt = cameraSource.indexOf('const final = await steadyTakeForProject(blob, receipt);');
+    expect(diagResultAt).toBeGreaterThan(-1);
+    expect(steadyAt).toBeGreaterThan(diagResultAt);
+    const diagTail = cameraSource.slice(diagResultAt, diagResultAt + 120);
+    expect(diagTail).toContain('return;');
+  });
+});

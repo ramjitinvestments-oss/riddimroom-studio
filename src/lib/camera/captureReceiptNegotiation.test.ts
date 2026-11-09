@@ -3,6 +3,8 @@ import {
   askedVsGrantedLine,
   buildCaptureReceipt,
   captureReceiptAskedVsGranted,
+  captureReceiptOrientationNote,
+  captureReceiptTimingLine,
   formatCaptureReceipt,
   receiptGrantBelowAsked,
   resolutionLabelForShortSide,
@@ -99,5 +101,104 @@ describe('receipt asked-vs-granted (R41 WS-B)', () => {
     });
     expect(receipt.askedShortSide).toBe(0);
     expect(receipt.askedFps).toBe(0);
+  });
+});
+
+describe('R41 Step 3 Rung C — the orientation note on the receipt', () => {
+  it('the phone\'s normal shape: a portrait ask granted landscape reads the upright-framing line', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3060, height: 2160, frameRate: 30 },
+      asked: { shortSide: 2160, frameRate: 30, width: 2160, height: 3840 },
+      orientationMismatch: true,
+    });
+    expect(receipt.askedWidth).toBe(2160);
+    expect(receipt.askedHeight).toBe(3840);
+    expect(receipt.orientationMismatch).toBe(true);
+    expect(captureReceiptOrientationNote(receipt)).toBe(
+      'Phone gave a sideways (landscape) picture — your project will frame it upright',
+    );
+    expect(formatCaptureReceipt(receipt).orientationNote).toBe(
+      'Phone gave a sideways (landscape) picture — your project will frame it upright',
+    );
+  });
+
+  it('a landscape ask granted portrait reads the mirrored line', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 1080, height: 1920, frameRate: 30 },
+      asked: { shortSide: 1080, frameRate: 30, width: 1920, height: 1080 },
+      orientationMismatch: true,
+    });
+    expect(captureReceiptOrientationNote(receipt)).toBe(
+      'Phone gave an upright (portrait) picture — your project will frame it to fit',
+    );
+  });
+
+  it('no mismatch (or none recorded) reads no note — matched takes stay quiet', () => {
+    const matched = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 2160, height: 3840, frameRate: 30 },
+      asked: { shortSide: 2160, frameRate: 30, width: 2160, height: 3840 },
+      orientationMismatch: false,
+    });
+    expect(captureReceiptOrientationNote(matched)).toBeNull();
+    const unrecorded = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3060, height: 2160, frameRate: 30 },
+    });
+    expect(unrecorded.orientationMismatch).toBeUndefined();
+    expect(captureReceiptOrientationNote(unrecorded)).toBeNull();
+    expect(formatCaptureReceipt(unrecorded).orientationNote).toBeNull();
+  });
+
+  it('a mismatch with unknown asked dimensions stays silent rather than guessing', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3060, height: 2160, frameRate: 30 },
+      orientationMismatch: true,
+    });
+    expect(captureReceiptOrientationNote(receipt)).toBeNull();
+  });
+});
+
+describe('R41 Step 3 Rung B — the timing line on the receipt', () => {
+  it('a steadied take reads "Steadied to an even 30fps" (the granted rate)', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3000, height: 2160, frameRate: 30 },
+      timingOutcome: 'steadied',
+    });
+    expect(captureReceiptTimingLine(receipt)).toBe('Steadied to an even 30fps');
+    expect(formatCaptureReceipt(receipt).timingLine).toBe('Steadied to an even 30fps');
+  });
+
+  it('the steadied rate wins over the recorded rate when both exist', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3000, height: 2160, frameRate: 30 },
+      timingOutcome: 'steadied',
+      steadiedFps: 60,
+    });
+    expect(captureReceiptTimingLine(receipt)).toBe('Steadied to an even 60fps');
+  });
+
+  it('a kept original reads "Original timing kept" — whatever the reason', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3000, height: 2160, frameRate: 30 },
+      timingOutcome: 'original',
+    });
+    expect(captureReceiptTimingLine(receipt)).toBe('Original timing kept');
+  });
+
+  it('a take with no recorded outcome (older receipts) reads no timing line', () => {
+    const receipt = buildCaptureReceipt({
+      ...base,
+      trackSettings: { width: 3000, height: 2160, frameRate: 30 },
+    });
+    expect(receipt.timingOutcome).toBeUndefined();
+    expect(captureReceiptTimingLine(receipt)).toBeNull();
+    expect(formatCaptureReceipt(receipt).timingLine).toBeNull();
   });
 });

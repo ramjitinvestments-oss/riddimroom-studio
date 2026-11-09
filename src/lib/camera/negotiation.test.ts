@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  askedDimensionsOf,
   buildCaptureAttempts,
   buildCensusAwareAttempts,
   buildExactAttempt,
@@ -9,6 +10,8 @@ import {
   isGrantBelowAsk,
   negotiateStreamAttempt,
   negotiationDecision,
+  orientationMismatchBetween,
+  orientationOfSize,
   type CaptureAttempt,
 } from './captureQuality';
 
@@ -266,5 +269,139 @@ describe('buildCensusAwareAttempts — census shapes the first rung only', () =>
     expect(buildCensusAwareAttempts(hdOpts, { widthMax: 1920, heightMax: 1080, frameRateMax: 30 })).toEqual(
       buildCaptureAttempts(hdOpts),
     );
+  });
+});
+
+describe('R41 Step 3 Rung C — orientation-honest judgement', () => {
+  const ASK_4K30_PORTRAIT = buildCaptureAttempts({
+    canvasWidth: 1080,
+    canvasHeight: 1920,
+    facingMode: 'environment',
+    quality: '4k',
+    frameRate: 30,
+  })[0];
+
+  it('names orientations; square is its own; unusable sizes are unknown', () => {
+    expect(orientationOfSize(2160, 3840)).toBe('portrait');
+    expect(orientationOfSize(3060, 2160)).toBe('landscape');
+    expect(orientationOfSize(1000, 1000)).toBe('square');
+    expect(orientationOfSize(0, 100)).toBeNull();
+    expect(orientationOfSize(Number.NaN, 100)).toBeNull();
+  });
+
+  it('a landscape grant mismatches a portrait ask; an unknown side never judges', () => {
+    expect(orientationMismatchBetween({ width: 2160, height: 3840 }, { width: 3060, height: 2160 })).toBe(true);
+    expect(orientationMismatchBetween({ width: 2160, height: 3840 }, { width: 2160, height: 3840 })).toBe(false);
+    expect(orientationMismatchBetween({ width: 0, height: 0 }, { width: 3060, height: 2160 })).toBe(false);
+    expect(orientationMismatchBetween({ width: 2160, height: 3840 }, { width: 0, height: 0 })).toBe(false);
+    expect(orientationMismatchBetween({ width: 1000, height: 1000 }, { width: 1000, height: 1000 })).toBe(false);
+    expect(orientationMismatchBetween({ width: 1000, height: 1000 }, { width: 2000, height: 1000 })).toBe(true);
+  });
+
+  it('reads the asked dimensions from a rung (ideal values; absent when the rung asks none)', () => {
+    expect(askedDimensionsOf(ASK_4K30_PORTRAIT)).toEqual({ width: 2160, height: 3840 });
+    const bare = askedDimensionsOf({ constraints: { facingMode: { ideal: 'user' } } } as unknown as CaptureAttempt);
+    expect(bare.width).toBeUndefined();
+    expect(bare.height).toBeUndefined();
+  });
+
+  it('a landscape grant that MEETS size and fps is still NOT fully met — the orientation alone triggers the retry', () => {
+    const decision = negotiationDecision(ASK_4K60, { width: 4096, height: 2160, frameRate: 60 });
+    // Without asked dimensions (the old call shape) the same grant is met.
+    expect(decision.needsExactRetry).toBe(false);
+    expect(decision.orientationMismatch).toBe(false);
+    const withDims = negotiationDecision({ ...ASK_4K60, width: 2160, height: 3840 }, { width: 4096, height: 2160, frameRate: 60 });
+    expect(withDims.needsExactRetry).toBe(true);
+    expect(withDims.orientationMismatch).toBe(true);
+    expect(withDims.belowOn).toEqual(['orientation']);
+  });
+
+  it('a portrait grant for a portrait ask stays met with no retry (round-1 shape, mirrored)', () => {
+    const decision = negotiationDecision({ ...ASK_4K60, width: 2160, height: 3840 }, { width: 2160, height: 3840, frameRate: 60 });
+    expect(decision.needsExactRetry).toBe(false);
+    expect(decision.orientationMismatch).toBe(false);
+  });
+
+  it('the round-1 shape: an HD portrait ask granted landscape retries once and records the mismatch', async () => {
+    const hdPortraitAsk = buildCaptureAttempts({
+      canvasWidth: 1080,
+      canvasHeight: 1920,
+      facingMode: 'environment',
+      quality: 'hd',
+      frameRate: 30,
+    })[0];
+    const stage1 = fakeStream({ width: 1920, height: 1080, frameRate: 30 });
+    const exact = fakeStream({ width: 1920, height: 1080, frameRate: 30 });
+    const calls: unknown[] = [];
+    const result = await negotiateStreamAttempt({
+      attempt: hdPortraitAsk,
+      getUserMedia: async (constraints) => {
+        calls.push(constraints);
+        return (calls.length === 1 ? stage1 : exact).stream;
+      },
+    });
+    // Exactly one exact retry, the un-worse exact grant wins, and the
+    // mismatch survives into the outcome (the phone still gave
+    // landscape — the receipt must say so).
+    expect(calls).toHaveLength(2);
+    expect(result.exactRetried).toBe(true);
+    expect(result.usedExact).toBe(true);
+    expect(result.orientationMismatch).toBe(true);
+  });
+
+  it('an exact retry that lands the asked orientation clears the mismatch', async () => {
+    const stage1 = fakeStream({ width: 3000, height: 2160, frameRate: 30 });
+    const exact = fakeStream({ width: 2160, height: 3840, frameRate: 30 });
+    const calls: unknown[] = [];
+    const result = await negotiateStreamAttempt({
+      attempt: ASK_4K30_PORTRAIT,
+      getUserMedia: async (constraints) => {
+        calls.push(constraints);
+        return (calls.length === 1 ? stage1 : exact).stream;
+      },
+    });
+    expect(result.usedExact).toBe(true);
+    expect(result.orientationMismatch).toBe(false);
+  });
+
+  it('a failed exact retry keeps the ideal grant WITH the mismatch recorded (one retry, never two)', async () => {
+    const stage1 = fakeStream({ width: 3060, height: 2160, frameRate: 30 });
+    let calls = 0;
+    const result = await negotiateStreamAttempt({
+      attempt: ASK_4K30_PORTRAIT,
+      getUserMedia: async () => {
+        calls += 1;
+        if (calls === 1) return stage1.stream;
+        throw new Error('OverconstrainedError');
+      },
+    });
+    expect(calls).toBe(2);
+    expect(result.usedExact).toBe(false);
+    expect(result.exactRetried).toBe(true);
+    expect(result.orientationMismatch).toBe(true);
+    expect(result.stream).toBe(stage1.stream);
+    expect(stage1.stopCount()).toBe(0);
+  });
+
+  it('both current 4K grants (rear 3060 / front 3000, landscape) mismatch the portrait ask — Rung A + flip regression pins', async () => {
+    for (const grantedWidth of [3060, 3000]) {
+      const stage1 = fakeStream({ width: grantedWidth, height: 2160, frameRate: 30 });
+      const exact = fakeStream({ width: grantedWidth, height: 2160, frameRate: 30 });
+      const calls: unknown[] = [];
+      const result = await negotiateStreamAttempt({
+        attempt: ASK_4K30_PORTRAIT,
+        getUserMedia: async (constraints) => {
+          calls.push(constraints);
+          return (calls.length === 1 ? stage1 : exact).stream;
+        },
+      });
+      expect(result.orientationMismatch).toBe(true);
+      expect(result.exactRetried).toBe(true);
+      // The ladder still asks the SAME portrait size (no change to
+      // what is asked): the exact twin asks 2160×3840 exactly.
+      const exactVideo = buildExactAttempt(ASK_4K30_PORTRAIT).constraints.video as MediaTrackConstraints;
+      expect(exactVideo.width).toEqual({ exact: 2160 });
+      expect(exactVideo.height).toEqual({ exact: 3840 });
+    }
   });
 });

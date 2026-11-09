@@ -10,6 +10,7 @@ import {
   flipFailureNoticeText,
   grantedFps,
   negotiateStreamAttempt,
+  orientationMismatchBetween,
   pickRecorderMimeType,
   previewMirrorTransform,
   recorderOptionsForTrackSettings,
@@ -20,6 +21,7 @@ import {
   type GrantedTrackSettings,
   type ZoomCapability,
 } from '../../lib/camera/captureQuality';
+import { steadyCameraTake } from '../../lib/camera/steadyTake';
 import {
   createFrameDropTracker,
   createRawFrameSeriesRecorder,
@@ -488,7 +490,8 @@ function provenMimeFor(facing: CaptureFacingMode): string | undefined {
  * The strings themselves come from the lib formatter.
  */
 function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: string }) {
-  const { summary, details, technicalDetails, askedVsGranted, grantBelowAsked } = formatCaptureReceipt(receipt);
+  const { summary, details, technicalDetails, askedVsGranted, grantBelowAsked, timingLine, orientationNote } =
+    formatCaptureReceipt(receipt);
   const [showDetails, setShowDetails] = useState(false);
   // R32 Phase 3 — dropped-frame review warning: advisory only, and
   // only when the tracker actually measured drops past the threshold.
@@ -505,6 +508,13 @@ function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: str
       {askedVsGranted && (
         <p className={`text-[11px] ${grantBelowAsked ? 'text-amber-300' : 'text-white/60'}`}>{askedVsGranted}</p>
       )}
+      {/* R41 Step 3 Rung C — the orientation note sits in the summary
+          area too: plain and non-alarming (never amber), it simply
+          says the phone framed the picture differently than asked. */}
+      {orientationNote && <p className="text-[11px] text-white/60">{orientationNote}</p>}
+      {/* R41 Step 3 Rung B — the frame-timing outcome of the save:
+          steadied onto an even grid, or the original timing kept. */}
+      {timingLine && <p className="text-[11px] text-white/60">{timingLine}</p>}
       {details && <p className="text-[11px] text-white/50">{details}</p>}
       {dropWarning && <p className="text-[11px] text-amber-300">{dropWarning}</p>}
       {technicalDetails && (
@@ -604,6 +614,14 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     if (!pendingVideo) return;
     return () => URL.revokeObjectURL(pendingVideo.url);
   }, [pendingVideo]);
+
+  // R41 Step 3 Rung B — while a finished take is being steadied to
+  // an even frame rate (see steadyTakeForProject below), the whole
+  // camera surface is covered by a plain "Steadying your take…"
+  // state: the review only appears once the file that will actually
+  // join the project exists, so what the user reviews IS what the
+  // project gets, and the receipt can state the outcome honestly.
+  const [steadyingTake, setSteadyingTake] = useState(false);
 
   // R29 — dual-camera state. All of it stays null/false/0 in single
   // mode, so the single-camera behaviour is unchanged.
@@ -723,6 +741,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     granted: GrantedTrackSettings | null;
     exactRetried: boolean;
     usedExact: boolean;
+    /** R41 Step 3 Rung C — the final grant's orientation vs the ask (for the receipt's plain note). */
+    orientationMismatch: boolean;
   } | null>(null);
 
   // R41 WS-A — per-facing capability census. Session cache first
@@ -1127,6 +1147,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         granted: acquired.grantedSettings,
         exactRetried: acquired.negotiated?.exactRetried ?? false,
         usedExact: acquired.negotiated?.usedExact ?? false,
+        // Rung C — the negotiated outcome carries the verdict on
+        // pass 1; the fallback passes (no negotiation) judge the
+        // final grant against the winning attempt's ask directly.
+        orientationMismatch:
+          acquired.negotiated?.orientationMismatch ??
+          orientationMismatchBetween(
+            { width: idealDim(askedVideo?.width), height: idealDim(askedVideo?.height) },
+            acquired.grantedSettings,
+          ),
       };
     }
     workingFacingRef.current = facingMode;
@@ -1682,9 +1711,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       startedAtMs: number,
       frameDropEstimate: FrameDropEstimate | null,
       negotiation?: {
-        asked: { shortSide: number; frameRate: number };
+        asked: { shortSide: number; frameRate: number; width: number; height: number };
         exactRetried: boolean;
         usedExact: boolean;
+        orientationMismatch: boolean;
       } | null,
     ): CaptureReceipt =>
       buildCaptureReceipt({
@@ -1697,6 +1727,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         asked: negotiation ? negotiation.asked : null,
         exactRetryAttempted: negotiation?.exactRetried,
         exactRetryUsed: negotiation?.usedExact,
+        orientationMismatch: negotiation?.orientationMismatch,
       }),
     [],
   );
@@ -1705,8 +1736,62 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const negotiationSnapshotForTake = useCallback(() => {
     const n = lastNegotiationRef.current;
     if (!n) return null;
-    return { asked: { shortSide: n.asked.shortSide, frameRate: n.asked.frameRate }, exactRetried: n.exactRetried, usedExact: n.usedExact };
+    return {
+      asked: {
+        shortSide: n.asked.shortSide,
+        frameRate: n.asked.frameRate,
+        width: n.asked.width,
+        height: n.asked.height,
+      },
+      exactRetried: n.exactRetried,
+      usedExact: n.usedExact,
+      orientationMismatch: n.orientationMismatch,
+    };
   }, []);
+
+  /**
+   * R41 Step 3 Rung B — steady one finished take before it becomes
+   * project media, and restate its receipt for the file that will
+   * actually be saved: the size becomes the saved file's size, the
+   * timing line records the outcome ("Steadied to an even 30fps" /
+   * "Original timing kept"), everything else — capture facts, asked
+   * vs granted, the orientation verdict, the drop estimate — carries
+   * over untouched. `steadyCameraTake` never throws and never loses
+   * the take: any decline returns the recorded blob unchanged.
+   */
+  const steadyTakeForProject = useCallback(
+    async (blob: Blob, receipt: CaptureReceipt): Promise<{ blob: Blob; receipt: CaptureReceipt }> => {
+      const outcome = await steadyCameraTake(blob, { targetFps: receipt.actualFps });
+      const finalReceipt = buildCaptureReceipt({
+        trackSettings: {
+          width: receipt.actualWidth > 0 ? receipt.actualWidth : undefined,
+          height: receipt.actualHeight > 0 ? receipt.actualHeight : undefined,
+          frameRate: receipt.actualFps > 0 ? receipt.actualFps : undefined,
+        },
+        mimeType: outcome.blob.type || receipt.mimeType,
+        blobSize: outcome.blob.size,
+        durationSeconds: receipt.durationSeconds,
+        droppedFramesEstimate: receipt.droppedFramesEstimate ?? null,
+        expectedFramesEstimate: receipt.expectedFramesEstimate ?? null,
+        asked:
+          receipt.askedShortSide > 0
+            ? {
+                shortSide: receipt.askedShortSide,
+                frameRate: receipt.askedFps,
+                width: receipt.askedWidth,
+                height: receipt.askedHeight,
+              }
+            : null,
+        exactRetryAttempted: receipt.exactRetryAttempted,
+        exactRetryUsed: receipt.exactRetryUsed,
+        orientationMismatch: receipt.orientationMismatch,
+        timingOutcome: outcome.status === 'steadied' ? 'steadied' : 'original',
+        steadiedFps: outcome.status === 'steadied' ? outcome.plan.targetFps : undefined,
+      });
+      return { blob: outcome.blob, receipt: finalReceipt };
+    },
+    [],
+  );
 
   /**
    * R29 — record BOTH cameras at once. The mic is on the rear stream
@@ -1763,19 +1848,30 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           : null,
         census: censusSessionRef.current['environment'] ?? null,
       });
+      // R41 Step 3 Rung B — both takes are steadied before the pair
+      // can become project media (see the single path); the measured
+      // start delta is captured now, before the async step, and the
+      // review then shows the very files the project will get.
+      const startDeltaMs = dualStartRef.current ? dualStartRef.current.frontStartMs - dualStartRef.current.rearStartMs : 0;
       stopStream();
-      setPendingDual({
-        mainBlob,
-        mainUrl: URL.createObjectURL(mainBlob),
-        frontBlob,
-        frontUrl: URL.createObjectURL(frontBlob),
-        startDeltaMs: dualStartRef.current ? dualStartRef.current.frontStartMs - dualStartRef.current.rearStartMs : 0,
-        mainReceipt,
-        frontReceipt,
-      });
-      dualStartRef.current = null;
-      frontRecorderRef.current = null;
-      recorderRef.current = null;
+      setSteadyingTake(true);
+      void (async () => {
+        const main = await steadyTakeForProject(mainBlob, mainReceipt);
+        const front = await steadyTakeForProject(frontBlob, frontReceipt);
+        setSteadyingTake(false);
+        setPendingDual({
+          mainBlob: main.blob,
+          mainUrl: URL.createObjectURL(main.blob),
+          frontBlob: front.blob,
+          frontUrl: URL.createObjectURL(front.blob),
+          startDeltaMs,
+          mainReceipt: main.receipt,
+          frontReceipt: front.receipt,
+        });
+        dualStartRef.current = null;
+        frontRecorderRef.current = null;
+        recorderRef.current = null;
+      })();
     };
     rearRecorder.onstop = handleDualStop;
     frontRecorder.onstop = handleDualStop;
@@ -1793,7 +1889,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     frontRecorderRef.current = frontRecorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [dualMode, isReady, createRecorder, stopStream, canvasWidth, canvasHeight, beginFrameDropTracking, receiptForRecording]);
+  }, [dualMode, isReady, createRecorder, stopStream, canvasWidth, canvasHeight, beginFrameDropTracking, receiptForRecording, steadyTakeForProject]);
 
   const startRecording = useCallback(() => {
     const stream = streamRef.current;
@@ -1948,23 +2044,34 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         void startStream();
         return;
       }
-      // R31 — in two-pass step 1 this same stop also feeds the flow:
-      // the blob becomes the machine's main take, and the flow retains
-      // its OWN object URL for it in `step1UrlRef` (separate from the
-      // review URL `pendingVideo` gets below — that one is revoked
-      // when the review clears, this one must live into step 2).
-      if (twoPassPhaseRef.current === 'step1-live') {
-        dropStep1Url();
-        step1UrlRef.current = URL.createObjectURL(blob);
-        step1ReceiptRef.current = receipt;
-        dispatchTwoPass({ type: 'step1-recorded', blob });
-      }
-      // Hold for the review state (see `pendingVideo`) instead of handing
-      // off immediately, and stop the live stream while reviewing — the
-      // camera doesn't need to stay hot for a decision, and the review
-      // <video> replaces the live preview in the same frame.
+      // R41 Step 3 Rung B — the take is steadied to an even frame
+      // rate BEFORE it can become project media; the review below
+      // therefore shows (and the flow retains) the very file the
+      // project will get, with the receipt restated for it. The
+      // live stream stops first — the camera doesn't need to stay
+      // hot while the file is prepared — and the "Steadying your
+      // take…" state covers the surface until the review is ready.
       stopStream();
-      setPendingVideo({ blob, url: URL.createObjectURL(blob), receipt });
+      setSteadyingTake(true);
+      void (async () => {
+        const final = await steadyTakeForProject(blob, receipt);
+        setSteadyingTake(false);
+        // R31 — in two-pass step 1 this same stop also feeds the flow:
+        // the blob becomes the machine's main take, and the flow retains
+        // its OWN object URL for it in `step1UrlRef` (separate from the
+        // review URL `pendingVideo` gets below — that one is revoked
+        // when the review clears, this one must live into step 2).
+        if (twoPassPhaseRef.current === 'step1-live') {
+          dropStep1Url();
+          step1UrlRef.current = URL.createObjectURL(final.blob);
+          step1ReceiptRef.current = final.receipt;
+          dispatchTwoPass({ type: 'step1-recorded', blob: final.blob });
+        }
+        // Hold for the review state (see `pendingVideo`) instead of handing
+        // off immediately — the review <video> replaces the live preview
+        // in the same frame.
+        setPendingVideo({ blob: final.blob, url: URL.createObjectURL(final.blob), receipt: final.receipt });
+      })();
     };
     // R41 F02 — 250ms timeslice, as on the dual paths (see there).
     recorder.start(250);
@@ -1973,7 +2080,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     recorderRef.current = recorder;
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream, negotiationSnapshotForTake]);
+  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream, negotiationSnapshotForTake, steadyTakeForProject]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
@@ -2079,13 +2186,30 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         census: censusSessionRef.current['user'] ?? null,
         ceiling: ceilingUpdate.kind === 'set' ? ceilingUpdate.ceiling : undefined,
       });
-      // Transfer the retained step-1 URL into pendingDual: clearing
-      // the ref hands ownership to the pendingDual effect, which
-      // revokes it when the review clears.
-      step1UrlRef.current = null;
-      dispatchTwoPass({ type: 'step2-recorded', blob: frontBlob, startDeltaMs });
+      // R41 Step 3 Rung B — the step-2 take is steadied before the
+      // pair can become project media; the step-1 take was already
+      // steadied at its own stop, so only this take passes through
+      // here. The pair review then shows the files the project gets.
       stopStream();
-      setPendingDual({ mainBlob, mainUrl, frontBlob, frontUrl: URL.createObjectURL(frontBlob), startDeltaMs, mainReceipt, frontReceipt });
+      setSteadyingTake(true);
+      void (async () => {
+        const front = await steadyTakeForProject(frontBlob, frontReceipt);
+        setSteadyingTake(false);
+        // Transfer the retained step-1 URL into pendingDual: clearing
+        // the ref hands ownership to the pendingDual effect, which
+        // revokes it when the review clears.
+        step1UrlRef.current = null;
+        dispatchTwoPass({ type: 'step2-recorded', blob: front.blob, startDeltaMs });
+        setPendingDual({
+          mainBlob,
+          mainUrl,
+          frontBlob: front.blob,
+          frontUrl: URL.createObjectURL(front.blob),
+          startDeltaMs,
+          mainReceipt,
+          frontReceipt: front.receipt,
+        });
+      })();
     };
     // R41 F02 — 250ms timeslice, as on the other record paths.
     recorder.start(250);
@@ -2110,7 +2234,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     }
     setIsRecording(true);
     setRecordSeconds(0);
-  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob, beginFrameDropTracking, receiptForRecording, negotiationSnapshotForTake]);
+  }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob, beginFrameDropTracking, receiptForRecording, negotiationSnapshotForTake, steadyTakeForProject]);
 
   /** Review-state confirm: hand the SAME CaptureResult to the normal path or the overlay path, per the user's pick. */
   const confirmPendingVideo = useCallback(
@@ -2277,14 +2401,26 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     downloadBlobFile(diagResult.blob, `camera-smoothness-clip.${extension}`);
   }, [diagResult, downloadBlobFile]);
 
-  /** Diagnostics result "Use this clip": the normal confirm path, health line included. */
+  /**
+   * Diagnostics result "Use this clip": the normal confirm path,
+   * health line included — the clip becomes project media, so it is
+   * steadied like any other take first (Rung B). The "Save the test
+   * clip" download above is NOT this path: it keeps delivering the
+   * raw recorded file, because that file is the measurement
+   * instrument for capture truth.
+   */
   const useDiagnosticsClip = useCallback(() => {
     if (!diagResult) return;
-    const result: CaptureResult = { kind: 'video', blob: diagResult.blob, receipt: diagResult.receipt };
-    recordTakeHealthFromReceipt(diagResult.receipt, idToken);
-    setDiagResult(null);
-    onCapture(result);
-  }, [diagResult, onCapture, idToken]);
+    const snapshot = diagResult;
+    setSteadyingTake(true);
+    void (async () => {
+      const final = await steadyTakeForProject(snapshot.blob, snapshot.receipt);
+      recordTakeHealthFromReceipt(final.receipt, idToken);
+      setSteadyingTake(false);
+      setDiagResult(null);
+      onCapture({ kind: 'video', blob: final.blob, receipt: final.receipt });
+    })();
+  }, [diagResult, onCapture, idToken, steadyTakeForProject]);
 
   /** Diagnostics result "Discard": drop the clip + pack and return to the live camera. */
   const discardDiagnostics = useCallback(() => {
@@ -2948,6 +3084,21 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           </div>
         )}
       </div>
+
+      {/* R41 Step 3 Rung B — the steadying state: covers the whole
+          camera surface while a finished take is re-timed to an even
+          frame rate, so nothing can be tapped mid-step and the review
+          only appears once the saved file exists. */}
+      {steadyingTake && (
+        <div
+          className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-2 bg-black/90 p-6 text-center"
+          role="status"
+          aria-live="polite"
+        >
+          <p className="text-sm font-bold text-white">Steadying your take…</p>
+          <p className="text-[11px] text-white/60">Evening out the frame timing before it joins your project.</p>
+        </div>
+      )}
 
       {/* R31 — two-pass step headings, above whichever controls the
           current phase shows (live controls or a review block). */}

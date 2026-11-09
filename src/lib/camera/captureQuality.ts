@@ -125,7 +125,8 @@ export function isLadderRetryableError(err: unknown): boolean {
 /*                                                                     */
 /* Stage 1 is the existing ideal ask, byte-identical semantics. After  */
 /* the stream settles, the granted track settings are read back; when */
-/* the grant is BELOW the asked rung (short side or frame rate), ONE  */
+/* the grant is BELOW the asked rung (short side or frame rate — and,  */
+/* since Rung C, when its orientation differs from the ask), ONE      */
 /* exact-constraint retry of that same rung is attempted. The stage-1  */
 /* stream is never stopped until a better-or-equal exact stream is in */
 /* hand: if the exact attempt throws, or grants less, the exact       */
@@ -161,13 +162,66 @@ export function grantedFps(settings: GrantedTrackSettings | null | undefined): n
   return Math.round(fps);
 }
 
+/* ------------------------------------------------------------------ */
+/* R41 Step 3 Rung C — orientation-honest negotiation                  */
+/*                                                                     */
+/* The short-side comparison above is orientation-blind: a LANDSCAPE  */
+/* grant has the same short side as the PORTRAIT ask it answers, so   */
+/* it counted as "met" and never earned the exact retry (round-1      */
+/* evidence: asked 1080×1920, granted 1920×1080, counted met; both    */
+/* current 4K grants are likewise landscape against portrait asks).   */
+/* The judgement is now orientation-aware: when the granted           */
+/* orientation differs from the asked orientation, the ask counts as  */
+/* NOT fully met — the one exact retry runs for the asked orientation */
+/* under the same discipline as any other shortfall — and the         */
+/* mismatch is recorded on the negotiation outcome so the capture     */
+/* receipt can disclose it in plain words. WHAT is asked never        */
+/* changes — only how the grant is judged and disclosed.              */
+/* ------------------------------------------------------------------ */
+
+export type FrameOrientation = 'portrait' | 'landscape' | 'square';
+
+/**
+ * The orientation of a width×height pair (null when either side is
+ * unusable). Square is its own orientation: a square grant against a
+ * portrait ask IS a mismatch, and vice versa.
+ */
+export function orientationOfSize(
+  width: number | null | undefined,
+  height: number | null | undefined,
+): FrameOrientation | null {
+  if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) return null;
+  if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return null;
+  if (width === height) return 'square';
+  return width < height ? 'portrait' : 'landscape';
+}
+
+/**
+ * True when the granted orientation differs from the asked
+ * orientation. Either side unknown (no usable dimensions — e.g. the
+ * plain facing-only ask, which carries no size at all) means NO
+ * judgement: never call a mismatch on a guess.
+ */
+export function orientationMismatchBetween(
+  asked: { width?: number | null; height?: number | null } | null | undefined,
+  granted: GrantedTrackSettings | null | undefined,
+): boolean {
+  const askedOrientation = orientationOfSize(asked?.width, asked?.height);
+  if (!askedOrientation) return false;
+  const grantedOrientation = orientationOfSize(granted?.width, granted?.height);
+  if (!grantedOrientation) return false;
+  return askedOrientation !== grantedOrientation;
+}
+
 export interface NegotiationDecision {
   /** True when the grant fell below the asked rung and the one exact retry should run. */
   needsExactRetry: boolean;
   grantedShortSide: number;
   grantedFps: number;
-  /** Which dimensions fell below the ask ('resolution' and/or 'frameRate'); empty when the grant met the ask or could not be read. */
-  belowOn: Array<'resolution' | 'frameRate'>;
+  /** Which dimensions fell below the ask ('resolution', 'frameRate' and/or 'orientation'); empty when the grant met the ask or could not be read. */
+  belowOn: Array<'resolution' | 'frameRate' | 'orientation'>;
+  /** Rung C — true when the granted orientation differs from the asked orientation (judged only when the ask carries dimensions). */
+  orientationMismatch: boolean;
 }
 
 /**
@@ -178,7 +232,7 @@ export interface NegotiationDecision {
  * is exactly what this fix must not do.
  */
 export function negotiationDecision(
-  asked: { shortSide: number; frameRate: number },
+  asked: { shortSide: number; frameRate: number; width?: number; height?: number },
   granted: GrantedTrackSettings | null | undefined,
 ): NegotiationDecision {
   const short = grantedShortSide(granted);
@@ -186,7 +240,11 @@ export function negotiationDecision(
   const belowOn: NegotiationDecision['belowOn'] = [];
   if (short > 0 && short < asked.shortSide) belowOn.push('resolution');
   if (fps > 0 && fps < asked.frameRate) belowOn.push('frameRate');
-  return { needsExactRetry: belowOn.length > 0, grantedShortSide: short, grantedFps: fps, belowOn };
+  // Rung C — an orientation mismatch is a shortfall of the ask even
+  // when size and rate both match: it earns the same one exact retry.
+  const orientationMismatch = orientationMismatchBetween(asked, granted);
+  if (orientationMismatch) belowOn.push('orientation');
+  return { needsExactRetry: belowOn.length > 0, grantedShortSide: short, grantedFps: fps, belowOn, orientationMismatch };
 }
 
 /** True when the grant is below the asked rung on resolution or frame rate (readable grants only). */
@@ -197,6 +255,19 @@ export function isGrantBelowAsk(
   return negotiationDecision(asked, granted).needsExactRetry;
 }
 
+/** The ideal numeric value of a constraint member (undefined when it carries none). */
+function idealOfConstraint(c: unknown): number | undefined {
+  return c && typeof c === 'object' && typeof (c as { ideal?: unknown }).ideal === 'number'
+    ? ((c as { ideal: number }).ideal as number)
+    : undefined;
+}
+
+/** The width/height a rung ASKS for (its ideal dimensions; either may be absent, e.g. the plain ask). */
+export function askedDimensionsOf(attempt: CaptureAttempt): { width?: number; height?: number } {
+  const video = (attempt.constraints.video ?? {}) as MediaTrackConstraints;
+  return { width: idealOfConstraint(video.width), height: idealOfConstraint(video.height) };
+}
+
 /**
  * The stage-2 twin of one ladder rung: the SAME width/height/frame
  * rate the rung asked for ideally, now asked EXACTLY. Facing mode,
@@ -205,10 +276,7 @@ export function isGrantBelowAsk(
  */
 export function buildExactAttempt(attempt: CaptureAttempt): CaptureAttempt {
   const video = (attempt.constraints.video ?? {}) as MediaTrackConstraints;
-  const idealOf = (c: ConstrainDouble | undefined): number | undefined =>
-    c && typeof c === 'object' && typeof (c as { ideal?: unknown }).ideal === 'number'
-      ? ((c as { ideal: number }).ideal as number)
-      : undefined;
+  const idealOf = idealOfConstraint;
   const width = idealOf(video.width as ConstrainDouble | undefined);
   const height = idealOf(video.height as ConstrainDouble | undefined);
   const exactVideo: MediaTrackConstraints = { frameRate: { exact: attempt.frameRate } };
@@ -257,6 +325,14 @@ export interface NegotiatedStream {
   usedExact: boolean;
   /** The platform error name of a failed exact attempt, when it threw. */
   exactErrorName?: string;
+  /**
+   * R41 Step 3 Rung C — true when the FINAL grant's orientation
+   * differs from the rung's asked orientation (recorded whatever the
+   * retry's outcome, so the receipt can disclose it). Optional for
+   * shape compatibility with hand-built outcomes in older tests;
+   * `negotiateStreamAttempt` always sets it.
+   */
+  orientationMismatch?: boolean;
 }
 
 function stopStreamTracks(stream: MediaStream | null | undefined): void {
@@ -303,12 +379,23 @@ export async function negotiateStreamAttempt(opts: {
   const readSettings = opts.readSettings ?? defaultReadSettings;
   const stream = await opts.getUserMedia(opts.attempt.constraints);
   const stage1Settings = readSettings(stream);
+  // Rung C — the decision also sees the rung's asked dimensions, so
+  // an orientation mismatch earns the exact retry like any other
+  // shortfall; the mismatch of the FINAL grant is recorded either way.
+  const askedDims = askedDimensionsOf(opts.attempt);
   const decision = negotiationDecision(
-    { shortSide: opts.attempt.shortSide, frameRate: opts.attempt.frameRate },
+    { shortSide: opts.attempt.shortSide, frameRate: opts.attempt.frameRate, ...askedDims },
     stage1Settings,
   );
   if (!decision.needsExactRetry) {
-    return { stream, grantedSettings: stage1Settings, stage1Settings, exactRetried: false, usedExact: false };
+    return {
+      stream,
+      grantedSettings: stage1Settings,
+      stage1Settings,
+      exactRetried: false,
+      usedExact: false,
+      orientationMismatch: orientationMismatchBetween(askedDims, stage1Settings),
+    };
   }
   let exactStream: MediaStream;
   try {
@@ -321,16 +408,31 @@ export async function negotiateStreamAttempt(opts: {
       stage1Settings,
       exactRetried: true,
       usedExact: false,
+      orientationMismatch: orientationMismatchBetween(askedDims, stage1Settings),
       ...(name ? { exactErrorName: name } : {}),
     };
   }
   const exactSettings = readSettings(exactStream);
   if (isExactGrantWorse(stage1Settings, exactSettings)) {
     stopStreamTracks(exactStream);
-    return { stream, grantedSettings: stage1Settings, stage1Settings, exactRetried: true, usedExact: false };
+    return {
+      stream,
+      grantedSettings: stage1Settings,
+      stage1Settings,
+      exactRetried: true,
+      usedExact: false,
+      orientationMismatch: orientationMismatchBetween(askedDims, stage1Settings),
+    };
   }
   stopStreamTracks(stream);
-  return { stream: exactStream, grantedSettings: exactSettings, stage1Settings, exactRetried: true, usedExact: true };
+  return {
+    stream: exactStream,
+    grantedSettings: exactSettings,
+    stage1Settings,
+    exactRetried: true,
+    usedExact: true,
+    orientationMismatch: orientationMismatchBetween(askedDims, exactSettings),
+  };
 }
 
 /* ------------------------------------------------------------------ */

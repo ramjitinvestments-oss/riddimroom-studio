@@ -57,6 +57,28 @@ export interface CaptureReceipt {
   exactRetryAttempted?: boolean;
   /** R41 WS-B — true when the exact retry's stream is the one that recorded. */
   exactRetryUsed?: boolean;
+  /** R41 Step 3 Rung C — the ASKED rung's width (0 when the ask carried no width). */
+  askedWidth: number;
+  /** R41 Step 3 Rung C — the ASKED rung's height (0 when the ask carried no height). */
+  askedHeight: number;
+  /**
+   * R41 Step 3 Rung C — true when the final grant's orientation
+   * differed from the asked orientation (recorded by the negotiation
+   * whatever the exact retry's outcome). Present only when the
+   * take's negotiation recorded it.
+   */
+  orientationMismatch?: boolean;
+  /**
+   * R41 Step 3 Rung B — the frame-timing outcome of the take's save
+   * into the project: 'steadied' when the saved file was re-timed
+   * onto an even frame-rate grid, 'original' when the recorded
+   * timing was kept (already even, or steadying unavailable/failed —
+   * the take itself is never lost either way). Present only on
+   * receipts for takes that passed through the save step.
+   */
+  timingOutcome?: 'steadied' | 'original';
+  /** R41 Step 3 Rung B — the frame rate a steadied take was re-timed to (present only when timingOutcome is 'steadied'). */
+  steadiedFps?: number;
 }
 
 export interface CaptureReceiptInput {
@@ -68,11 +90,17 @@ export interface CaptureReceiptInput {
   droppedFramesEstimate?: number | null;
   /** The tracker's expected-frame count for the same window — omitted (like the estimate) when unmeasured. */
   expectedFramesEstimate?: number | null;
-  /** R41 WS-B — the asked rung (short side + frame rate) this take's stream was negotiated from, when known. */
-  asked?: { shortSide: number; frameRate: number } | null;
+  /** R41 WS-B — the asked rung (short side + frame rate) this take's stream was negotiated from, when known. Rung C adds the asked width/height when the rung carried them. */
+  asked?: { shortSide: number; frameRate: number; width?: number; height?: number } | null;
   /** R41 WS-B — the two-stage negotiation outcome for this take's stream, when known. */
   exactRetryAttempted?: boolean;
   exactRetryUsed?: boolean;
+  /** R41 Step 3 Rung C — the negotiation's orientation verdict for this take's stream, when recorded. */
+  orientationMismatch?: boolean;
+  /** R41 Step 3 Rung B — the save step's frame-timing outcome for this take, when it ran. */
+  timingOutcome?: 'steadied' | 'original';
+  /** R41 Step 3 Rung B — the frame rate a steadied take was re-timed to. */
+  steadiedFps?: number;
 }
 
 /** Build a receipt from the raw facts of one finished recording. */
@@ -110,9 +138,29 @@ export function buildCaptureReceipt(input: CaptureReceiptInput): CaptureReceipt 
       typeof input.asked?.frameRate === 'number' && Number.isFinite(input.asked.frameRate) && input.asked.frameRate > 0
         ? Math.round(input.asked.frameRate)
         : 0,
+    askedWidth:
+      typeof input.asked?.width === 'number' && Number.isFinite(input.asked.width) && input.asked.width > 0
+        ? Math.round(input.asked.width)
+        : 0,
+    askedHeight:
+      typeof input.asked?.height === 'number' && Number.isFinite(input.asked.height) && input.asked.height > 0
+        ? Math.round(input.asked.height)
+        : 0,
   };
   if (input.exactRetryAttempted) receipt.exactRetryAttempted = true;
   if (input.exactRetryUsed) receipt.exactRetryUsed = true;
+  if (typeof input.orientationMismatch === 'boolean') receipt.orientationMismatch = input.orientationMismatch;
+  if (input.timingOutcome === 'steadied' || input.timingOutcome === 'original') {
+    receipt.timingOutcome = input.timingOutcome;
+    if (
+      input.timingOutcome === 'steadied' &&
+      typeof input.steadiedFps === 'number' &&
+      Number.isFinite(input.steadiedFps) &&
+      input.steadiedFps > 0
+    ) {
+      receipt.steadiedFps = Math.round(input.steadiedFps);
+    }
+  }
   const dropped = input.droppedFramesEstimate;
   if (typeof dropped === 'number' && Number.isFinite(dropped) && dropped >= 0) {
     receipt.droppedFramesEstimate = Math.round(dropped);
@@ -279,6 +327,43 @@ export function captureReceiptAskedVsGranted(receipt: CaptureReceipt): string | 
   );
 }
 
+/**
+ * R41 Step 3 Rung B — the plain frame-timing line for the review
+ * surface: "Steadied to an even 30fps" when the saved take was
+ * re-timed onto an even grid, "Original timing kept" when it was
+ * not (already even, or steadying unavailable — the take is kept
+ * either way). Null when the take never passed through the save
+ * step, so no claim is made for it.
+ */
+export function captureReceiptTimingLine(receipt: CaptureReceipt): string | null {
+  if (!receipt || !receipt.timingOutcome) return null;
+  if (receipt.timingOutcome === 'original') return 'Original timing kept';
+  const fps = receipt.steadiedFps && receipt.steadiedFps > 0 ? receipt.steadiedFps : receipt.actualFps;
+  return fps > 0 ? `Steadied to an even ${fps}fps` : 'Steadied to an even frame rate';
+}
+
+/**
+ * R41 Step 3 Rung C — the plain orientation note for the review
+ * surface, shown when the phone granted a differently-oriented
+ * picture than the project asked for. Informing, never alarming:
+ * the editor frames the take into the project's shape either way.
+ * Null when the orientations matched or either is unknown.
+ */
+export function captureReceiptOrientationNote(receipt: CaptureReceipt): string | null {
+  if (!receipt || receipt.orientationMismatch !== true) return null;
+  if (!(receipt.actualWidth > 0 && receipt.actualHeight > 0)) return null;
+  if (!(receipt.askedWidth > 0 && receipt.askedHeight > 0)) return null;
+  const grantedLandscape = receipt.actualWidth > receipt.actualHeight;
+  const grantedPortrait = receipt.actualHeight > receipt.actualWidth;
+  const askedPortrait = receipt.askedHeight > receipt.askedWidth;
+  if (grantedLandscape && askedPortrait) {
+    return 'Phone gave a sideways (landscape) picture — your project will frame it upright';
+  }
+  if (grantedPortrait) return 'Phone gave an upright (portrait) picture — your project will frame it to fit';
+  if (grantedLandscape) return 'Phone gave a sideways (landscape) picture — your project will frame it to fit';
+  return null;
+}
+
 export interface FormattedCaptureReceipt {
   /** e.g. "Recorded: 1080p · 30fps · high quality" */
   summary: string;
@@ -294,6 +379,10 @@ export interface FormattedCaptureReceipt {
   askedVsGranted: string | null;
   /** R41 WS-B — true when the final grant fell below the user's selected quality. */
   grantBelowAsked: boolean;
+  /** R41 Step 3 Rung B — the frame-timing line for the review summary area; null when the take never faced the save step. */
+  timingLine: string | null;
+  /** R41 Step 3 Rung C — the orientation note for the review summary area; null when the orientations matched or are unknown. */
+  orientationNote: string | null;
 }
 
 /**
@@ -340,6 +429,8 @@ export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureR
     technicalDetails: formatTechnicalDetails(receipt),
     askedVsGranted: captureReceiptAskedVsGranted(receipt),
     grantBelowAsked: receiptGrantBelowAsked(receipt),
+    timingLine: captureReceiptTimingLine(receipt),
+    orientationNote: captureReceiptOrientationNote(receipt),
   };
 }
 
