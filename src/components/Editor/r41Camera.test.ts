@@ -173,10 +173,17 @@ describe('R41 Step 3 Rung A, Part 2 — in-take painter diet (F03/F04/F05)', () 
     expect(cameraSource).toContain('let lastAcceptedMotionMs = 0;');
   });
 
-  it('both coach intervals use coachIntervalMs (sampler tick + pill)', () => {
+  it('one coach interval only: the sampler tick uses coachIntervalMs and the pill paints inside it (FINAL FIX Part 1)', () => {
     expect(cameraSource).toContain('window.setInterval(tick, coachIntervalMs(isRecording))');
-    expect(cameraSource).toContain('}, coachIntervalMs(isRecording));');
-    expect(cameraSource.split('coachIntervalMs(').length - 1).toBeGreaterThanOrEqual(3); // import-free call sites + tick + pill
+    // The pill's own 1Hz interval is GONE — exactly one
+    // coachIntervalMs call site remains in the component, so one
+    // timer per second of a take does the sampling AND the pill.
+    expect(cameraSource.split('coachIntervalMs(').length - 1).toBe(1);
+    // The pill is painted from inside the sampler tick, through the
+    // same hysteresis gate and direct DOM writes as before.
+    expect(cameraSource).toContain('coachGateRef.current.push(level, performance.now())');
+    // What remains of the pill effect is hide-on-stop only.
+    expect(cameraSource).toContain('coachGateRef.current.reset()');
   });
 
   it('the orientation handler suspends on isRecordingRef before any paintLevel write', () => {

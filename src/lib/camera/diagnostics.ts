@@ -261,6 +261,38 @@ export interface DiagnosticsEvidenceInput {
   census: FacingCensus | null;
   frameSeries: RawFrameSeries;
   longtasks: LongtaskSummary;
+  /**
+   * FINAL FIX Part 2 — the engine that recorded this check and,
+   * for the new engine (test), its own frame ledger. Absent when
+   * the caller did not record it; the pack then carries the
+   * standard-engine record (MediaRecorder is the default truth).
+   */
+  engine?: DiagnosticsEngineInput | null;
+}
+
+/**
+ * FINAL FIX Part 2 — one diagnostics take's engine record. The
+ * counts are the prototype engine's own ledger; they are null for
+ * the standard engine, which keeps no such ledger (never invented).
+ */
+export interface DiagnosticsEngineInput {
+  kind: 'mediarecorder' | 'webcodecs';
+  fellBack?: boolean;
+  framesReceived?: number;
+  framesEncoded?: number;
+  framesDroppedByQueue?: number;
+  framesFilled?: number;
+  audioIncluded?: boolean;
+}
+
+export interface DiagnosticsEngineRecord {
+  kind: 'mediarecorder' | 'webcodecs';
+  fellBack: boolean;
+  framesReceived: number | null;
+  framesEncoded: number | null;
+  framesDroppedByQueue: number | null;
+  framesFilled: number | null;
+  audioIncluded: boolean | null;
 }
 
 export interface DiagnosticsEvidencePack {
@@ -278,6 +310,8 @@ export interface DiagnosticsEvidencePack {
   exactRetryAttempted: boolean;
   exactRetryUsed: boolean;
   recorder: { mimeType: string; videoBitsPerSecond: number; audioBitsPerSecond: number };
+  /** FINAL FIX Part 2 — which engine recorded this check, and its frame ledger when it keeps one. */
+  engine: DiagnosticsEngineRecord;
   census: FacingCensus | null;
   /** VIEWFINDER frames (preview element, via rVFC) — NOT the recorded file's frames. */
   viewfinderFrames: {
@@ -299,6 +333,21 @@ export function buildDiagnosticsEvidencePack(input: DiagnosticsEvidenceInput): D
   const targetFps =
     input.granted && input.granted.frameRate > 0 ? Math.round(input.granted.frameRate) : input.fpsChoice;
   const stats = computeFrameIntervalStats(input.frameSeries?.timestampsMs ?? [], targetFps);
+  const notes = [
+    'Frame stats are VIEWFINDER frames: frames the preview element presented (requestVideoFrameCallback). They are not the recorded file frames — the file is measured separately from the saved clip.',
+    'Long tasks are main-thread tasks observed during the take only.',
+    'Nothing in this report was uploaded anywhere; it exists only where the owner saves it.',
+  ];
+  if (input.engine?.kind === 'webcodecs') {
+    notes.push(
+      input.engine.fellBack
+        ? 'The new engine (test) hit a problem during this check, so the standard engine recorded it. The saved clip is the standard engine’s raw output.'
+        : 'This check was recorded with the new engine (test). The saved clip is that engine’s raw output, stamped onto an even frame-rate grid as it recorded — it has NOT been through the project steadying step.',
+    );
+    if (input.engine.audioIncluded === false && !input.engine.fellBack) {
+      notes.push('The new engine (test) recorded no sound on this check — the platform declined its audio encode.');
+    }
+  }
   return {
     kind: 'riddimroom-camera-diagnostics',
     version: 1,
@@ -320,6 +369,31 @@ export function buildDiagnosticsEvidencePack(input: DiagnosticsEvidenceInput): D
       videoBitsPerSecond: input.recorderVideoBitsPerSecond ?? 0,
       audioBitsPerSecond: input.recorderAudioBitsPerSecond ?? 0,
     },
+    engine: ((): DiagnosticsEngineRecord => {
+      const count = (v: number | undefined): number | null =>
+        typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : null;
+      const e = input.engine;
+      if (!e || e.kind !== 'webcodecs') {
+        return {
+          kind: 'mediarecorder',
+          fellBack: false,
+          framesReceived: null,
+          framesEncoded: null,
+          framesDroppedByQueue: null,
+          framesFilled: null,
+          audioIncluded: null,
+        };
+      }
+      return {
+        kind: 'webcodecs',
+        fellBack: e.fellBack === true,
+        framesReceived: count(e.framesReceived),
+        framesEncoded: count(e.framesEncoded),
+        framesDroppedByQueue: count(e.framesDroppedByQueue),
+        framesFilled: count(e.framesFilled),
+        audioIncluded: typeof e.audioIncluded === 'boolean' ? e.audioIncluded : null,
+      };
+    })(),
     census: input.census ?? null,
     viewfinderFrames: {
       source: 'viewfinder-preview-requestVideoFrameCallback',
@@ -328,11 +402,7 @@ export function buildDiagnosticsEvidencePack(input: DiagnosticsEvidenceInput): D
       stats,
     },
     longtasks: input.longtasks,
-    notes: [
-      'Frame stats are VIEWFINDER frames: frames the preview element presented (requestVideoFrameCallback). They are not the recorded file frames — the file is measured separately from the saved clip.',
-      'Long tasks are main-thread tasks observed during the take only.',
-      'Nothing in this report was uploaded anywhere; it exists only where the owner saves it.',
-    ],
+    notes,
   };
 }
 
@@ -374,6 +444,26 @@ export function formatDiagnosticsSummary(pack: DiagnosticsEvidencePack): string[
     );
   } else {
     lines.push('Long-task measurement: not available in this browser');
+  }
+  // FINAL FIX Part 2 — the engine line: which engine recorded this
+  // check and, for the new engine, its own ledger in plain words.
+  if (pack.engine?.kind === 'webcodecs') {
+    if (pack.engine.fellBack) {
+      lines.push('The new engine (test) hit a problem — this check used the standard engine');
+    } else {
+      let line = 'Recorded with the new engine (test)';
+      if (typeof pack.engine.framesEncoded === 'number') {
+        line += `: ${pack.engine.framesEncoded} frames`;
+        if (typeof pack.engine.framesDroppedByQueue === 'number' && pack.engine.framesDroppedByQueue > 0) {
+          line += `, ${pack.engine.framesDroppedByQueue} dropped on purpose`;
+        }
+        if (typeof pack.engine.framesFilled === 'number' && pack.engine.framesFilled > 0) {
+          line += `, ${pack.engine.framesFilled} gaps filled`;
+        }
+      }
+      lines.push(line);
+      if (pack.engine.audioIncluded === false) lines.push('The new engine recorded no sound on this check.');
+    }
   }
   lines.push('These frame numbers come from the viewfinder preview, not the recorded file.');
   return lines;

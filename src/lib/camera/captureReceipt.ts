@@ -79,6 +79,32 @@ export interface CaptureReceipt {
   timingOutcome?: 'steadied' | 'original';
   /** R41 Step 3 Rung B — the frame rate a steadied take was re-timed to (present only when timingOutcome is 'steadied'). */
   steadiedFps?: number;
+  /**
+   * FINAL FIX Part 2 — the capture engine that recorded this take,
+   * present only when the single-camera path ran with the new
+   * engine (test) selected. The standard engine's takes carry no
+   * engine block: the receipt makes no claim it did not measure.
+   */
+  engine?: CaptureEngineInfo;
+}
+
+/**
+ * FINAL FIX Part 2 — one take's engine record. `fellBack` is the
+ * honest disclosure that the new engine (test) failed and the
+ * standard engine recorded the take; the counts are the engine's
+ * own ledger (frames it received, encoded, deliberately dropped at
+ * its queue gate, and grid slots it filled), present only when the
+ * engine itself reported them.
+ */
+export interface CaptureEngineInfo {
+  kind: 'webcodecs';
+  fellBack: boolean;
+  framesReceived?: number;
+  framesEncoded?: number;
+  framesDroppedByQueue?: number;
+  framesFilled?: number;
+  /** False when the prototype take is video-only — a disclosed limitation, never hidden. */
+  audioIncluded?: boolean;
 }
 
 export interface CaptureReceiptInput {
@@ -101,6 +127,8 @@ export interface CaptureReceiptInput {
   timingOutcome?: 'steadied' | 'original';
   /** R41 Step 3 Rung B — the frame rate a steadied take was re-timed to. */
   steadiedFps?: number;
+  /** FINAL FIX Part 2 — the engine record for this take, when the new engine (test) was selected. */
+  engine?: CaptureEngineInfo | null;
 }
 
 /** Build a receipt from the raw facts of one finished recording. */
@@ -168,6 +196,21 @@ export function buildCaptureReceipt(input: CaptureReceiptInput): CaptureReceipt 
     if (typeof expected === 'number' && Number.isFinite(expected) && expected > 0) {
       receipt.expectedFramesEstimate = Math.round(expected);
     }
+  }
+  if (input.engine && input.engine.kind === 'webcodecs') {
+    const count = (v: number | undefined): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : undefined;
+    const engine: CaptureEngineInfo = { kind: 'webcodecs', fellBack: input.engine.fellBack === true };
+    const framesReceived = count(input.engine.framesReceived);
+    if (framesReceived !== undefined) engine.framesReceived = framesReceived;
+    const framesEncoded = count(input.engine.framesEncoded);
+    if (framesEncoded !== undefined) engine.framesEncoded = framesEncoded;
+    const framesDroppedByQueue = count(input.engine.framesDroppedByQueue);
+    if (framesDroppedByQueue !== undefined) engine.framesDroppedByQueue = framesDroppedByQueue;
+    const framesFilled = count(input.engine.framesFilled);
+    if (framesFilled !== undefined) engine.framesFilled = framesFilled;
+    if (typeof input.engine.audioIncluded === 'boolean') engine.audioIncluded = input.engine.audioIncluded;
+    receipt.engine = engine;
   }
   return receipt;
 }
@@ -364,6 +407,36 @@ export function captureReceiptOrientationNote(receipt: CaptureReceipt): string |
   return null;
 }
 
+/**
+ * FINAL FIX Part 2 — the plain engine line for the review surface.
+ * A take that fell back says so plainly (the new engine hit a
+ * problem; the standard engine recorded it). A take the new engine
+ * recorded names it and reports its own ledger in plain words —
+ * frames recorded, frames dropped on purpose at its queue gate,
+ * gaps filled — and says "no sound recorded" whenever the take is
+ * video-only, so a silent prototype take is never discovered later.
+ * Null for standard-engine takes: no claim is made for them.
+ */
+export function captureReceiptEngineNote(receipt: CaptureReceipt): string | null {
+  const engine = receipt?.engine;
+  if (!engine) return null;
+  if (engine.fellBack) {
+    return 'The new engine (test) hit a problem, so this take used the standard engine';
+  }
+  let line = 'Recorded with the new engine (test)';
+  if (typeof engine.framesEncoded === 'number') {
+    line += ` — ${engine.framesEncoded} frames`;
+    if (typeof engine.framesDroppedByQueue === 'number' && engine.framesDroppedByQueue > 0) {
+      line += `, ${engine.framesDroppedByQueue} dropped on purpose`;
+    }
+    if (typeof engine.framesFilled === 'number' && engine.framesFilled > 0) {
+      line += `, ${engine.framesFilled} gaps filled`;
+    }
+  }
+  if (engine.audioIncluded === false) line += ' · no sound recorded';
+  return line;
+}
+
 export interface FormattedCaptureReceipt {
   /** e.g. "Recorded: 1080p · 30fps · high quality" */
   summary: string;
@@ -383,6 +456,8 @@ export interface FormattedCaptureReceipt {
   timingLine: string | null;
   /** R41 Step 3 Rung C — the orientation note for the review summary area; null when the orientations matched or are unknown. */
   orientationNote: string | null;
+  /** FINAL FIX Part 2 — the engine line for the review summary area; null for standard-engine takes. */
+  engineNote: string | null;
 }
 
 /**
@@ -431,6 +506,7 @@ export function formatCaptureReceipt(receipt: CaptureReceipt): FormattedCaptureR
     grantBelowAsked: receiptGrantBelowAsked(receipt),
     timingLine: captureReceiptTimingLine(receipt),
     orientationNote: captureReceiptOrientationNote(receipt),
+    engineNote: captureReceiptEngineNote(receipt),
   };
 }
 

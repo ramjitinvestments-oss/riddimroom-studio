@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Clapperboard, PictureInPicture2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { RecordClock } from './RecordClock';
 import { recordDoorOpen, recordTakeHealthFromReceipt } from '../../lib/healthEvents';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
 import {
@@ -44,8 +45,19 @@ import {
   buildCaptureReceipt,
   captureReceiptDropWarning,
   formatCaptureReceipt,
+  type CaptureEngineInfo,
   type CaptureReceipt,
 } from '../../lib/camera/captureReceipt';
+import {
+  WebcodecsTakeRecorder,
+  createWebcodecsTakeRecorder,
+  loadCaptureEngineChoice,
+  probeWebcodecsCapture,
+  saveCaptureEngineChoice,
+  type CaptureEngineKind,
+  type CaptureEngineTelemetry,
+  type WebcodecsProbeResult,
+} from '../../lib/camera/webcodecsCapture';
 import {
   assessMotion,
   coachStateForLevel,
@@ -490,7 +502,7 @@ function provenMimeFor(facing: CaptureFacingMode): string | undefined {
  * The strings themselves come from the lib formatter.
  */
 function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: string }) {
-  const { summary, details, technicalDetails, askedVsGranted, grantBelowAsked, timingLine, orientationNote } =
+  const { summary, details, technicalDetails, askedVsGranted, grantBelowAsked, timingLine, orientationNote, engineNote } =
     formatCaptureReceipt(receipt);
   const [showDetails, setShowDetails] = useState(false);
   // R32 Phase 3 — dropped-frame review warning: advisory only, and
@@ -515,6 +527,10 @@ function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: str
       {/* R41 Step 3 Rung B — the frame-timing outcome of the save:
           steadied onto an even grid, or the original timing kept. */}
       {timingLine && <p className="text-[11px] text-white/60">{timingLine}</p>}
+      {/* FINAL FIX Part 2 — the engine line: which engine recorded
+          the take, its own ledger when it keeps one, and the plain
+          fallback disclosure when the new engine (test) failed. */}
+      {engineNote && <p className="text-[11px] text-white/60">{engineNote}</p>}
       {details && <p className="text-[11px] text-white/50">{details}</p>}
       {dropWarning && <p className="text-[11px] text-amber-300">{dropWarning}</p>}
       {technicalDetails && (
@@ -566,7 +582,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   }, [idToken]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
+  /** The live take's recorder — a MediaRecorder, or the WebCodecs prototype adapter when the new engine (test) is selected. */
+  const recorderRef = useRef<MediaRecorder | WebcodecsTakeRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
@@ -601,7 +618,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   useEffect(() => {
     isRecordingRef.current = isRecording;
   }, [isRecording]);
-  const [recordSeconds, setRecordSeconds] = useState(0);
+  // FINAL FIX Part 1 — the elapsed-seconds counter no longer lives
+  // in this component's state: a state bump here re-rendered the
+  // whole camera tree every second of every take (one of the two
+  // ~100ms strikes the R41 forensics measured). The RecordClock
+  // leaf owns the ticking display now; this component only hears
+  // each second through `handleRecordSecond` for its auto-stops.
   const [isReady, setIsReady] = useState(false);
   // Review state (tweaks round): a stopped recording is HELD here for
   // preview + the add-as-main vs use-as-overlay choice instead of being
@@ -850,6 +872,25 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const [steadyStartEnabled, setSteadyStartEnabled] = useState<boolean>(() =>
     loadSteadyStartEnabled(browserLocalStorage()),
   );
+  // FINAL FIX Part 2 — the capture-engine choice: 'standard' is
+  // MediaRecorder (the default, always); 'webcodecs' is the new
+  // engine (test) prototype. Persisted like the steady-start
+  // toggle; the single-camera record path reads the ref mirror.
+  const [captureEngine, setCaptureEngine] = useState<CaptureEngineKind>(() =>
+    loadCaptureEngineChoice(browserLocalStorage()),
+  );
+  const captureEngineRef = useRef(captureEngine);
+  useEffect(() => {
+    captureEngineRef.current = captureEngine;
+  }, [captureEngine]);
+  /** The new engine's capability verdict for the current take shape (null = not probed yet). */
+  const [engineProbe, setEngineProbe] = useState<WebcodecsProbeResult | null>(null);
+  /** The engine the CURRENT take attempted ('webcodecs' or null for the standard engine). */
+  const engineAttemptRef = useRef<'webcodecs' | null>(null);
+  /** True when the current take's new-engine attempt failed and MediaRecorder took over. */
+  const engineFellBackRef = useRef(false);
+  /** The current take's engine ledger, delivered by the adapter just before its data. */
+  const engineTelemetryRef = useRef<CaptureEngineTelemetry | null>(null);
   /** True while the steady-start countdown overlay is up (the pending recorder start sits in a ref). */
   const [countdownActive, setCountdownActive] = useState(false);
   /** The countdown's displayed number (3, then 2, then 1) — set ONLY when the digit changes (R36 WS-4). */
@@ -1716,6 +1757,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         usedExact: boolean;
         orientationMismatch: boolean;
       } | null,
+      // FINAL FIX Part 2 — the take's engine record, when the new
+      // engine (test) was selected for it (null/absent otherwise).
+      engine?: CaptureEngineInfo | null,
     ): CaptureReceipt =>
       buildCaptureReceipt({
         trackSettings: settings ?? null,
@@ -1728,9 +1772,34 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         exactRetryAttempted: negotiation?.exactRetried,
         exactRetryUsed: negotiation?.usedExact,
         orientationMismatch: negotiation?.orientationMismatch,
+        engine: engine ?? null,
       }),
     [],
   );
+
+  /**
+   * FINAL FIX Part 2 — the engine record for the take that just
+   * stopped: which engine ran, whether it fell back to the standard
+   * engine, and its own frame ledger when it reported one. Null for
+   * standard-engine takes (their receipts carry no engine claim).
+   */
+  const engineInfoForTake = useCallback((): CaptureEngineInfo | null => {
+    if (engineAttemptRef.current !== 'webcodecs') return null;
+    const telemetry = engineTelemetryRef.current;
+    return {
+      kind: 'webcodecs',
+      fellBack: engineFellBackRef.current,
+      ...(telemetry
+        ? {
+            framesReceived: telemetry.framesReceived,
+            framesEncoded: telemetry.framesEncoded,
+            framesDroppedByQueue: telemetry.framesDroppedByQueue,
+            framesFilled: telemetry.framesFilled,
+            audioIncluded: telemetry.audioIncluded,
+          }
+        : {}),
+    };
+  }, []);
 
   /** The current stream's negotiation, snapshotted for one take (null for streams that never negotiated). */
   const negotiationSnapshotForTake = useCallback(() => {
@@ -1787,6 +1856,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         orientationMismatch: receipt.orientationMismatch,
         timingOutcome: outcome.status === 'steadied' ? 'steadied' : 'original',
         steadiedFps: outcome.status === 'steadied' ? outcome.plan.targetFps : undefined,
+        // FINAL FIX Part 2 — the engine record rides through the
+        // save step untouched: a prototype take's receipt still
+        // names its engine and its ledger after steadying.
+        engine: receipt.engine ?? null,
       });
       return { blob: outcome.blob, receipt: finalReceipt };
     },
@@ -1888,7 +1961,6 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     recorderRef.current = rearRecorder;
     frontRecorderRef.current = frontRecorder;
     setIsRecording(true);
-    setRecordSeconds(0);
   }, [dualMode, isReady, createRecorder, stopStream, canvasWidth, canvasHeight, beginFrameDropTracking, receiptForRecording, steadyTakeForProject]);
 
   const startRecording = useCallback(() => {
@@ -1908,7 +1980,34 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     // R41 WS-B — this take's asked-vs-granted snapshot, taken from
     // the stream's negotiation before the recorder exists.
     const negotiationSnapshot = negotiationSnapshotForTake();
-    const recorder = createRecorder(stream, provenMimeFor(facingModeRef.current));
+    // FINAL FIX Part 2 — engine selection for the single path: when
+    // the new engine (test) is chosen AND the platform pieces are
+    // all here, the take runs on the WebCodecs prototype consuming
+    // the SAME negotiated stream; otherwise — and whenever the
+    // prototype declines — the standard MediaRecorder records, so
+    // selection can never cost a take. (Dual and step-2 keep their
+    // own MediaRecorder paths and never come through here.)
+    engineAttemptRef.current = null;
+    engineFellBackRef.current = false;
+    engineTelemetryRef.current = null;
+    let recorder: MediaRecorder | WebcodecsTakeRecorder | null = null;
+    if (captureEngineRef.current === 'webcodecs') {
+      const grantedRate = grantedFps(settingsSnapshot);
+      const takeOptions = recorderOptionsForTrackSettings(settingsSnapshot, 'video/mp4');
+      const webcodecsRecorder = createWebcodecsTakeRecorder(stream, {
+        targetFps: grantedRate > 0 ? grantedRate : fpsChoiceRef.current,
+        videoBitrate: takeOptions.videoBitsPerSecond ?? 12_000_000,
+        audioBitrate: takeOptions.audioBitsPerSecond ?? 192_000,
+        onTelemetry: (telemetry) => {
+          engineTelemetryRef.current = telemetry;
+        },
+      });
+      if (webcodecsRecorder) {
+        recorder = webcodecsRecorder;
+        engineAttemptRef.current = 'webcodecs';
+      }
+    }
+    if (!recorder) recorder = createRecorder(stream, provenMimeFor(facingModeRef.current));
     if (!recorder) {
       // A failed start must not leave a camera test armed.
       testModeRef.current = false;
@@ -1952,17 +2051,28 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     }
     let tracker: FrameDropTracker | null = null;
     let startedAtMs = 0;
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
-    };
-    recorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'video/webm' });
+    // FINAL FIX Part 2 — one wiring function for the take's
+    // handlers, so the mid-take fallback below can re-wire the
+    // standard recorder through the IDENTICAL stop handling: the
+    // take's routing (diagnostics / camera test / project) never
+    // changes when the engine underneath it does.
+    const wireRecorder = (rec: MediaRecorder | WebcodecsTakeRecorder) => {
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      if (rec instanceof WebcodecsTakeRecorder) {
+        rec.onerror = () => {
+          swapToStandardRecorder();
+        };
+      }
+      rec.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: rec.mimeType || 'video/webm' });
       // R32 Phase 1 — the honest receipt for this recording, and the
       // proven-settings save (a recording that finished is proof the
       // settings work on this phone).
       const estimate = tracker?.stop() ?? null;
       tracker = null;
-      const receipt = receiptForRecording(settingsSnapshot, recorder.mimeType, blob, startedAtMs, estimate, negotiationSnapshot);
+      const receipt = receiptForRecording(settingsSnapshot, rec.mimeType, blob, startedAtMs, estimate, negotiationSnapshot, engineInfoForTake());
       const ceilingUpdate = negotiationSnapshot
         ? provenCeilingUpdate({
             askedShortSide: negotiationSnapshot.asked.shortSide,
@@ -1971,7 +2081,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           })
         : ({ kind: 'none' } as const);
       if (ceilingUpdate.kind === 'clear') clearProvenFpsCeiling(browserLocalStorage(), facingModeRef.current);
-      saveProvenProfile(facingModeRef.current, settingsSnapshot, recorder.mimeType, fpsChoiceRef.current, {
+      saveProvenProfile(facingModeRef.current, settingsSnapshot, rec.mimeType, fpsChoiceRef.current, {
         quality: qualityChoiceRef.current,
         outcome: estimate
           ? { droppedFrames: estimate.droppedFramesEstimate, expectedFrames: estimate.expectedFrames }
@@ -1998,7 +2108,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         };
         diagLongtaskRef.current = null;
         const recorderInfo = diagRecorderInfoRef.current ?? {
-          mimeType: recorder.mimeType,
+          mimeType: rec.mimeType,
           videoBitsPerSecond: 0,
           audioBitsPerSecond: 0,
         };
@@ -2026,6 +2136,21 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           census: censusSessionRef.current[facingModeRef.current] ?? null,
           frameSeries,
           longtasks: longtaskSummary,
+          // FINAL FIX Part 2 — the pack names the engine that ran
+          // and carries its frame ledger, so the device proof is
+          // measured from the engine's own counts.
+          engine:
+            engineAttemptRef.current === 'webcodecs'
+              ? {
+                  kind: 'webcodecs' as const,
+                  fellBack: engineFellBackRef.current,
+                  framesReceived: engineTelemetryRef.current?.framesReceived,
+                  framesEncoded: engineTelemetryRef.current?.framesEncoded,
+                  framesDroppedByQueue: engineTelemetryRef.current?.framesDroppedByQueue,
+                  framesFilled: engineTelemetryRef.current?.framesFilled,
+                  audioIncluded: engineTelemetryRef.current?.audioIncluded,
+                }
+              : { kind: 'mediarecorder' as const },
         });
         diagAskedRef.current = null;
         stopStream();
@@ -2072,15 +2197,73 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         // in the same frame.
         setPendingVideo({ blob: final.blob, url: URL.createObjectURL(final.blob), receipt: final.receipt });
       })();
+      };
     };
+    // FINAL FIX Part 2 — a failed new-engine take swaps to the
+    // standard engine mid-take: the prototype's partial output is
+    // discarded, the standard recorder starts from now, and the
+    // receipt + diagnostics record disclose the fallback. A take is
+    // never lost to the prototype.
+    const swapToStandardRecorder = () => {
+      // The gate is the ref itself: it holds the prototype adapter
+      // exactly while a prototype take is live (stopRecording nulls
+      // it, and a completed swap replaces it with the standard
+      // recorder) — so this runs at most once, for the right take,
+      // even when the error lands in the same tick as the start.
+      const current = recorderRef.current;
+      if (!(current instanceof WebcodecsTakeRecorder)) return;
+      const fallback = createRecorder(stream, provenMimeFor(facingModeRef.current));
+      if (!fallback) {
+        // No standard engine exists on this browser at all (the
+        // prototype was the only recorder): end the take cleanly
+        // rather than leaving a dead recording state behind.
+        current.ondataavailable = null;
+        current.onstop = null;
+        current.onerror = null;
+        current.dispose();
+        recorderRef.current = null;
+        testModeRef.current = false;
+        setIsTestingCamera(false);
+        diagModeRef.current = false;
+        setIsDiagRecording(false);
+        setIsRecording(false);
+        setError('Recording stopped — the camera could not start on this phone.');
+        return;
+      }
+      current.ondataavailable = null;
+      current.onstop = null;
+      current.onerror = null;
+      current.dispose();
+      chunksRef.current = [];
+      engineFellBackRef.current = true;
+      if (diagModeRef.current) {
+        diagRecorderInfoRef.current = {
+          mimeType: fallback.mimeType,
+          videoBitsPerSecond:
+            typeof fallback.videoBitsPerSecond === 'number'
+              ? fallback.videoBitsPerSecond
+              : recorderOptionsForTrackSettings(settingsSnapshot, fallback.mimeType).videoBitsPerSecond ?? 0,
+          audioBitsPerSecond:
+            typeof fallback.audioBitsPerSecond === 'number'
+              ? fallback.audioBitsPerSecond
+              : recorderOptionsForTrackSettings(settingsSnapshot, fallback.mimeType).audioBitsPerSecond ?? 0,
+        };
+      }
+      wireRecorder(fallback);
+      recorderRef.current = fallback;
+      startedAtMs = performance.now();
+      fallback.start(250);
+    };
+    wireRecorder(recorder);
     // R41 F02 — 250ms timeslice, as on the dual paths (see there).
+    // The prototype adapter accepts the same call and ignores the
+    // timeslice: its one data event is the worker's finished file.
     recorder.start(250);
     startedAtMs = performance.now();
     tracker = beginFrameDropTracking(videoRef.current, stream);
     recorderRef.current = recorder;
     setIsRecording(true);
-    setRecordSeconds(0);
-  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream, negotiationSnapshotForTake, steadyTakeForProject]);
+  }, [isReady, stopStream, dualMode, startDualRecording, createRecorder, dropStep1Url, dispatchTwoPass, beginFrameDropTracking, receiptForRecording, startStream, negotiationSnapshotForTake, steadyTakeForProject, engineInfoForTake]);
 
   const stopRecording = useCallback(() => {
     recorderRef.current?.stop();
@@ -2233,7 +2416,6 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       void playback.play().catch(() => {});
     }
     setIsRecording(true);
-    setRecordSeconds(0);
   }, [isReady, createRecorder, stopStream, dispatchTwoPass, twoPass.mainBlob, beginFrameDropTracking, receiptForRecording, negotiationSnapshotForTake, steadyTakeForProject]);
 
   /** Review-state confirm: hand the SAME CaptureResult to the normal path or the overlay path, per the user's pick. */
@@ -2341,13 +2523,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     startRecording();
   }, [isReady, isRecording, countdownActive, dualMode, twoPassPhase, pendingVideo, pendingDual, startRecording]);
 
-  // The test auto-stops at 10 seconds (the normal 10-minute cap
-  // effect below still applies to every other recording).
-  useEffect(() => {
-    if (isTestingCamera && isRecording && recordSeconds >= 10) {
-      stopRecording();
-    }
-  }, [isTestingCamera, isRecording, recordSeconds, stopRecording]);
+  // The test auto-stops at 10 seconds — enforced from the
+  // RecordClock tick (handleRecordSecond below), as are the
+  // diagnostics 60-second stop and the universal cap.
 
   /**
    * R41 WS-A — start the diagnostics session: one guided
@@ -2367,12 +2545,8 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     startRecording();
   }, [isReady, isRecording, countdownActive, dualMode, twoPassPhase, pendingVideo, pendingDual, startRecording]);
 
-  // The diagnostics take auto-stops at the script's 60 seconds.
-  useEffect(() => {
-    if (isDiagRecording && isRecording && recordSeconds >= DIAGNOSTICS_TOTAL_SECONDS) {
-      stopRecording();
-    }
-  }, [isDiagRecording, isRecording, recordSeconds, stopRecording]);
+  // The diagnostics take auto-stops at the script's 60 seconds —
+  // enforced from the RecordClock tick (handleRecordSecond below).
 
   /** Download a blob as a file (the report JSON / the test clip). Nothing is uploaded, ever. */
   const downloadBlobFile = useCallback((blob: Blob, filename: string) => {
@@ -2428,20 +2602,32 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     void startStream();
   }, [startStream]);
 
-  useEffect(() => {
-    if (!isRecording) return;
-    const interval = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
-  // "Universal 30-second media standard" — automatic stop at the limit,
-  // rather than relying on the user to notice the timer and click Stop
-  // themselves. Fires as soon as `recordSeconds` reaches the cap.
-  useEffect(() => {
-    if (isRecording && recordSeconds >= MAX_MEDIA_SECONDS) {
-      stopRecording();
-    }
-  }, [isRecording, recordSeconds, stopRecording]);
+  /**
+   * FINAL FIX Part 1 — the per-second enforcement the RecordClock
+   * leaf reports upward: the camera test stops at 10 seconds, the
+   * diagnostics take at the script's 60, and every recording at the
+   * "universal 30-second media standard" cap (MAX_MEDIA_SECONDS)
+   * rather than relying on the user noticing the timer. These used
+   * to be effects over a `recordSeconds` state held HERE — which is
+   * what forced the whole tree to re-render every second. The mode
+   * refs are the same flags the start paths set; the tick only ever
+   * fires while a take is recording (the leaf is mounted then), so
+   * no isRecording check is needed.
+   */
+  const handleRecordSecond = useCallback(
+    (seconds: number) => {
+      if (testModeRef.current && seconds >= 10) {
+        stopRecording();
+        return;
+      }
+      if (diagModeRef.current && seconds >= DIAGNOSTICS_TOTAL_SECONDS) {
+        stopRecording();
+        return;
+      }
+      if (seconds >= MAX_MEDIA_SECONDS) stopRecording();
+    },
+    [stopRecording],
+  );
 
   // R32 Phase 2 — light meter sampler: draw the live preview into a
   // tiny (<= 96px wide) offscreen canvas and analyse it with the
@@ -2452,15 +2638,24 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   // user's quality/fps choices.
   //
   // R36 WS-4 — schedule + output discipline: BEFORE a take the meter
-  // samples at the full ~4Hz; WHILE RECORDING it slows to at most
-  // 1/sec and the zebra recomputation is PAUSED (the grid keeps its
-  // last pre-take painting), so the canvas analysis pass never runs
-  // at 4Hz during a take. Outputs: the full reading goes to a ref;
-  // the pill state and the advice line reach React state ONLY on
-  // value transitions (the gates in readoutGate); the zebra cells
+  // samples at the full ~4Hz. Outputs: the full reading goes to a
+  // ref; the pill state and the advice line reach React state ONLY
+  // on value transitions (the gates in readoutGate); the zebra cells
   // are painted by direct DOM writes.
+  //
+  // FINAL FIX Part 1 — WHILE RECORDING the meter does not sample at
+  // all. Rung A had slowed it to 1/sec, but the forensics showed
+  // each of those once-a-second samples (drawImage of the preview +
+  // getImageData + per-cell analysis) landing as one of the paired
+  // ~100ms strikes in every second of a take. Now the effect returns
+  // before any interval exists: zero sampling work in-take, and the
+  // pill + zebra simply hold their last pre-take painting — the
+  // same freeze Rung A applied to the level indicator. Sampling
+  // resumes by itself when the take stops (this effect re-runs on
+  // the isRecording dep).
   useEffect(() => {
     if (!warmedUp || !isReady || dualMode || isStep2Phase || pendingVideo || pendingDual || error) return;
+    if (isRecording) return;
     let cancelled = false;
     const canvas = document.createElement('canvas');
     const recording = isRecording;
@@ -2477,9 +2672,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         ctx.drawImage(video, 0, 0, width, height);
         const image = ctx.getImageData(0, 0, width, height);
         if (cancelled) return;
-        // R41 Step 3 Rung A, Part 2 (F05) — while recording the zebra
-        // result is discarded under the zebraRecomputedWhile gate
-        // below, so don't pay for the per-cell zebra maths at all.
+        // R41 Step 3 Rung A, Part 2 (F05) — the zebra gate remains
+        // as the belt-and-braces switch, though after FINAL FIX
+        // Part 1 this sampler never runs during a take at all (the
+        // effect returns early above), so `recording` is false here.
         const result = analyzeLightSample({
           data: image.data,
           width,
@@ -2574,7 +2770,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         : twoPassPhase === 'step2-live'
           ? frontVideoRef.current
           : videoRef.current;
-      if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+      // FINAL FIX Part 1 — while recording, the frame-difference
+      // canvas work is suspended: no drawImage / getImageData of
+      // the preview during a take (the same class of strike the
+      // light meter used to land once a second). The gyro stream —
+      // the coach's PRIMARY source, already throttled to ~1Hz by
+      // Rung A's motionSampleAccepted gate — carries the in-take
+      // assessment on its own; the frame-diff fallback resumes for
+      // the countdown, where it feeds the steady-start decision.
+      if (!isRecording && video && video.videoWidth > 0 && video.videoHeight > 0) {
         const width = 48;
         const height = Math.max(1, Math.round((width * video.videoHeight) / video.videoWidth));
         canvas.width = width;
@@ -2600,6 +2804,31 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       }
       const { level } = assessMotion({ gyroSamples: buffer.gyro, frameDiffs: buffer.diffs });
       levelHistoryRef.current = [...levelHistoryRef.current.slice(-39), level];
+      // FINAL FIX Part 1 — the coach pill is painted HERE, on the
+      // sampler's own tick, through the same hysteresis gate and
+      // direct DOM writes as before. It used to run on its OWN
+      // second 1Hz interval that re-assessed the same buffers —
+      // two timers striking every second of a take where one does
+      // the whole job. While recording this tick IS the ~1Hz tick
+      // (coachIntervalMs below); before a take the pill never
+      // shows, so nothing paints.
+      if (isRecording) {
+        const next = coachGateRef.current.push(level, performance.now());
+        if (next !== undefined) {
+          const pill = coachPillRef.current;
+          if (pill) {
+            if (next === null) {
+              pill.style.display = 'none';
+            } else {
+              pill.textContent = next.text;
+              pill.className = `absolute bottom-3 left-3 text-[10px] font-bold uppercase tracking-wide text-white rounded px-2 py-1 pointer-events-none ${
+                next.tone === 'good' ? 'bg-emerald-600/85' : next.tone === 'warn' ? 'bg-amber-600/90' : 'bg-red-600/90'
+              }`;
+              pill.style.display = 'block';
+            }
+          }
+        }
+      }
     };
     tick();
     // R41 Step 3 Rung A, Part 2 — 250ms before a take (countdown
@@ -2621,35 +2850,15 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   // new level must persist across two consecutive samples) and a
   // 500ms minimum between visible changes, so even the DOM paints
   // are rare; the sampler ticks write nothing to React at all.
+  //
+  // FINAL FIX Part 1 — the painting itself moved INTO the sampler
+  // tick above (one 1Hz timer in-take, not two); all that remains
+  // here is the stop behaviour: reset the gate and hide the pill
+  // the moment recording ends. No interval lives in this effect.
   useEffect(() => {
-    if (!isRecording) {
-      coachGateRef.current.reset();
-      if (coachPillRef.current) coachPillRef.current.style.display = 'none';
-      return;
-    }
-    const interval = window.setInterval(() => {
-      const { level } = assessMotion({
-        gyroSamples: motionBufferRef.current.gyro,
-        frameDiffs: motionBufferRef.current.diffs,
-      });
-      const next = coachGateRef.current.push(level, performance.now());
-      if (next === undefined) return;
-      const pill = coachPillRef.current;
-      if (!pill) return;
-      if (next === null) {
-        pill.style.display = 'none';
-        return;
-      }
-      pill.textContent = next.text;
-      pill.className = `absolute bottom-3 left-3 text-[10px] font-bold uppercase tracking-wide text-white rounded px-2 py-1 pointer-events-none ${
-        next.tone === 'good' ? 'bg-emerald-600/85' : next.tone === 'warn' ? 'bg-amber-600/90' : 'bg-red-600/90'
-      }`;
-      pill.style.display = 'block';
-      // R41 Step 3 Rung A, Part 2 — this effect only runs while
-      // recording, so coachIntervalMs(isRecording) is the ~1Hz
-      // in-take cadence here; the pill clears when recording stops.
-    }, coachIntervalMs(isRecording));
-    return () => window.clearInterval(interval);
+    if (isRecording) return;
+    coachGateRef.current.reset();
+    if (coachPillRef.current) coachPillRef.current.style.display = 'none';
   }, [isRecording]);
 
   /**
@@ -2789,7 +2998,38 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     });
   }, []);
 
-  const nearLimit = recordSeconds >= MAX_MEDIA_SECONDS - 5;
+  /** FINAL FIX Part 2 — the capture-engine switch, persisted like
+   *  the steady-start toggle. Standard stays the default; the new
+   *  engine (test) is a deliberate, reversible pick. */
+  const selectCaptureEngine = useCallback((kind: CaptureEngineKind) => {
+    setCaptureEngine(kind);
+    saveCaptureEngineChoice(browserLocalStorage(), kind);
+  }, []);
+
+  // FINAL FIX Part 2 — the capability probe runs when the settings
+  // sheet opens: the new engine is only offered when the platform
+  // has the track processor + encoder AND an encoder config probes
+  // supported for this take's shape (the live track's settings, or
+  // the 4K ask before a stream exists). The verdict is cached for
+  // the session; the take-time factory re-checks presence, and any
+  // encoder refusal at start falls the take back (see
+  // swapToStandardRecorder).
+  useEffect(() => {
+    if (!cameraSettingsOpen || engineProbe !== null) return;
+    let cancelled = false;
+    const settings = streamRef.current?.getVideoTracks()[0]?.getSettings?.() ?? null;
+    const width = settings?.width && settings.width > 0 ? settings.width : 3840;
+    const height = settings?.height && settings.height > 0 ? settings.height : 2160;
+    const fps = grantedFps(settings) > 0 ? grantedFps(settings) : fpsChoice;
+    const bitrate =
+      recorderOptionsForTrackSettings(settings, 'video/mp4').videoBitsPerSecond ?? 45_000_000;
+    void probeWebcodecsCapture({ width, height, fps, bitrate }).then((result) => {
+      if (!cancelled) setEngineProbe(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cameraSettingsOpen, engineProbe, fpsChoice]);
 
   // R32 Phase 2 — derived viewfinder values. The lock button renders
   // only when at least one system offers a manual mode; the chip
@@ -2989,21 +3229,28 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
           </div>
         )}
         {isRecording && (
-          <>
-            <div
-              className={`absolute top-3 left-3 flex items-center gap-2 text-white text-xs font-bold px-2 py-1 rounded ${
-                nearLimit ? 'bg-amber-600/90' : 'bg-red-600/90'
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> REC {formatClock(recordSeconds)} / {formatClock(MAX_MEDIA_SECONDS)}
-            </div>
-            <div className="absolute top-0 left-0 right-0 h-1 bg-white/10">
-              <div
-                className={`h-full transition-all ${nearLimit ? 'bg-amber-500' : 'bg-red-500'}`}
-                style={{ width: `${Math.min(100, (recordSeconds / MAX_MEDIA_SECONDS) * 100)}%` }}
-              />
-            </div>
-          </>
+          <RecordClock onSecond={handleRecordSecond}>
+            {(recordSeconds) => {
+              const nearLimit = recordSeconds >= MAX_MEDIA_SECONDS - 5;
+              return (
+                <>
+                  <div
+                    className={`absolute top-3 left-3 flex items-center gap-2 text-white text-xs font-bold px-2 py-1 rounded ${
+                      nearLimit ? 'bg-amber-600/90' : 'bg-red-600/90'
+                    }`}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> REC {formatClock(recordSeconds)} / {formatClock(MAX_MEDIA_SECONDS)}
+                  </div>
+                  <div className="absolute top-0 left-0 right-0 h-1 bg-white/10">
+                    <div
+                      className={`h-full transition-all ${nearLimit ? 'bg-amber-500' : 'bg-red-500'}`}
+                      style={{ width: `${Math.min(100, (recordSeconds / MAX_MEDIA_SECONDS) * 100)}%` }}
+                    />
+                  </div>
+                </>
+              );
+            }}
+          </RecordClock>
         )}
         {!isRecording && isReady && !pendingVideo && (
           <div className="absolute bottom-3 left-3 right-3 text-center text-[10px] text-white/50 bg-black/40 rounded px-2 py-1">
@@ -3422,6 +3669,52 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   <p className="text-[11px] text-white/70 text-center">{provenFpsCeilingText(provenCeiling)}</p>
                 )}
               </div>
+              {/* FINAL FIX Part 2 — the capture-engine switch: the
+                  standard engine (MediaRecorder) or the new engine
+                  (test) — the WebCodecs prototype that stamps every
+                  frame onto an even timing grid as it records. The
+                  new engine is offered only when the capability
+                  probe passed; otherwise the sheet says why in
+                  plain words and Standard stays in force. */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Capture engine</span>
+                <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Capture engine">
+                  <button
+                    onClick={() => selectCaptureEngine('standard')}
+                    disabled={isRecording}
+                    aria-pressed={captureEngine === 'standard'}
+                    className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                      captureEngine === 'standard' ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                    }`}
+                  >
+                    Standard
+                  </button>
+                  <button
+                    onClick={() => selectCaptureEngine('webcodecs')}
+                    disabled={isRecording || (engineProbe !== null && !engineProbe.supported)}
+                    aria-pressed={captureEngine === 'webcodecs'}
+                    className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                      captureEngine === 'webcodecs' ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                    }`}
+                  >
+                    New engine (test)
+                  </button>
+                </div>
+                {engineProbe !== null && !engineProbe.supported ? (
+                  <p className="text-[11px] text-white/70 text-center">
+                    The new engine isn&rsquo;t available in this browser, so the standard engine is used.
+                  </p>
+                ) : captureEngine === 'webcodecs' ? (
+                  <p className="text-[11px] text-white/70 text-center">
+                    Test engine: it stamps every frame onto an even timing grid as it records. If it hits a problem, the
+                    standard engine takes over the take and the receipt says so.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-white/70 text-center">
+                    The standard engine, as always — the new engine (test) is there when you want to try it.
+                  </p>
+                )}
+              </div>
               {/* R24 WS-P3: guides toggle (in the sheet, R40 P-16) */}
               <button
                 onClick={() => setShowGuides((g) => !g)}
@@ -3585,17 +3878,19 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             diagnostics take: which step, what to do, time left. */}
         {isDiagRecording && isRecording && (
           <div className="max-w-md w-full rounded-lg bg-gold/15 border border-gold/40 px-3 py-2.5 text-center" aria-live="polite">
-            {(() => {
-              const { phase, index, secondsLeftInPhase } = diagnosticsPhaseAt(recordSeconds);
-              return (
-                <>
-                  <p className="text-xs font-bold uppercase tracking-wide text-gold">
-                    Step {index + 1} of {DIAGNOSTICS_PHASES.length} — {phase.label} · {secondsLeftInPhase}s left
-                  </p>
-                  <p className="text-[11px] text-white/85">{phase.prompt}</p>
-                </>
-              );
-            })()}
+            <RecordClock>
+              {(recordSeconds) => {
+                const { phase, index, secondsLeftInPhase } = diagnosticsPhaseAt(recordSeconds);
+                return (
+                  <>
+                    <p className="text-xs font-bold uppercase tracking-wide text-gold">
+                      Step {index + 1} of {DIAGNOSTICS_PHASES.length} — {phase.label} · {secondsLeftInPhase}s left
+                    </p>
+                    <p className="text-[11px] text-white/85">{phase.prompt}</p>
+                  </>
+                );
+              }}
+            </RecordClock>
           </div>
         )}
         {/* R41 WS-A — diagnostics result: the plain-words evidence

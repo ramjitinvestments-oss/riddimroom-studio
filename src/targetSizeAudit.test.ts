@@ -112,8 +112,12 @@ describe('R40 P-15/P-16 — camera capture row + settings sheet', () => {
     const source = camera();
     const sheetAt = source.indexOf('data-camera-settings-sheet');
     expect(sheetAt, 'CameraCapture.tsx: expected a data-camera-settings-sheet element').toBeGreaterThan(-1);
-    const sheet = source.slice(sheetAt, sheetAt + 9000);
-    for (const label of ['Capture quality', 'Frame rate', 'Guides', 'Steady start', 'Level', 'Test my camera']) {
+    // FINAL FIX Part 2 grew the sheet by the Capture engine block;
+    // the window covers the whole sheet (its last control, Test my
+    // camera, now sits ≈10.3k chars in) — widened deliberately,
+    // with the new control pinned inside the sheet below.
+    const sheet = source.slice(sheetAt, sheetAt + 12500);
+    for (const label of ['Capture quality', 'Frame rate', 'Capture engine', 'Guides', 'Steady start', 'Level', 'Test my camera']) {
       expect(sheet.includes(label), `CameraCapture.tsx: expected "${label}" inside the settings sheet`).toBe(true);
     }
     const sheetTargets = sheet.split('min-h-11').length - 1;
@@ -121,7 +125,9 @@ describe('R40 P-15/P-16 — camera capture row + settings sheet', () => {
     // The settings controls exist ONLY inside the sheet (one instance each).
     expect(source.split('aria-label="Capture quality"').length - 1).toBe(1);
     expect(source.split('aria-label="Frame rate"').length - 1).toBe(1);
+    expect(source.split('aria-label="Capture engine"').length - 1).toBe(1);
     expect(source.indexOf('aria-label="Capture quality"')).toBeGreaterThan(sheetAt);
+    expect(source.indexOf('aria-label="Capture engine"')).toBeGreaterThan(sheetAt);
     expect(source.indexOf('onClick={() => setShowGuides')).toBeGreaterThan(sheetAt);
     expect(source.indexOf('onClick={toggleSteadyStart}')).toBeGreaterThan(sheetAt);
   });
@@ -132,7 +138,7 @@ describe('R40 P-15/P-16 — camera capture row + settings sheet', () => {
     expect(source.includes('Camera settings')).toBe(true);
     // The essentials stayed on the surface (outside the sheet).
     const sheetAt = source.indexOf('data-camera-settings-sheet');
-    const surface = source.slice(0, sheetAt) + source.slice(sheetAt + 9000);
+    const surface = source.slice(0, sheetAt) + source.slice(sheetAt + 12500);
     for (const label of ['Lock focus & light', 'Flashlight', 'Selfie light']) {
       expect(surface.includes(label), `CameraCapture.tsx: expected "${label}" to stay on the surface`).toBe(true);
     }
