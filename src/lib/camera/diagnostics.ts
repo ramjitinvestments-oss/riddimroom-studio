@@ -263,16 +263,16 @@ export interface DiagnosticsEvidenceInput {
   longtasks: LongtaskSummary;
   /**
    * FINAL FIX Part 2 — the engine that recorded this check and,
-   * for the new engine (test), its own frame ledger. Absent when
+   * for the new engine, its own frame ledger. Absent when
    * the caller did not record it; the pack then carries the
-   * standard-engine record (MediaRecorder is the default truth).
+   * standard-engine record (the standard engine's takes carry its own record).
    */
   engine?: DiagnosticsEngineInput | null;
 }
 
 /**
  * FINAL FIX Part 2 — one diagnostics take's engine record. The
- * counts are the prototype engine's own ledger; they are null for
+ * counts are the new engine's own ledger; they are null for
  * the standard engine, which keeps no such ledger (never invented).
  */
 export interface DiagnosticsEngineInput {
@@ -341,11 +341,11 @@ export function buildDiagnosticsEvidencePack(input: DiagnosticsEvidenceInput): D
   if (input.engine?.kind === 'webcodecs') {
     notes.push(
       input.engine.fellBack
-        ? 'The new engine (test) hit a problem during this check, so the standard engine recorded it. The saved clip is the standard engine’s raw output.'
-        : 'This check was recorded with the new engine (test). The saved clip is that engine’s raw output, stamped onto an even frame-rate grid as it recorded — it has NOT been through the project steadying step.',
+        ? 'The new engine hit a problem during this check, so the standard engine recorded it. The saved clip is the standard engine’s raw output.'
+        : 'This check was recorded with the new engine. The saved clip is that engine’s raw output, stamped onto an even frame-rate grid as it recorded — it has NOT been through the project steadying step.',
     );
     if (input.engine.audioIncluded === false && !input.engine.fellBack) {
-      notes.push('The new engine (test) recorded no sound on this check — the platform declined its audio encode.');
+      notes.push('The new engine recorded no sound on this check — the platform declined its audio encode.');
     }
   }
   return {
@@ -449,9 +449,9 @@ export function formatDiagnosticsSummary(pack: DiagnosticsEvidencePack): string[
   // check and, for the new engine, its own ledger in plain words.
   if (pack.engine?.kind === 'webcodecs') {
     if (pack.engine.fellBack) {
-      lines.push('The new engine (test) hit a problem — this check used the standard engine');
+      lines.push('The new engine hit a problem — this check used the standard engine');
     } else {
-      let line = 'Recorded with the new engine (test)';
+      let line = 'Recorded with the new engine';
       if (typeof pack.engine.framesEncoded === 'number') {
         line += `: ${pack.engine.framesEncoded} frames`;
         if (typeof pack.engine.framesDroppedByQueue === 'number' && pack.engine.framesDroppedByQueue > 0) {

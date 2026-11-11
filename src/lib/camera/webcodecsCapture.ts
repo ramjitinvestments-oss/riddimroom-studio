@@ -1,6 +1,12 @@
 /**
- * FINAL FIX Part 2 — the WebCodecs capture prototype (the
- * device-proof vehicle; NOT the default engine).
+ * FINAL FIX Part 2 — the WebCodecs capture engine. Built as a
+ * device-proof prototype beside MediaRecorder, it PASSED its
+ * on-device proof on the owner's S25 Ultra (2026-11-11: both
+ * cameras, zero queue drops, zero fallbacks, audio included) and
+ * was promoted to the engine of record: where the capability gate
+ * below passes, it is now the DEFAULT capture engine, with the
+ * standard engine (MediaRecorder) still selectable and still the
+ * automatic fallback.
  *
  * The research verdict (see
  * ~/workspace/research_notes/android-chrome-smooth-camera-final-fix-20261109-2255/report.md):
@@ -9,8 +15,7 @@
  * arrives with capture timestamps, so no setting makes it CFR.
  * The only in-browser architecture that owns timestamps is
  * MediaStreamTrackProcessor → VideoEncoder → an app-driven muxer.
- * This module is that pipeline, built as a PROTOTYPE beside
- * MediaRecorder:
+ * This module is that pipeline:
  *
  * - Same negotiated stream (the ladder / ceiling / flip machinery
  *   is untouched — only the recording leg differs).
@@ -23,7 +28,7 @@
  *   slots the pipeline missed are filled with a repeat of the
  *   previous frame and counted.
  * - Audio is encoded in the same worker (AAC) and anchored to the
- *   first video frame's clock, so a prototype take carries its
+ *   first video frame's clock, so a new-engine take carries its
  *   sound in sync. When the platform declines the audio encode,
  *   the take is video-only and the telemetry SAYS so — the receipt
  *   and the diagnostics pack disclose it, never hide it.
@@ -36,10 +41,12 @@
  * NOT on this engine (they keep their own MediaRecorder paths).
  *
  * Capability gate first: nothing here is offered unless the
- * platform pieces exist and an encoder config probes supported.
- * If the engine fails to START or errors MID-TAKE, the component
- * falls back to MediaRecorder for the take and the receipt
- * discloses it — a take is never lost to the prototype.
+ * platform pieces exist and an encoder config probes supported —
+ * where the gate fails, the standard engine is used and the
+ * settings sheet says why in plain words. If the engine fails to
+ * START or errors MID-TAKE, the component falls back to
+ * MediaRecorder for the take and the receipt discloses it — a
+ * take is never lost to the new engine.
  *
  * $0 rule: WebCodecs + Mediabunny (already a dependency). No new
  * dependencies; the worker is bundled by the existing toolchain.
@@ -65,16 +72,25 @@ export function serializeCaptureEngineChoice(kind: CaptureEngineKind): string {
   return kind === 'webcodecs' ? 'webcodecs' : 'standard';
 }
 
-/** Parse a stored choice; anything unrecognised is the standard engine (the safe default). */
+/**
+ * Parse a stored choice. The stored value is only ever written by
+ * an explicit pick in the settings sheet, so a stored 'standard'
+ * is a deliberate choice and is honoured as-is. Anything else —
+ * absent, unrecognised — means no explicit choice exists, and the
+ * DEFAULT applies: the new engine (promoted 2026-11-11 after its
+ * on-device proof). The capability gate still decides at take
+ * time whether the new engine can actually run on this browser;
+ * where it cannot, the standard engine records.
+ */
 export function parseCaptureEngineChoice(raw: string | null | undefined): CaptureEngineKind {
-  return raw === 'webcodecs' ? 'webcodecs' : 'standard';
+  return raw === 'standard' ? 'standard' : 'webcodecs';
 }
 
 export function loadCaptureEngineChoice(storage: CaptureEngineStorage | null | undefined): CaptureEngineKind {
   try {
     return parseCaptureEngineChoice(storage?.getItem(CAPTURE_ENGINE_STORAGE_KEY));
   } catch {
-    return 'standard';
+    return parseCaptureEngineChoice(null);
   }
 }
 
@@ -94,7 +110,7 @@ export function saveCaptureEngineChoice(
 /* ------------------------------------------------------------------ */
 
 /**
- * The prototype engine's own count of one take. Every number was
+ * The new engine's own count of one take. Every number was
  * actually counted by the pipeline — a frame the queue gate dropped
  * is here, a grid slot the muxer filled is here. These counts land
  * in the capture receipt and the diagnostics pack, so the device
@@ -444,7 +460,7 @@ export interface WebcodecsTakeOptions {
 }
 
 /**
- * One prototype-engine take, shaped exactly like the MediaRecorder
+ * One new-engine take, shaped exactly like the MediaRecorder
  * the single-camera path already drives: assign ondataavailable /
  * onstop / onerror, call start(), later stop(). The finished file
  * is delivered as ONE data event (the worker muxes the whole take),
@@ -632,7 +648,7 @@ export class WebcodecsTakeRecorder {
 }
 
 /**
- * Create one prototype take recorder for `stream`, or null when the
+ * Create one new-engine take recorder for `stream`, or null when the
  * platform pieces the engine needs are not all here (no track
  * processor, no encoder, no worker) — the caller then uses the
  * standard engine without the user ever seeing a broken option.

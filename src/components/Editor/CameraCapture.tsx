@@ -529,7 +529,7 @@ function ReceiptLines({ receipt, label }: { receipt: CaptureReceipt; label?: str
       {timingLine && <p className="text-[11px] text-white/60">{timingLine}</p>}
       {/* FINAL FIX Part 2 — the engine line: which engine recorded
           the take, its own ledger when it keeps one, and the plain
-          fallback disclosure when the new engine (test) failed. */}
+          fallback disclosure when the new engine failed. */}
       {engineNote && <p className="text-[11px] text-white/60">{engineNote}</p>}
       {details && <p className="text-[11px] text-white/50">{details}</p>}
       {dropWarning && <p className="text-[11px] text-amber-300">{dropWarning}</p>}
@@ -582,7 +582,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   }, [idToken]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  /** The live take's recorder — a MediaRecorder, or the WebCodecs prototype adapter when the new engine (test) is selected. */
+  /** The live take's recorder — a MediaRecorder, or the WebCodecs adapter when the new engine is selected. */
   const recorderRef = useRef<MediaRecorder | WebcodecsTakeRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
@@ -872,10 +872,11 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   const [steadyStartEnabled, setSteadyStartEnabled] = useState<boolean>(() =>
     loadSteadyStartEnabled(browserLocalStorage()),
   );
-  // FINAL FIX Part 2 — the capture-engine choice: 'standard' is
-  // MediaRecorder (the default, always); 'webcodecs' is the new
-  // engine (test) prototype. Persisted like the steady-start
-  // toggle; the single-camera record path reads the ref mirror.
+  // FINAL FIX Part 2 — the capture-engine choice: 'webcodecs' is
+  // the new engine (the default wherever its capability gate
+  // passes); 'standard' is MediaRecorder. Persisted like the
+  // steady-start toggle; the single-camera record path reads the
+  // ref mirror.
   const [captureEngine, setCaptureEngine] = useState<CaptureEngineKind>(() =>
     loadCaptureEngineChoice(browserLocalStorage()),
   );
@@ -1758,7 +1759,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         orientationMismatch: boolean;
       } | null,
       // FINAL FIX Part 2 — the take's engine record, when the new
-      // engine (test) was selected for it (null/absent otherwise).
+      // engine recorded it (null/absent otherwise).
       engine?: CaptureEngineInfo | null,
     ): CaptureReceipt =>
       buildCaptureReceipt({
@@ -1857,7 +1858,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
         timingOutcome: outcome.status === 'steadied' ? 'steadied' : 'original',
         steadiedFps: outcome.status === 'steadied' ? outcome.plan.targetFps : undefined,
         // FINAL FIX Part 2 — the engine record rides through the
-        // save step untouched: a prototype take's receipt still
+        // save step untouched: a new-engine take's receipt still
         // names its engine and its ledger after steadying.
         engine: receipt.engine ?? null,
       });
@@ -1981,10 +1982,10 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     // the stream's negotiation before the recorder exists.
     const negotiationSnapshot = negotiationSnapshotForTake();
     // FINAL FIX Part 2 — engine selection for the single path: when
-    // the new engine (test) is chosen AND the platform pieces are
-    // all here, the take runs on the WebCodecs prototype consuming
+    // the new engine is the choice AND the platform pieces are
+    // all here, the take runs on the WebCodecs engine consuming
     // the SAME negotiated stream; otherwise — and whenever the
-    // prototype declines — the standard MediaRecorder records, so
+    // new engine declines — the standard MediaRecorder records, so
     // selection can never cost a take. (Dual and step-2 keep their
     // own MediaRecorder paths and never come through here.)
     engineAttemptRef.current = null;
@@ -2200,13 +2201,13 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       };
     };
     // FINAL FIX Part 2 — a failed new-engine take swaps to the
-    // standard engine mid-take: the prototype's partial output is
+    // standard engine mid-take: the new engine's partial output is
     // discarded, the standard recorder starts from now, and the
     // receipt + diagnostics record disclose the fallback. A take is
-    // never lost to the prototype.
+    // never lost to the new engine.
     const swapToStandardRecorder = () => {
-      // The gate is the ref itself: it holds the prototype adapter
-      // exactly while a prototype take is live (stopRecording nulls
+      // The gate is the ref itself: it holds the new-engine adapter
+      // exactly while a new-engine take is live (stopRecording nulls
       // it, and a completed swap replaces it with the standard
       // recorder) — so this runs at most once, for the right take,
       // even when the error lands in the same tick as the start.
@@ -2215,7 +2216,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
       const fallback = createRecorder(stream, provenMimeFor(facingModeRef.current));
       if (!fallback) {
         // No standard engine exists on this browser at all (the
-        // prototype was the only recorder): end the take cleanly
+        // new engine was the only recorder): end the take cleanly
         // rather than leaving a dead recording state behind.
         current.ondataavailable = null;
         current.onstop = null;
@@ -2256,7 +2257,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
     };
     wireRecorder(recorder);
     // R41 F02 — 250ms timeslice, as on the dual paths (see there).
-    // The prototype adapter accepts the same call and ignores the
+    // The new-engine adapter accepts the same call and ignores the
     // timeslice: its one data event is the worker's finished file.
     recorder.start(250);
     startedAtMs = performance.now();
@@ -2999,8 +3000,9 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
   }, []);
 
   /** FINAL FIX Part 2 — the capture-engine switch, persisted like
-   *  the steady-start toggle. Standard stays the default; the new
-   *  engine (test) is a deliberate, reversible pick. */
+   *  the steady-start toggle. The new engine is the default where
+   *  its capability gate passes; the pick is deliberate and
+   *  reversible, and a saved pick is honoured as-is. */
   const selectCaptureEngine = useCallback((kind: CaptureEngineKind) => {
     setCaptureEngine(kind);
     saveCaptureEngineChoice(browserLocalStorage(), kind);
@@ -3670,15 +3672,25 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                 )}
               </div>
               {/* FINAL FIX Part 2 — the capture-engine switch: the
-                  standard engine (MediaRecorder) or the new engine
-                  (test) — the WebCodecs prototype that stamps every
-                  frame onto an even timing grid as it records. The
-                  new engine is offered only when the capability
-                  probe passed; otherwise the sheet says why in
-                  plain words and Standard stays in force. */}
+                  new engine (WebCodecs — it stamps every frame onto
+                  an even timing grid as it records) is the default
+                  wherever the capability probe passes; the standard
+                  engine (MediaRecorder) stays selectable. Where the
+                  probe fails, the sheet says why in plain words and
+                  the standard engine stays in force. */}
               <div className="flex flex-col gap-1.5">
                 <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Capture engine</span>
                 <div className="flex items-center gap-1 bg-white/5 rounded-lg p-1" role="group" aria-label="Capture engine">
+                  <button
+                    onClick={() => selectCaptureEngine('webcodecs')}
+                    disabled={isRecording || (engineProbe !== null && !engineProbe.supported)}
+                    aria-pressed={captureEngine === 'webcodecs'}
+                    className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
+                      captureEngine === 'webcodecs' ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
+                    }`}
+                  >
+                    New engine
+                  </button>
                   <button
                     onClick={() => selectCaptureEngine('standard')}
                     disabled={isRecording}
@@ -3689,16 +3701,6 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   >
                     Standard
                   </button>
-                  <button
-                    onClick={() => selectCaptureEngine('webcodecs')}
-                    disabled={isRecording || (engineProbe !== null && !engineProbe.supported)}
-                    aria-pressed={captureEngine === 'webcodecs'}
-                    className={`min-h-11 px-3 inline-flex items-center justify-center text-[11px] font-bold uppercase tracking-wide rounded-md disabled:opacity-40 transition ${
-                      captureEngine === 'webcodecs' ? 'bg-gold text-black' : 'text-white/70 hover:bg-white/10'
-                    }`}
-                  >
-                    New engine (test)
-                  </button>
                 </div>
                 {engineProbe !== null && !engineProbe.supported ? (
                   <p className="text-[11px] text-white/70 text-center">
@@ -3706,12 +3708,12 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   </p>
                 ) : captureEngine === 'webcodecs' ? (
                   <p className="text-[11px] text-white/70 text-center">
-                    Test engine: it stamps every frame onto an even timing grid as it records. If it hits a problem, the
+                    The new engine stamps every frame onto an even timing grid as it records. If it hits a problem, the
                     standard engine takes over the take and the receipt says so.
                   </p>
                 ) : (
                   <p className="text-[11px] text-white/70 text-center">
-                    The standard engine, as always — the new engine (test) is there when you want to try it.
+                    The standard engine — the new engine is there when you want it.
                   </p>
                 )}
               </div>

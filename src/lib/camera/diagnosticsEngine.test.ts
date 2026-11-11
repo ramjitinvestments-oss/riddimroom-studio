@@ -1,8 +1,8 @@
 /**
  * FINAL FIX Part 2 — the diagnostics pack's engine record: the pack
- * names the engine that ran the check and carries the prototype's
+ * names the engine that ran the check and carries the new engine's
  * frame ledger, the summary speaks it in plain words, and the
- * notes state honestly that a prototype clip is that engine's RAW
+ * notes state honestly that a new-engine clip is that engine's RAW
  * output (grid-stamped at capture, never steadied).
  */
 
@@ -48,7 +48,7 @@ describe('diagnostics pack — engine record', () => {
     expect(formatDiagnosticsSummary(pack).join('\n')).not.toContain('new engine');
   });
 
-  it('a prototype check carries the engine name and its own counts', () => {
+  it('a new-engine check carries the engine name and its own counts', () => {
     const pack = buildDiagnosticsEvidencePack({
       ...baseInput,
       engine: {
@@ -71,7 +71,7 @@ describe('diagnostics pack — engine record', () => {
       audioIncluded: true,
     });
     const summary = formatDiagnosticsSummary(pack).join('\n');
-    expect(summary).toContain('Recorded with the new engine (test): 1797 frames, 3 dropped on purpose, 12 gaps filled');
+    expect(summary).toContain('Recorded with the new engine: 1797 frames, 3 dropped on purpose, 12 gaps filled');
     // The notes disclose the clip is the engine's RAW output.
     expect(pack.notes.join('\n')).toContain('raw output');
     expect(pack.notes.join('\n')).toContain('NOT been through the project steadying step');
@@ -85,12 +85,12 @@ describe('diagnostics pack — engine record', () => {
     expect(pack.engine.kind).toBe('webcodecs');
     expect(pack.engine.fellBack).toBe(true);
     expect(formatDiagnosticsSummary(pack).join('\n')).toContain(
-      'The new engine (test) hit a problem — this check used the standard engine',
+      'The new engine hit a problem — this check used the standard engine',
     );
     expect(pack.notes.join('\n')).toContain('standard engine recorded it');
   });
 
-  it('a video-only prototype check discloses the missing sound in pack and summary', () => {
+  it('a video-only new-engine check discloses the missing sound in pack and summary', () => {
     const pack = buildDiagnosticsEvidencePack({
       ...baseInput,
       engine: { kind: 'webcodecs', fellBack: false, framesEncoded: 1800, audioIncluded: false },

@@ -82,7 +82,7 @@ export interface CaptureReceipt {
   /**
    * FINAL FIX Part 2 — the capture engine that recorded this take,
    * present only when the single-camera path ran with the new
-   * engine (test) selected. The standard engine's takes carry no
+   * engine ran. The standard engine's takes carry no
    * engine block: the receipt makes no claim it did not measure.
    */
   engine?: CaptureEngineInfo;
@@ -90,7 +90,7 @@ export interface CaptureReceipt {
 
 /**
  * FINAL FIX Part 2 — one take's engine record. `fellBack` is the
- * honest disclosure that the new engine (test) failed and the
+ * honest disclosure that the new engine failed and the
  * standard engine recorded the take; the counts are the engine's
  * own ledger (frames it received, encoded, deliberately dropped at
  * its queue gate, and grid slots it filled), present only when the
@@ -103,7 +103,7 @@ export interface CaptureEngineInfo {
   framesEncoded?: number;
   framesDroppedByQueue?: number;
   framesFilled?: number;
-  /** False when the prototype take is video-only — a disclosed limitation, never hidden. */
+  /** False when the new-engine take is video-only — a disclosed limitation, never hidden. */
   audioIncluded?: boolean;
 }
 
@@ -127,7 +127,7 @@ export interface CaptureReceiptInput {
   timingOutcome?: 'steadied' | 'original';
   /** R41 Step 3 Rung B — the frame rate a steadied take was re-timed to. */
   steadiedFps?: number;
-  /** FINAL FIX Part 2 — the engine record for this take, when the new engine (test) was selected. */
+  /** FINAL FIX Part 2 — the engine record for this take, when the new engine recorded the take. */
   engine?: CaptureEngineInfo | null;
 }
 
@@ -414,16 +414,16 @@ export function captureReceiptOrientationNote(receipt: CaptureReceipt): string |
  * recorded names it and reports its own ledger in plain words —
  * frames recorded, frames dropped on purpose at its queue gate,
  * gaps filled — and says "no sound recorded" whenever the take is
- * video-only, so a silent prototype take is never discovered later.
+ * video-only, so a silent new-engine take is never discovered later.
  * Null for standard-engine takes: no claim is made for them.
  */
 export function captureReceiptEngineNote(receipt: CaptureReceipt): string | null {
   const engine = receipt?.engine;
   if (!engine) return null;
   if (engine.fellBack) {
-    return 'The new engine (test) hit a problem, so this take used the standard engine';
+    return 'The new engine hit a problem, so this take used the standard engine';
   }
-  let line = 'Recorded with the new engine (test)';
+  let line = 'Recorded with the new engine';
   if (typeof engine.framesEncoded === 'number') {
     line += ` — ${engine.framesEncoded} frames`;
     if (typeof engine.framesDroppedByQueue === 'number' && engine.framesDroppedByQueue > 0) {

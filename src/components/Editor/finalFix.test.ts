@@ -7,12 +7,14 @@
  * per second), the light meter does ZERO sampling during a take,
  * and the coach's frame-diff canvas work is suspended in-take.
  *
- * Part 2 pins the prototype-engine wiring: the settings-sheet
- * switch, the single-path engine selection, the mid-take fallback
- * through the identical stop handling, the telemetry's route into
- * receipt + diagnostics pack, and the invariant that diagnostics
- * clips stay the selected engine's RAW output (the diag branch of
- * the stop handling returns before any steadying call exists).
+ * Part 2 pins the new-engine wiring: the settings-sheet switch
+ * (the new engine is the default since its 2026-11-11 promotion;
+ * Standard stays selectable), the single-path engine selection,
+ * the mid-take fallback through the identical stop handling, the
+ * telemetry's route into receipt + diagnostics pack, and the
+ * invariant that diagnostics clips stay the selected engine's RAW
+ * output (the diag branch of the stop handling returns before any
+ * steadying call exists).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -65,19 +67,31 @@ describe('FINAL FIX Part 1 — the light meter does zero in-take sampling', () =
   });
 });
 
-describe('FINAL FIX Part 2 — prototype-engine wiring', () => {
-  it('the settings sheet carries the plain-words engine switch', () => {
+describe('FINAL FIX Part 2 — new-engine wiring', () => {
+  it('the settings sheet carries the plain-words engine switch, new engine first', () => {
     expect(cameraSource).toContain('aria-label="Capture engine"');
     expect(cameraSource).toContain('Standard');
-    expect(cameraSource).toContain('New engine (test)');
+    expect(cameraSource).toContain('New engine');
     expect(cameraSource).toContain('selectCaptureEngine');
+    // The promotion removed the test framing everywhere in the
+    // component — no "(test)" survives in copy or comments.
+    expect(cameraSource).not.toContain('(test)');
+    // The new engine leads the switch (it is the engine of
+    // record); Standard follows, still selectable.
+    expect(cameraSource.indexOf("selectCaptureEngine('webcodecs')")).toBeLessThan(
+      cameraSource.indexOf("selectCaptureEngine('standard')"),
+    );
     // The unsupported explanation is plain words, shown in the sheet.
     expect(cameraSource).toContain('isn&rsquo;t available in this browser, so the standard engine is used');
     // The probe runs when the sheet opens.
     expect(cameraSource).toContain('probeWebcodecsCapture({ width, height, fps, bitrate })');
   });
 
-  it('the single path selects the prototype only when chosen, on the same negotiated stream', () => {
+  it('the engine choice initialises from the persisted preference (whose default is the new engine)', () => {
+    expect(cameraSource).toContain('loadCaptureEngineChoice(browserLocalStorage())');
+  });
+
+  it('the single path selects the new engine only when chosen, on the same negotiated stream', () => {
     expect(cameraSource).toContain("if (captureEngineRef.current === 'webcodecs') {");
     expect(cameraSource).toContain('createWebcodecsTakeRecorder(stream, {');
     expect(cameraSource).toContain("engineAttemptRef.current = 'webcodecs';");

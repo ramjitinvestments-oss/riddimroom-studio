@@ -1,5 +1,5 @@
 /**
- * FINAL FIX Part 2 — the WebCodecs capture prototype's pure logic,
+ * FINAL FIX Part 2 — the WebCodecs capture engine's pure logic,
  * probe decisions, and recorder adapter (against a fake worker).
  * The real encode pipeline runs only in a browser worker; what is
  * pinned here is everything that decides and counts: the CFR grid
@@ -32,14 +32,25 @@ import {
 import { planCfrRetiming, planNeedsSteadying } from './steadyTake';
 
 describe('engine choice persistence', () => {
-  it('round-trips both choices and defaults anything unknown to standard', () => {
+  it('round-trips both choices; a stored standard is an explicit pick and is honoured', () => {
     expect(serializeCaptureEngineChoice('webcodecs')).toBe('webcodecs');
     expect(serializeCaptureEngineChoice('standard')).toBe('standard');
     expect(parseCaptureEngineChoice('webcodecs')).toBe('webcodecs');
+    // The stored value is only ever written by an explicit pick in
+    // the settings sheet — a stored 'standard' is deliberate and
+    // survives the promotion untouched.
     expect(parseCaptureEngineChoice('standard')).toBe('standard');
-    expect(parseCaptureEngineChoice('banana')).toBe('standard');
-    expect(parseCaptureEngineChoice(null)).toBe('standard');
-    expect(parseCaptureEngineChoice(undefined)).toBe('standard');
+  });
+
+  it('defaults to the new engine when no explicit choice exists', () => {
+    // Promotion (2026-11-11): the new engine passed its on-device
+    // proof and is now the default. Absent or unrecognised storage
+    // means no explicit choice was ever made, so the default
+    // applies — the capability gate still decides at take time
+    // whether the new engine can actually run.
+    expect(parseCaptureEngineChoice('banana')).toBe('webcodecs');
+    expect(parseCaptureEngineChoice(null)).toBe('webcodecs');
+    expect(parseCaptureEngineChoice(undefined)).toBe('webcodecs');
   });
 
   it('loads and saves through a storage seam; a throwing storage costs nothing', () => {
@@ -48,9 +59,11 @@ describe('engine choice persistence', () => {
       getItem: (k: string) => store.get(k) ?? null,
       setItem: (k: string, v: string) => void store.set(k, v),
     };
-    expect(loadCaptureEngineChoice(storage)).toBe('standard');
+    // Nothing stored yet → the new default.
+    expect(loadCaptureEngineChoice(storage)).toBe('webcodecs');
     saveCaptureEngineChoice(storage, 'webcodecs');
     expect(loadCaptureEngineChoice(storage)).toBe('webcodecs');
+    // An explicit Standard pick is stored and honoured as-is.
     saveCaptureEngineChoice(storage, 'standard');
     expect(loadCaptureEngineChoice(storage)).toBe('standard');
     const broken = {
@@ -61,7 +74,7 @@ describe('engine choice persistence', () => {
         throw new Error('nope');
       },
     };
-    expect(loadCaptureEngineChoice(broken)).toBe('standard');
+    expect(loadCaptureEngineChoice(broken)).toBe('webcodecs');
     expect(() => saveCaptureEngineChoice(broken, 'webcodecs')).not.toThrow();
   });
 });

@@ -1,6 +1,6 @@
 /**
  * FINAL FIX Part 2 — the capture receipt's engine record: the new
- * engine (test) is named, its own ledger is carried, a fallback is
+ * engine is named, its own ledger is carried, a fallback is
  * disclosed in plain words, a video-only take says it has no sound,
  * and a standard-engine take carries no engine claim at all.
  */
@@ -28,7 +28,7 @@ describe('capture receipt — engine record', () => {
     expect(formatCaptureReceipt(receipt).engineNote).toBeNull();
   });
 
-  it('a prototype take names the engine and reports its ledger in plain words', () => {
+  it('a new-engine take names the engine and reports its ledger in plain words', () => {
     const receipt = buildCaptureReceipt({
       ...baseInput,
       engine: {
@@ -51,7 +51,7 @@ describe('capture receipt — engine record', () => {
       audioIncluded: true,
     });
     expect(captureReceiptEngineNote(receipt)).toBe(
-      'Recorded with the new engine (test) — 1797 frames, 3 dropped on purpose, 12 gaps filled',
+      'Recorded with the new engine — 1797 frames, 3 dropped on purpose, 12 gaps filled',
     );
   });
 
@@ -60,10 +60,10 @@ describe('capture receipt — engine record', () => {
       ...baseInput,
       engine: { kind: 'webcodecs', fellBack: false, framesEncoded: 1800, framesDroppedByQueue: 0, framesFilled: 0, audioIncluded: true },
     });
-    expect(captureReceiptEngineNote(receipt)).toBe('Recorded with the new engine (test) — 1800 frames');
+    expect(captureReceiptEngineNote(receipt)).toBe('Recorded with the new engine — 1800 frames');
   });
 
-  it('a video-only prototype take says it has no sound', () => {
+  it('a video-only new-engine take says it has no sound', () => {
     const receipt = buildCaptureReceipt({
       ...baseInput,
       engine: { kind: 'webcodecs', fellBack: false, framesEncoded: 1800, audioIncluded: false },
@@ -78,10 +78,10 @@ describe('capture receipt — engine record', () => {
     });
     expect(receipt.engine?.fellBack).toBe(true);
     expect(captureReceiptEngineNote(receipt)).toBe(
-      'The new engine (test) hit a problem, so this take used the standard engine',
+      'The new engine hit a problem, so this take used the standard engine',
     );
     expect(formatCaptureReceipt(receipt).engineNote).toBe(
-      'The new engine (test) hit a problem, so this take used the standard engine',
+      'The new engine hit a problem, so this take used the standard engine',
     );
   });
 
