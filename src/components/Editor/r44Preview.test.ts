@@ -27,7 +27,9 @@ describe('R44 SF-1 — preview composites at display scale; exports stay full-re
     expect(pane).toContain("import { mediaFrameSignature, previewBackingSize, previewDrawDecision } from '../../lib/render/previewScale';");
     expect(pane).toContain('const backing = previewBackingSize(');
     const transformAt = pane.indexOf('ctx.setTransform(backing.scaleX, 0, 0, backing.scaleY, 0, 0);');
-    const drawAt = pane.indexOf('drawFrame(ctx, proj, t, frameAssets);');
+    // R44 Phase C: the tick draws drawProj (=== proj when no canvas drag
+    // is in flight; the drag-preview project during one) — same transform.
+    const drawAt = pane.indexOf('drawFrame(ctx, drawProj, t, frameAssets);');
     expect(transformAt).toBeGreaterThan(-1);
     expect(drawAt).toBeGreaterThan(transformAt);
   });
@@ -42,7 +44,7 @@ describe('R44 SF-2 — the idle skip is wired to a last-drawn memory', () => {
   it('the tick builds the media signature and consults the decision before drawing', () => {
     expect(pane).toContain('const mediaSig = mediaFrameSignature(frameAssets.videos ?? null, frameAssets.images);');
     expect(pane).toContain('const shouldDraw = previewDrawDecision({');
-    expect(pane).toContain('lastDrawnRef.current = { project: proj, time: t, mediaSig };');
+    expect(pane).toContain('lastDrawnRef.current = { project: drawProj, time: t, mediaSig };');
   });
 });
 

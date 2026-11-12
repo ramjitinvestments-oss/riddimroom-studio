@@ -51,7 +51,10 @@ describe('R42 S1 — canvas size is set only on dimension change (F11)', () => {
     // previewDrawDecision, whose rules (pinned in previewScale.test.ts)
     // force a draw on ANY project change — a paused edit is a project
     // change, so paused edits still repaint on the very next tick.
-    expect(previewSource).toContain('drawFrame(ctx, proj, t, frameAssets);');
+    // R44 Phase C: draws drawProj — identical to proj outside a canvas
+    // drag; during one it is the drag-preview project (still a project
+    // change per tick, so the repaint-on-edit rule is untouched).
+    expect(previewSource).toContain('drawFrame(ctx, drawProj, t, frameAssets);');
     expect(previewSource).toContain('const shouldDraw = previewDrawDecision({');
   });
 });

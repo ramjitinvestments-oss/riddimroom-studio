@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { canvasFontStack, ensureFontsLoaded } from '../../lib/fonts';
 import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-react';
 import type { Project, TimelineItem } from '../../types/timeline';
-import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
+import { getItemsAtTime, getItemsByTrackType, getProjectDuration, formatTimecode } from '../../lib/timeline/utils';
 import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime, findHeldMainVisualItem, getItemBoundsPercent, videoSourceTimeForItem, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
 import { mediaFrameSignature, previewBackingSize, previewDrawDecision } from '../../lib/render/previewScale';
+import { applyCanvasDragPreview, itemWithDragPreview, moveDragPosition, resizeDragScale, type CanvasDragPreview } from '../../lib/render/canvasDrag';
 import { useProject } from '../../context/ProjectContext';
 
 /**
@@ -91,6 +92,21 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     | { mode: 'resize'; itemId: string; startClientX: number; centerXPercent: number; originalScale: number }
     | null
   >(null);
+  // R44 Phase C (SF-3) — the on-canvas drag preview: during a move/resize
+  // gesture the geometry lives HERE (local state + ref), never in the
+  // project store. The tick draws applyCanvasDragPreview(project, preview)
+  // through the shared drawFrame and the selection box is computed from
+  // itemWithDragPreview — so the user manipulates the real composited
+  // frame. On release, ONE mutate commits that same apply function over
+  // the same final preview value (parity pinned in canvasDrag.test.ts +
+  // r44CanvasDrag.test.ts). The ref feeds the rAF tick; the state feeds
+  // the selection box render.
+  const dragPreviewRef = useRef<CanvasDragPreview | null>(null);
+  const [dragPreview, setDragPreviewState] = useState<CanvasDragPreview | null>(null);
+  const setDragPreview = useCallback((preview: CanvasDragPreview | null) => {
+    dragPreviewRef.current = preview;
+    setDragPreviewState(preview);
+  }, []);
 
   projectRef.current = project;
   currentTimeRef.current = currentTime;
@@ -572,18 +588,26 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       // repaint on the very next tick, exactly as R42 required.
       const mediaSig = mediaFrameSignature(frameAssets.videos ?? null, frameAssets.images);
       const lastDrawn = lastDrawnRef.current;
+      // R44 Phase C (SF-3): while an on-canvas drag is in flight, the
+      // frame is drawn from the drag-preview project — the store project
+      // with the preview geometry applied by the SAME function the
+      // release commit uses. applyCanvasDragPreview returns a fresh
+      // object per tick during a drag, so projectChanged stays true and
+      // the idle skip never freezes a gesture mid-drag; with no drag
+      // active drawProj IS proj and the decision is unchanged.
+      const drawProj = dragPreviewRef.current ? applyCanvasDragPreview(proj, dragPreviewRef.current) : proj;
       const shouldDraw = previewDrawDecision({
         isPlaying: isPlayingRef.current,
         hasDrawn: lastDrawn !== null,
         sizeChanged,
-        projectChanged: !lastDrawn || lastDrawn.project !== proj,
+        projectChanged: !lastDrawn || lastDrawn.project !== drawProj,
         timeChanged: !lastDrawn || lastDrawn.time !== t,
         mediaChanged: !lastDrawn || lastDrawn.mediaSig !== mediaSig,
       });
       if (shouldDraw) {
         ctx.setTransform(backing.scaleX, 0, 0, backing.scaleY, 0, 0);
-        drawFrame(ctx, proj, t, frameAssets);
-        lastDrawnRef.current = { project: proj, time: t, mediaSig };
+        drawFrame(ctx, drawProj, t, frameAssets);
+        lastDrawnRef.current = { project: drawProj, time: t, mediaSig };
       }
 
       // If the main video's media hasn't decoded a frame yet (still
@@ -750,9 +774,11 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     if (!item) return null;
     const active = getItemsAtTime(project, currentTime).some((i) => i.id === item.id);
     if (!active) return null;
-    return getBoundsForItem(item);
+    // SF-3: during a drag the box follows the preview geometry, so the
+    // box the user grabs is the box drawFrame is drawing.
+    return getBoundsForItem(itemWithDragPreview(item, dragPreview));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project, currentTime, selectedItemId, getBoundsForItem]);
+  }, [project, currentTime, selectedItemId, getBoundsForItem, dragPreview]);
 
   // "Final production fix" spec item 3b (mobile touch interaction) — every
   // drag here is driven purely by (clientX, clientY) + a window-level
@@ -780,11 +806,17 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         const rect = el.getBoundingClientRect();
         const dxPercent = ((point.x - s.startClientX) / rect.width) * 100;
         const dyPercent = ((point.y - s.startClientY) / rect.height) * 100;
-        const newX = Math.max(0, Math.min(100, s.originalX + dxPercent));
-        const newY = Math.max(0, Math.min(100, s.originalY + dyPercent));
-        mutate((p) => updateItem(p, s.itemId, { position: { x: newX, y: newY } }));
+        // SF-3: preview only — NO store write mid-gesture. The tick
+        // draws this geometry through drawFrame; the commit happens
+        // once, on release, from this same preview value.
+        setDragPreview({ itemId: s.itemId, position: moveDragPosition(s.originalX, s.originalY, dxPercent, dyPercent) });
       };
       const handleUp = () => {
+        // SF-3: the single release commit — the same apply function
+        // over the same final preview the tick was drawing.
+        const preview = dragPreviewRef.current;
+        if (preview) mutate((p) => applyCanvasDragPreview(p, preview));
+        setDragPreview(null);
         dragStateRef.current = null;
         window.removeEventListener(pointerEvents.move, handleMove as EventListener);
         window.removeEventListener(pointerEvents.up, handleUp);
@@ -792,7 +824,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       window.addEventListener(pointerEvents.move, handleMove as EventListener, { passive: false });
       window.addEventListener(pointerEvents.up, handleUp);
     },
-    [mutate],
+    [mutate, setDragPreview],
   );
 
   const beginResizeDrag = useCallback(
@@ -820,11 +852,14 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         if ('touches' in ev) ev.preventDefault();
         const rect = el.getBoundingClientRect();
         const mouseXPercent = ((x - rect.left) / rect.width) * 100;
-        const newWidthPercent = Math.abs(mouseXPercent - s.centerXPercent) * 2;
-        const newScale = Math.max(0.05, Math.min(5, s.originalScale * (newWidthPercent / Math.max(0.5, originalWidthPercent))));
-        mutate((p) => updateItem(p, s.itemId, { scale: newScale }));
+        // SF-3: preview only — NO store write mid-gesture (see move).
+        setDragPreview({ itemId: s.itemId, scale: resizeDragScale(s.originalScale, s.centerXPercent, originalWidthPercent, mouseXPercent) });
       };
       const handleUp = () => {
+        // SF-3: the single release commit (see move).
+        const preview = dragPreviewRef.current;
+        if (preview) mutate((p) => applyCanvasDragPreview(p, preview));
+        setDragPreview(null);
         dragStateRef.current = null;
         window.removeEventListener(pointerEvents.move, handleMove as EventListener);
         window.removeEventListener(pointerEvents.up, handleUp);
@@ -832,7 +867,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       window.addEventListener(pointerEvents.move, handleMove as EventListener, { passive: false });
       window.addEventListener(pointerEvents.up, handleUp);
     },
-    [mutate],
+    [mutate, setDragPreview],
   );
 
   const hitTestCanvas = useCallback(
