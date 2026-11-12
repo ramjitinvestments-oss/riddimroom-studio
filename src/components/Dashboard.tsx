@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { createProject, listProjects, deleteProjects, renameProject, type ProjectSummary } from '../lib/projects/persistence';
+import { createProject, listProjects, deleteProjects, listDeletedProjects, restoreProjects, trashProjects, renameProject, PROJECT_TRASH_RETENTION_MS, type DeletedProjectSummary, type ProjectSummary } from '../lib/projects/persistence';
 import { cleanedProjectName, filterProjectsByName } from '../lib/projects/library';
 import { Check, Trash2, X } from 'lucide-react';
 import { ASPECT_RATIO_OPTIONS, findAspectRatioOption, type AspectRatioOption } from '../lib/aspectRatios';
@@ -46,6 +46,14 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [confirmDelete, setConfirmDelete] = useState<{ ids: string[]; label: string } | null>(null);
+  // R42 Phase B — Recently deleted (the recycle bin): deleted
+  // projects rest here, restorable for 30 days, before the permanent
+  // erase. `confirmPermanent` is the bin's own, separate confirm —
+  // that one really is forever.
+  const [deletedProjects, setDeletedProjects] = useState<DeletedProjectSummary[] | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
+  const [confirmPermanent, setConfirmPermanent] = useState<{ ids: string[]; label: string } | null>(null);
+  const [isRestoring, setIsRestoring] = useState(false);
   // R40 P-27 — account deletion: the confirm dialog's two phases
   // (explain + confirm, then "request is in"). Confirming records the
   // request (fire-and-forget) — nothing is deleted by the tap itself.
@@ -65,6 +73,13 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
       setProjects(list);
     } catch (err: any) {
       setError(err?.message || 'Failed to load your projects.');
+    }
+    // The bin listing is independent: its failure (or its 30-day
+    // purge) must never block the live library above.
+    try {
+      setDeletedProjects(await listDeletedProjects(currentUser.uid));
+    } catch {
+      setDeletedProjects((prev) => prev ?? []);
     }
   }, [currentUser]);
 
@@ -129,13 +144,16 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
     }
   }, [renameTarget, renameValue, currentUser]);
 
+  // R42 Phase B — confirming a Dashboard delete now TRASHES the
+  // projects (Recently deleted, restorable for 30 days). The
+  // permanent erase lives in the bin (handleConfirmPermanent).
   const handleConfirmDelete = useCallback(async () => {
     if (!confirmDelete) return;
     const ids = confirmDelete.ids;
     setIsDeleting(true);
     setError(null);
     try {
-      await deleteProjects(ids);
+      await trashProjects(ids);
       setConfirmDelete(null);
       exitSelectMode();
       await refresh();
@@ -146,6 +164,40 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
       setIsDeleting(false);
     }
   }, [confirmDelete, exitSelectMode, refresh]);
+
+  const handleRestore = useCallback(
+    async (ids: string[]) => {
+      if (!currentUser || ids.length === 0) return;
+      setIsRestoring(true);
+      setError(null);
+      try {
+        await restoreProjects(ids);
+        await refresh();
+      } catch (err: any) {
+        setError(err?.message || 'Failed to restore project.');
+      } finally {
+        setIsRestoring(false);
+      }
+    },
+    [currentUser, refresh],
+  );
+
+  const handleConfirmPermanent = useCallback(async () => {
+    if (!confirmPermanent) return;
+    const ids = confirmPermanent.ids;
+    setIsDeleting(true);
+    setError(null);
+    try {
+      await deleteProjects(ids);
+      setConfirmPermanent(null);
+      await refresh();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete project forever.');
+      setConfirmPermanent(null);
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [confirmPermanent, refresh]);
 
   const visibleProjects = projects ? filterProjectsByName(projects, searchQuery) : null;
 
@@ -391,6 +443,60 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
           </ul>
         )}
 
+        {/* R42 Phase B — Recently deleted: the recycle bin. Deleted
+            projects rest here for 30 days (restorable), then the
+            listing purges them for good. */}
+        {deletedProjects && deletedProjects.length > 0 && (
+          <section className="mt-10">
+            <button
+              onClick={() => setShowDeleted((v) => !v)}
+              aria-expanded={showDeleted}
+              className="min-h-11 inline-flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-white/60 hover:text-white"
+            >
+              <Trash2 size={14} />
+              Recently deleted ({deletedProjects.length})
+              <span aria-hidden="true">{showDeleted ? '▾' : '▸'}</span>
+            </button>
+            {showDeleted && (
+              <ul className="mt-2 flex flex-col gap-2">
+                {deletedProjects.map((project) => {
+                  const daysLeft = Math.max(
+                    0,
+                    Math.ceil((project.deletedAt + PROJECT_TRASH_RETENTION_MS - Date.now()) / (24 * 60 * 60 * 1000)),
+                  );
+                  return (
+                    <li
+                      key={project.id}
+                      className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-bold text-white/85">{project.name}</p>
+                        <p className="text-[11px] text-white/45">
+                          Deleted {new Date(project.deletedAt).toLocaleDateString()} · {daysLeft} day{daysLeft === 1 ? '' : 's'} left to restore
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => void handleRestore([project.id])}
+                        disabled={isRestoring}
+                        className="px-3 py-2 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-gold/15 hover:bg-gold/25 disabled:opacity-50 border border-gold/60 text-gold rounded-lg"
+                      >
+                        Restore
+                      </button>
+                      <button
+                        onClick={() => setConfirmPermanent({ ids: [project.id], label: `“${project.name}”` })}
+                        disabled={isDeleting}
+                        className="px-3 py-2 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-red-600/15 hover:bg-red-600/30 disabled:opacity-50 border border-red-500/40 text-red-300 rounded-lg"
+                      >
+                        Delete forever
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
+
         <footer className="mt-10 border-t border-white/10 pt-4 flex flex-wrap items-center justify-center gap-x-6 gap-y-1">
           <SupportLink />
           <button
@@ -520,7 +626,9 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
                 <X size={18} />
               </button>
             </div>
-            <p className="text-sm text-white/50 mb-6">This can&rsquo;t be undone.</p>
+            <p className="text-sm text-white/50 mb-6">
+              It moves to Recently deleted — you can restore it from there for 30 days before it&rsquo;s gone for good.
+            </p>
             <div className="flex gap-2">
               <button
                 onClick={() => setConfirmDelete(null)}
@@ -535,6 +643,53 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
                 className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-lg text-white"
               >
                 {isDeleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* R42 Phase B — the bin's permanent-erase confirm. Unlike the
+          Dashboard delete above, this one really is forever, and it
+          says so. */}
+      {confirmPermanent && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => !isDeleting && setConfirmPermanent(null)}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Confirm permanent deletion"
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-sm w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-2">
+              <h2 className="font-bold text-base">Delete {confirmPermanent.label} forever?</h2>
+              <button
+                onClick={() => !isDeleting && setConfirmPermanent(null)}
+                disabled={isDeleting}
+                aria-label="Cancel"
+                className="text-white/40 hover:text-white/70 disabled:opacity-50 -mt-1 -mr-1 p-1"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-sm text-white/50 mb-6">This can&rsquo;t be undone — the project and its media are erased for good.</p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmPermanent(null)}
+                disabled={isDeleting}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmPermanent}
+                disabled={isDeleting}
+                className="flex-1 px-4 py-2.5 min-h-[44px] text-xs font-bold uppercase tracking-wide bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-lg text-white"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete forever'}
               </button>
             </div>
           </div>

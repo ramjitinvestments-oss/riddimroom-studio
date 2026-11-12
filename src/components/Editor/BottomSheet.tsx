@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { X } from 'lucide-react';
+import { useBackLayer } from '../../lib/backLayers';
 
 /**
  * "Final production fix" spec item 3a (mobile-first redesign) — a hand-
@@ -26,6 +27,12 @@ export function BottomSheet({
   title: string;
   children: React.ReactNode;
 }) {
+  // R42 Phase B — while the sheet is open it owns a Back layer: the
+  // phone/browser Back closes the sheet instead of leaving the
+  // project (lib/backLayers.ts). Programmatic closes (backdrop, X)
+  // unregister without touching history.
+  useBackLayer(open, onClose);
+
   useEffect(() => {
     if (!open) return;
     const prevOverflow = document.body.style.overflow;

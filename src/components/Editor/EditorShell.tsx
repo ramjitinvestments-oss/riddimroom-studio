@@ -21,6 +21,7 @@ import { EffectsPanel } from './EffectsPanel';
 import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
+import { handleBackPop, pushBackLayer } from '../../lib/backLayers';
 import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair } from '../../lib/timeline/insert';
 import { addPipOverlay, isPipItem } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
@@ -137,9 +138,46 @@ function EditorInner({ uid }: { uid: string }) {
   // override later navigation or re-fire on later project updates.
   const stepInitForProjectRef = useRef<string | null>(null);
   const userChangedStepRef = useRef(false);
+  // R42 Phase B — history-aware Back (lib/backLayers.ts): every step
+  // change registers a Back layer whose closer returns to the step
+  // the user came from, so the phone/browser Back walks the visit
+  // order inside the editor (sheets and modals layer on top of this)
+  // instead of leaving the project on the first press. The layer
+  // unregisters are tracked so unmounting the editor (leaving via
+  // ← Projects) takes this session's step layers with it.
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  const stepLayerUnregistersRef = useRef<Set<() => void>>(new Set());
   const goToStep = useCallback((n: 1 | 2 | 3) => {
     userChangedStepRef.current = true;
+    const prev = stepRef.current;
+    if (n !== prev) {
+      let unregister: () => void = () => {};
+      unregister = pushBackLayer(() => {
+        stepLayerUnregistersRef.current.delete(unregister);
+        userChangedStepRef.current = true;
+        setStep(prev);
+      });
+      stepLayerUnregistersRef.current.add(unregister);
+    }
     setStep(n);
+  }, []);
+  // The editor's one popstate listener: consumes Back presses into
+  // the layer stack while layers remain; when none do, this does
+  // nothing and the router's own popstate handling leaves the editor
+  // exactly as it did before. Cleanup also drops this session's step
+  // layers so they can't leak into the next project.
+  useEffect(() => {
+    const handler = () => {
+      handleBackPop();
+    };
+    window.addEventListener('popstate', handler);
+    const unregisters = stepLayerUnregistersRef.current;
+    return () => {
+      window.removeEventListener('popstate', handler);
+      unregisters.forEach((u) => u());
+      unregisters.clear();
+    };
   }, []);
   useEffect(() => {
     if (!project) return;

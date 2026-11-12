@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Check, Frame, X } from 'lucide-react';
 import type { CropSettings, ImageTimelineItem, MediaAsset, VideoTimelineItem } from '../../types/timeline';
 import { getAssetPoster } from '../../lib/media/thumbnails';
+import { useBackLayer } from '../../lib/backLayers';
 
 /**
  * Reframe picker (v9) — the SPATIAL twin of the SlotTrimPicker. A preset
@@ -21,6 +22,8 @@ interface ReframePickerProps {
 }
 
 export function ReframePicker({ item, asset, onConfirm, onCancel }: ReframePickerProps) {
+  // R42 Phase B — an open picker owns a Back layer (lib/backLayers.ts).
+  useBackLayer(true, onCancel);
   const crop = item.crop;
   const [pos, setPos] = useState({ x: crop?.x ?? 0, y: crop?.y ?? 0 });
   const [poster, setPoster] = useState<string | null>(null);

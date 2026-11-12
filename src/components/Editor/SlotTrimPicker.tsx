@@ -4,6 +4,7 @@ import type { MediaAsset, VideoTimelineItem } from '../../types/timeline';
 import { formatTimecode } from '../../lib/timeline/utils';
 import { clampWindowStart, itemTrimWindow, resolveSourceDuration } from '../../lib/timeline/trimWindow';
 import { getAssetPoster } from '../../lib/media/thumbnails';
+import { useBackLayer } from '../../lib/backLayers';
 
 /**
  * Templates v3 — the crop picker. A video item keeps a source window of
@@ -30,6 +31,8 @@ interface SlotTrimPickerProps {
 }
 
 export function SlotTrimPicker({ item, asset, onConfirm, onCancel }: SlotTrimPickerProps) {
+  // R42 Phase B — an open picker owns a Back layer (lib/backLayers.ts).
+  useBackLayer(true, onCancel);
   const sourceDuration = resolveSourceDuration(item, asset.durationSeconds);
   const { length: windowLength } = itemTrimWindow(item);
   const [windowStart, setWindowStart] = useState(() => clampWindowStart(item.trimStart, windowLength, sourceDuration));

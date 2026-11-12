@@ -661,4 +661,13 @@ export interface Project {
    * be decoded CORS-clean.
    */
   posterDataUrl?: string;
+  /**
+   * R42 Phase B — recycle bin: epoch milliseconds when the owner
+   * deleted this project from the Dashboard, absent while the project
+   * is live. Deleting is a move to "Recently deleted" (restorable for
+   * 30 days — see lib/projects/persistence.ts); permanent erasure is
+   * the separate `deleteProjects`. Additive only: older projects have
+   * no field and read as live.
+   */
+  deletedAt?: number;
 }

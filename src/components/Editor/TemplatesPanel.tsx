@@ -251,6 +251,10 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
       if (t.kind === 'hook') {
         mutate((p) => applyHookToProject(p, t, currentTime));
         setPanel({ appliedId: t.id, pendingAdjust: null });
+        // R42 Phase B — bulk edits announce their own reversibility
+        // at the moment they land (the shell's undo toast carries
+        // the one-tap Undo), instead of leaving the user to guess.
+        window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Hook applied' } }));
         return;
       }
       // R20: templates no longer auto-add music — the app adds no
@@ -270,6 +274,10 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
         pendingAdjust: result.shortenedClips.length > 0 ? result.shortenedClips : null,
         pendingFramed: result.framedItems.length > 0 ? result.framedItems : null,
       });
+      // R42 Phase B — the biggest one-tap change in the app (every
+      // clip re-cut) announces "Template applied — Undo" via the
+      // shell's undo toast, like a delete already does.
+      window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Template applied' } }));
       if (result.canvasSwitched) {
         setPanel({ notice: `Project switched to ${t.frame?.aspect} — the frame this preset is designed for. Every clip was cropped to it.` });
       }

@@ -140,6 +140,92 @@ export async function renameProject(projectId: string, ownerUid: string, name: s
   return saveProject({ ...project, name: trimmed, updatedAt: Date.now() });
 }
 
+/** R42 Phase B — how long a deleted project stays restorable. */
+export const PROJECT_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Pure: is a trash timestamp past the 30-day retention at `now`? */
+export function isTrashExpired(deletedAt: number, now: number): boolean {
+  return now - deletedAt > PROJECT_TRASH_RETENTION_MS;
+}
+
+export interface DeletedProjectSummary extends ProjectSummary {
+  deletedAt: number;
+}
+
+/**
+ * R42 Phase B — Dashboard "delete" is a move to Recently deleted:
+ * the project gains a `deletedAt` stamp and disappears from
+ * `listProjects`, but its document AND its media stay exactly where
+ * they were, restorable for 30 days. Permanent erasure remains
+ * `deleteProjects` below (the bin's "Delete forever" + the expiry
+ * purge). Each project is stamped through the normal load/save path
+ * so the document stays a valid serialized Project throughout.
+ */
+export async function trashProjects(projectIds: string[]): Promise<void> {
+  const ids = [...new Set(projectIds)].filter(Boolean);
+  for (const id of ids) {
+    const snapshot = await getDoc(doc(db, PROJECTS_COLLECTION, id));
+    if (!snapshot.exists()) continue;
+    const { project } = parseProject(snapshot.data());
+    if (!project || typeof project.deletedAt === 'number') continue;
+    await saveProject({ ...project, deletedAt: Date.now() });
+  }
+}
+
+/** Removes the trash stamp — the project is live again. */
+export async function restoreProjects(projectIds: string[]): Promise<void> {
+  const ids = [...new Set(projectIds)].filter(Boolean);
+  for (const id of ids) {
+    const snapshot = await getDoc(doc(db, PROJECTS_COLLECTION, id));
+    if (!snapshot.exists()) continue;
+    const { project } = parseProject(snapshot.data());
+    if (!project || typeof project.deletedAt !== 'number') continue;
+    const restored: Project = { ...project };
+    delete restored.deletedAt;
+    await saveProject(restored);
+  }
+}
+
+/**
+ * The bin's contents for the Dashboard, newest deletion first.
+ * Listing the bin also purges anything past the 30-day retention
+ * (permanently, through `deleteProjects`, storage cleanup included)
+ * — best-effort: a failed purge never blocks the listing.
+ */
+export async function listDeletedProjects(ownerUid: string, max = 50): Promise<DeletedProjectSummary[]> {
+  const q = query(collection(db, PROJECTS_COLLECTION), where('ownerUid', '==', ownerUid), fsLimit(200));
+  const snapshot = await getDocs(q);
+  const now = Date.now();
+  const deleted: DeletedProjectSummary[] = [];
+  const expiredIds: string[] = [];
+  for (const docSnap of snapshot.docs) {
+    const data = docSnap.data() as Project;
+    if (typeof data.deletedAt !== 'number') continue;
+    if (isTrashExpired(data.deletedAt, now)) {
+      expiredIds.push(docSnap.id);
+      continue;
+    }
+    deleted.push({
+      id: data.id,
+      name: data.name,
+      updatedAt: data.updatedAt,
+      createdAt: data.createdAt,
+      canvasWidth: data.canvasWidth,
+      canvasHeight: data.canvasHeight,
+      posterDataUrl: typeof data.posterDataUrl === 'string' ? data.posterDataUrl : undefined,
+      deletedAt: data.deletedAt,
+    });
+  }
+  if (expiredIds.length > 0) {
+    try {
+      await deleteProjects(expiredIds);
+    } catch {
+      // Best-effort purge — a failure just means the next listing tries again.
+    }
+  }
+  return deleted.sort((a, b) => b.deletedAt - a.deletedAt).slice(0, max);
+}
+
 export async function listProjects(ownerUid: string, max = 50): Promise<ProjectSummary[]> {
   // Deliberately no `orderBy('updatedAt')` in the query itself: combined
   // with `where('ownerUid', '==', ...)` on a different field, Firestore
@@ -151,6 +237,8 @@ export async function listProjects(ownerUid: string, max = 50): Promise<ProjectS
   const q = query(collection(db, PROJECTS_COLLECTION), where('ownerUid', '==', ownerUid), fsLimit(max));
   const snapshot = await getDocs(q);
   return snapshot.docs
+    // R42 Phase B — trashed projects (recycle bin) never list as live.
+    .filter((docSnap) => typeof (docSnap.data() as Project).deletedAt !== 'number')
     .map((docSnap) => {
       const data = docSnap.data() as Project;
       return {

@@ -114,6 +114,9 @@ export function TranscribePanel({ uid }: { uid: string }) {
       } else {
         const atTime = item.startTime - item.trimStart;
         mutate((p) => addCaptionItems(p, { words: data.words, atTime, captionStyleId: 'classic', source: 'ai' }));
+        // R42 Phase B — a landed transcription is a bulk edit: it
+        // announces its own Undo through the shell's undo toast.
+        window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Captions added' } }));
       }
       await refreshUserProfile();
     } catch (err: any) {

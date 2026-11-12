@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Play } from 'lucide-react';
 import { MAX_MEDIA_SECONDS } from '../../lib/media/constants';
+import { useBackLayer } from '../../lib/backLayers';
 
 /**
  * "Universal 30-second media standard" spec item 2 — the pre-import
@@ -38,6 +39,9 @@ function formatClock(totalSeconds: number): string {
 }
 
 export function TrimSelectModal({ file, kind, durationSeconds, onConfirm, onCancel }: TrimSelectModalProps) {
+  // R42 Phase B — an open modal owns a Back layer: Back cancels it
+  // instead of leaving the project (lib/backLayers.ts).
+  useBackLayer(true, onCancel);
   const objectUrl = useMemo(() => URL.createObjectURL(file), [file]);
   useEffect(() => () => URL.revokeObjectURL(objectUrl), [objectUrl]);
 
