@@ -602,7 +602,7 @@ function EditorInner({ uid }: { uid: string }) {
   if (isLoading) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-5 bg-[#070707]">
-        <BrandLogo size="lg" />
+        <BrandLogo size="hero" />
         <div className="w-10 h-10 rounded-full border-4 border-gold/20 border-t-gold animate-spin" aria-label="Loading project" />
         <p className="text-white/40 text-xs uppercase tracking-wide">Loading project…</p>
       </div>

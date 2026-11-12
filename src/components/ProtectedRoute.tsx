@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
+import BrandLogo from './BrandLogo';
 
 /**
  * Source: riddimroom-caption's src/components/ProtectedRoute.tsx.
@@ -24,7 +25,8 @@ export function ProtectedRoute({ requiredRole, redirectTo, children }: Protected
   if (isAuthLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-[#070707] text-white">
-        <div className="w-12 h-12 rounded-full border-4 border-gold/20 border-t-gold animate-spin"></div>
+        <BrandLogo size="hero" />
+        <div className="mt-5 w-12 h-12 rounded-full border-4 border-gold/20 border-t-gold animate-spin"></div>
         <p className="mt-4 text-xs font-semibold text-white/50 tracking-wider uppercase animate-pulse">
           Loading RiddimRoom Studio…
         </p>

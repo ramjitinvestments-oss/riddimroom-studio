@@ -393,6 +393,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
 
         {projects !== null && projects.length === 0 && (
           <div className="text-center py-16 border border-dashed border-white/10 rounded-xl">
+            <img src="/medallion-hero.png" alt="" width={80} height={80} className="w-20 h-20 rounded-full mx-auto mb-5" />
             <p className="text-sm text-white/40">No projects yet. Create one to start capturing, uploading, and editing.</p>
             <button
               onClick={() => setShowRatioPicker(true)}

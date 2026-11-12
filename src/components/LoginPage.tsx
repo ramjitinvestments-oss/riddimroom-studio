@@ -87,7 +87,7 @@ export function LoginPage({ onOpenLegal }: { onOpenLegal?: (path: '/privacy' | '
     <div className="min-h-screen flex items-center justify-center bg-[#070707] text-white px-6">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-1">
-          <BrandLogo size="lg" />
+          <BrandLogo size="hero" />
           <p className="text-xs text-white/40 uppercase tracking-widest">
             {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : 'Reset password'}
           </p>

@@ -27,7 +27,7 @@ const PendingScreen = lazy(() => import('./components/PendingScreen').then((m) =
 function RouteLoading() {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-4 px-6 text-center bg-[#070707] text-white">
-      <BrandLogo size="lg" />
+      <BrandLogo size="hero" />
       {/* R40 P-48: words AND a spinner — every loading state says what
           is loading and shows motion while it does. */}
       <div className="w-10 h-10 rounded-full border-4 border-gold/20 border-t-gold animate-spin" aria-hidden="true" />
