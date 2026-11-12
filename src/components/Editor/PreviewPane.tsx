@@ -103,6 +103,19 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   // exact final position to state the moment playback pauses, since a
   // throttled commit can leave state up to ~100ms behind the loop.
   const loopTimeRef = useRef(currentTime);
+  // R42 S3 — scrub-seek policy state. While external seeks arrive in a
+  // rapid stream (a timeline scrub commits throttled times and flushes
+  // the exact time on release), paused media elements are seeked
+  // LOOSELY (playback tolerance / fastSeek) instead of to the exact
+  // frame on every commit — exact seeking is the most expensive thing
+  // a media element does, and doing it per scrub commit is what made
+  // dragging the playhead feel like stepping through mud. Once the
+  // stream stops, `scrubbingUntilRef` lapses and the always-running
+  // tick settles every element to the exact frame within a frame or
+  // two. A lone seek (ruler click, skip button) is never preceded by a
+  // recent one, so it still seeks exactly and immediately.
+  const lastExternalSeekAtRef = useRef(0);
+  const scrubbingUntilRef = useRef(0);
 
   // Media elements are created with crossOrigin='anonymous' because canvas
   // export needs CORS-clean media — but if the Storage bucket has no CORS
@@ -224,6 +237,23 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     // flushed separately by the [isPlaying] effect; seeks/steps/scrubs
     // never pass through here — they set EditorShell state directly and
     // stay immediate.
+    // R42 S3 — one paused-seek policy for every media element the tick
+    // syncs: loose (0.35s tolerance, fastSeek when the element offers
+    // it) while a scrub stream is active, exact (0.05s) otherwise.
+    const seekPaused = (el: HTMLMediaElement, target: number) => {
+      if (!Number.isFinite(target)) return;
+      const scrubbing = performance.now() < scrubbingUntilRef.current;
+      const tolerance = scrubbing ? 0.35 : 0.05;
+      if (Math.abs(el.currentTime - target) <= tolerance) return;
+      try {
+        const fastSeek = (el as HTMLVideoElement).fastSeek;
+        if (scrubbing && typeof fastSeek === 'function') fastSeek.call(el, target);
+        else el.currentTime = target;
+      } catch {
+        /* not seekable yet */
+      }
+    };
+
     const commitTime = (t: number, force = false) => {
       const now = performance.now();
       if (force || now - lastTimeCommitAtRef.current >= 100) {
@@ -396,13 +426,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           if (audioEl.paused) audioEl.play().catch(() => {});
         } else {
           audioEl.pause();
-          if (Number.isFinite(targetSourceTime)) {
-            try {
-              audioEl.currentTime = targetSourceTime;
-            } catch {
-              /* not seekable yet */
-            }
-          }
+          seekPaused(audioEl, targetSourceTime);
         }
       });
       audioElsRef.current.forEach((el, assetId) => {
@@ -436,8 +460,18 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         }
       }
 
-      canvas.width = proj.canvasWidth;
-      canvas.height = proj.canvasHeight;
+      // R42 S1 (closes R41 F11) — set the backing store ONLY when the
+      // project's canvas dimensions actually change. Assigning
+      // canvas.width/height — even to the same values — wipes the
+      // drawing buffer by spec, so the old unconditional per-tick
+      // assignment reset the whole (up to 4K) backing store before
+      // every redraw. drawFrame fully repaints every tick (clearRect +
+      // full-canvas fill), so skipping the reset changes nothing
+      // visually: paused edits still repaint on the very next tick.
+      if (canvas.width !== proj.canvasWidth || canvas.height !== proj.canvasHeight) {
+        canvas.width = proj.canvasWidth;
+        canvas.height = proj.canvasHeight;
+      }
       // v1 PiP: sync EVERY active video item (main + overlays), not just
       // the first. The clock is still driven by the first (main) video
       // above; PiP elements are synced to their own trim window each
@@ -472,9 +506,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
           const target = videoSourceTimeForItem(item, t);
           if (heldVideoItem && item.id === heldVideoItem.id) {
             el.pause();
-            if (Math.abs(el.currentTime - target) > 0.05) {
-              try { el.currentTime = target; } catch { /* ignore */ }
-            }
+            seekPaused(el, target);
             el.volume = 0;
             continue;
           }
@@ -485,9 +517,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
             if (el.paused) el.play().catch(() => {});
           } else {
             el.pause();
-            if (Math.abs(el.currentTime - target) > 0.05) {
-              try { el.currentTime = target; } catch { /* ignore */ }
-            }
+            seekPaused(el, target);
           }
           const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, projectEnd) - t);
           el.muted = item.muted;
@@ -548,6 +578,15 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
     // paused, so a later pause-flush can't resurrect a pre-seek position.
     loopTimeRef.current = currentTime;
     if (isPlayingRef.current) return; // playback loop owns currentTime while playing
+    // R42 S3 — a seek that follows another within 250ms belongs to a
+    // scrub stream: mark the window so the tick seeks loosely, and
+    // don't force an exact seek here either (the tick settles the
+    // exact frame once the stream stops). A lone seek seeks exactly,
+    // as before.
+    const seekNow = performance.now();
+    const inScrubStream = seekNow - lastExternalSeekAtRef.current < 250;
+    lastExternalSeekAtRef.current = seekNow;
+    scrubbingUntilRef.current = inScrubStream ? seekNow + 250 : 0;
     const videoItems = getItemsByTrackType(project, 'video').filter((i) => i.type === 'video');
     const active = videoItems.find((i) => currentTime >= i.startTime && currentTime < i.endTime) as
       | (typeof videoItems)[number]
@@ -557,10 +596,12 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       if (asset) {
         const el = getVideoEl(asset.id, asset.storageUrl);
         const targetSourceTime = videoSourceTimeForItem(active, currentTime);
-        try {
-          el.currentTime = targetSourceTime;
-        } catch {
-          /* ignore until metadata is ready */
+        if (!inScrubStream) {
+          try {
+            el.currentTime = targetSourceTime;
+          } catch {
+            /* ignore until metadata is ready */
+          }
         }
       }
     }

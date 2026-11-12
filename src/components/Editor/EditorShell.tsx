@@ -600,7 +600,7 @@ function EditorInner({ uid }: { uid: string }) {
       </PanelGroup>
 
       <PanelGroup title="Templates" {...groupProps('templates')}>
-        <TemplatesPanel currentTime={currentTime} uid={uid} />
+        <TemplatesPanel currentTime={currentTime} uid={uid} isPlaying={isPlaying} />
       </PanelGroup>
 
       <PanelGroup title={selectedItem ? 'Selected item' : 'Text & watermark'} {...groupProps('item')}>
@@ -800,7 +800,7 @@ function EditorInner({ uid }: { uid: string }) {
         {/* R40 P-52: the step guidance line is visible on phones too
             (it used to be hidden below the sm breakpoint). */}
         <span className="ml-auto text-right text-[11px] text-white/60">
-          {step === 1 ? 'Upload, record, or pick a template' : step === 2 ? 'Edit, transitions, effects, captions, PiP' : 'Choose format and quality, export, done'}
+          {step === 1 ? 'Upload or record — templates are here and in Edit' : step === 2 ? 'Edit, transitions, effects, captions, overlay' : 'Choose format and quality, export, done'}
         </span>
       </nav>
 
@@ -808,7 +808,7 @@ function EditorInner({ uid }: { uid: string }) {
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 p-3 sm:p-4 overflow-auto min-w-0">
           <div className="flex flex-col gap-4">{libraryPanel}</div>
           <aside className="flex flex-col gap-4">
-            <TemplatesPanel currentTime={currentTime} uid={uid} />
+            <TemplatesPanel currentTime={currentTime} uid={uid} isPlaying={isPlaying} />
             {/* R40 P-52: "How it works" is reachable on phones too
                 (it used to render only on large screens). */}
             <div className="bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/60 space-y-1">

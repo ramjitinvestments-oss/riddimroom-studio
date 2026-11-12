@@ -64,7 +64,7 @@ import { ReframePicker } from './ReframePicker';
  * video, an "Adjust clips" step offers the crop picker for each
  * shortened clip.
  */
-export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number; uid: string }) {
+export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { currentTime?: number; uid: string; isPlaying?: boolean }) {
   const { project, mutate } = useProject();
   // R40 P-06 — the panel's state lives in the shared store
   // (lib/templates/panelStore.ts), not in this component: EditorShell
@@ -105,6 +105,17 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
     ensureTemplatesPanelProject(project.id);
     updateTemplatesPanelState(patch);
   };
+  // R42 S2 (closes the TemplatesPanel half of R41 F12) — while
+  // playback runs, the focused card's own-media preview FREEZES at the
+  // playhead position where playback started. The card is a chooser,
+  // not a monitor: keying its preview jobs on the moving playhead
+  // re-scheduled renders ten times a second for the whole of every
+  // playback. The live `currentTime` still drives hook applies (a hook
+  // lands at the playhead) — only the preview freezes. On pause the
+  // preview re-keys to the paused position and refreshes as before.
+  const previewTimeRef = useRef(currentTime);
+  if (!isPlaying) previewTimeRef.current = currentTime;
+  const previewTime = isPlaying ? previewTimeRef.current : currentTime;
   const stripRef = useRef<HTMLDivElement | null>(null);
   const cardRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -149,7 +160,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       };
     }
     const template = previewTemplate;
-    const key = previewSignature(project, template, currentTime);
+    const key = previewSignature(project, template, previewTime);
     const cached = scheduler.peek(key);
     if (cached) {
       setPreview({ key, canvases: cached });
@@ -157,7 +168,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
         previewGenerationRef.current += 1;
       };
     }
-    getPreviewJobs().set(key, { project, template, currentTime });
+    getPreviewJobs().set(key, { project, template, currentTime: previewTime });
     let debounceId: number | undefined;
     let idleId: number | undefined;
     let idleIsTimeout = false;
@@ -192,7 +203,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedId, project, currentTime]);
+  }, [focusedId, project, previewTime]);
 
   // R40 P-08 — there is deliberately NO scroll-driven focus here any
   // more. The old IntersectionObserver moved focus to whichever card
@@ -370,7 +381,7 @@ export function TemplatesPanel({ currentTime = 0, uid }: { currentTime?: number;
                   focused={isFocusedCard}
                   applied={appliedId === t.id}
                   previewCanvases={
-                    isFocusedCard && preview && preview.key === previewSignature(project, t, currentTime)
+                    isFocusedCard && preview && preview.key === previewSignature(project, t, previewTime)
                       ? preview.canvases
                       : undefined
                   }
