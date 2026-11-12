@@ -543,6 +543,13 @@ export interface ImageTimelineItem extends TimelineItemBase, Transform, FramingS
 export interface TextTimelineItem extends TimelineItemBase, Transform {
   type: 'text';
   text: string;
+  /**
+   * R42 Phase D — set on placeholder texts a template apply created
+   * (the template's id). Template-owned texts are replaced wholesale
+   * by the next full-template apply; user-authored texts never carry
+   * this field and are never touched by an apply. Additive only.
+   */
+  templateId?: string;
   role: 'title' | 'lower-third' | 'overlay' | 'subtitle';
   font: string;
   fontSize: number;
@@ -636,6 +643,24 @@ export const ITEM_TYPE_TO_TRACK_TYPE: Record<TimelineItem['type'], TrackType> = 
  */
 export const TIMELINE_SCHEMA_VERSION = 1;
 
+/**
+ * R42 Phase D — the template contract: a full template the project is
+ * living under. Set by a full-template apply (and by the Dashboard's
+ * Start-from-a-template door), cleared by an explicit Release. While
+ * it is set, media added to the main track is fitted to the template's
+ * slots (see lib/templates/contract.ts) and the Step 2 badge shows
+ * the contract's state. Hooks never set it — they are insertions,
+ * not contracts. Additive only: older projects have no field and
+ * simply have no contract.
+ */
+export interface AppliedTemplate {
+  templateId: string;
+  /** Slotted item id → the slot index it was fitted to (a merged run's first slot, when slots were merged). */
+  slotByItemId: Record<string, number>;
+  /** Epoch milliseconds of the apply that set (or last refreshed) the contract. */
+  appliedAt: number;
+}
+
 export interface Project {
   id: string;
   /** Firebase Auth uid of the owning user — matches Step 2's UserProfile.uid, not duplicated data. */
@@ -677,4 +702,6 @@ export interface Project {
    * no field and read as live.
    */
   deletedAt?: number;
+  /** R42 Phase D — the living template contract, when one is active. */
+  appliedTemplate?: AppliedTemplate;
 }

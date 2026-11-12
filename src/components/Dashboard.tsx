@@ -9,6 +9,8 @@ import { useLicenseTier } from '../hooks/useLicenseTier';
 import { SupportLink, SUPPORT_MAILTO } from './SupportLink';
 import { requestAccountDeletion } from '../lib/accountDeletion';
 import { OPEN_PLAN_SESSION_KEY } from '../lib/upgradeRequest';
+import { templatesByKind, type StudioTemplate } from '../lib/templates';
+import { newTemplateContract } from '../lib/templates/contract';
 
 /**
  * Phase 1 Step 6 — authenticated home screen. Replaces the placeholder
@@ -40,6 +42,11 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
   // `createProject` and becomes `Project.canvasWidth/canvasHeight`, the
   // single source of truth `lib/aspectRatios.ts` documents.
   const [showRatioPicker, setShowRatioPicker] = useState(false);
+  // R42 Phase D (E2) — Start-from-a-template door: pick the template
+  // first; the project is created in the template's frame WITH the
+  // template contract already saved, so every clip added afterwards
+  // is fitted to its slots.
+  const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   // Multi-select cleanup mode: cards toggle selection instead of opening,
   // and a sticky action bar drives the batch delete. Deletion always goes
   // through the in-app confirm (single or batch) — never window.confirm.
@@ -95,6 +102,28 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
       try {
         const project = await createProject(currentUser.uid, 'Untitled Project', ratio.canvasWidth, ratio.canvasHeight, { watermarkEnabled: tier !== 'lifetime' });
         setShowRatioPicker(false);
+        onOpenProject(project.id);
+      } catch (err: any) {
+        setError(err?.message || 'Failed to create a new project.');
+      } finally {
+        setIsCreating(false);
+      }
+    },
+    [currentUser, onOpenProject, tier],
+  );
+
+  const handleCreateFromTemplate = useCallback(
+    async (template: StudioTemplate) => {
+      if (!currentUser) return;
+      setIsCreating(true);
+      setError(null);
+      try {
+        const ratio = ASPECT_RATIO_OPTIONS.find((o) => o.id === (template.frame?.aspect ?? '9:16')) ?? ASPECT_RATIO_OPTIONS[0];
+        const project = await createProject(currentUser.uid, 'Untitled Project', ratio.canvasWidth, ratio.canvasHeight, {
+          watermarkEnabled: tier !== 'lifetime',
+          appliedTemplate: newTemplateContract(template.id, Date.now()),
+        });
+        setShowTemplatePicker(false);
         onOpenProject(project.id);
       } catch (err: any) {
         setError(err?.message || 'Failed to create a new project.');
@@ -279,6 +308,18 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
             </span>
             <span className="block text-xs text-white/50 mt-1 leading-relaxed">
               Start blank: add your own clips and photos, add captions, and export a video ready to post.
+            </span>
+          </button>
+          <button
+            onClick={() => setShowTemplatePicker(true)}
+            disabled={isCreating}
+            className="text-left bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 rounded-xl p-4 transition"
+          >
+            <span className="block text-sm font-bold uppercase tracking-wide text-white">
+              {isCreating ? 'Creating…' : 'Start from a template'}
+            </span>
+            <span className="block text-xs text-white/50 mt-1 leading-relaxed">
+              Pick the edit first — the project opens in its frame, and every clip you add is cut to its slots.
             </span>
           </button>
           {onOpenPromo && (
@@ -751,6 +792,51 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
                 </button>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {showTemplatePicker && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => !isCreating && setShowTemplatePicker(false)}
+        >
+          <div
+            className="bg-[#111] border border-white/10 rounded-2xl p-6 max-w-xl w-full max-h-[85vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-sm font-bold uppercase tracking-wide text-white/60 mb-1">Start from a template</h2>
+            <p className="text-xs text-white/40 mb-5">
+              The project opens in the template&rsquo;s frame with its plan saved — add clips and each one is cut to the next slot.
+            </p>
+            <div className="flex flex-col gap-2">
+              {templatesByKind('full').map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => void handleCreateFromTemplate(t)}
+                  disabled={isCreating}
+                  className="text-left bg-white/5 hover:bg-white/10 disabled:opacity-50 border border-white/10 hover:border-gold/60 rounded-xl p-3.5 transition"
+                >
+                  <span className="flex items-baseline justify-between gap-2">
+                    <span className="font-bold text-sm">{t.name}</span>
+                    <span className="text-[11px] font-bold text-gold shrink-0">
+                      {t.durationSeconds}s · best with {t.slots?.length ?? 0} clips
+                    </span>
+                  </span>
+                  <span className="block text-[11px] text-white/40 mt-1 leading-snug">
+                    {(t.slots ?? []).map((s, i) => `Clip ${i + 1} — ${s.durationSeconds}s`).join(' · ')}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {error && <p className="text-sm text-red-400 mt-4">{error}</p>}
+            <button
+              onClick={() => setShowTemplatePicker(false)}
+              disabled={isCreating}
+              className="mt-5 text-xs text-white/40 hover:text-white/70 disabled:opacity-50"
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}

@@ -76,8 +76,9 @@ describe('R37 reelMeta — card models for all 20', () => {
     expect(reelCardModel(byId('gold-smash-intro')).durationLabel).toBe('2.5s');
     expect(reelCardModel(byId('fete-countdown')).durationLabel).toBe('3.5s');
     expect(reelCardModel(byId('glitch-hook')).durationLabel).toBe('2s');
-    expect(reelCardModel(byId('viral-hook-story')).durationLabel).toBe('30s');
-    expect(reelCardModel(byId('music-video')).durationLabel).toBe('45s');
+    // R42 Phase D — durationSeconds is now the true slot sum.
+    expect(reelCardModel(byId('viral-hook-story')).durationLabel).toBe('16s');
+    expect(reelCardModel(byId('music-video')).durationLabel).toBe('35s');
   });
 
   it('frame chip appears only for non-9:16 frames', () => {
@@ -92,9 +93,13 @@ describe('R37 reelMeta — card models for all 20', () => {
   });
 
   it('slot counts come from the real slot plans', () => {
-    expect(reelCardModel(byId('product-ad-15')).slotCount).toBe(4);
-    expect(reelCardModel(byId('viral-hook-story')).slotCount).toBe(5);
-    expect(reelCardModel(byId('music-video')).slotCount).toBe(5);
+    // R42 Phase D — the re-cut slot maps (see slotMaps.test.ts).
+    expect(reelCardModel(byId('product-ad-15')).slotCount).toBe(6);
+    expect(reelCardModel(byId('viral-hook-story')).slotCount).toBe(6);
+    expect(reelCardModel(byId('music-video')).slotCount).toBe(6);
+    // The card copy that rides with the count.
+    expect(reelCardModel(byId('product-ad-15')).clipsLabel).toBe('best with 6 clips');
+    expect(reelCardModel(byId('gold-smash-intro')).clipsLabel).toBeNull();
   });
 });
 
@@ -148,7 +153,8 @@ describe('R37 reelMeta — Stage-A posters', () => {
     const model = reelCardModel(byId('podcast-clip'));
     expect(model.poster.headline).toBeNull();
     // …but its slot bars still carry the card.
-    expect(model.poster.slotSegments.map((s) => s.name)).toEqual(['Cold Open', 'Conversation', 'Insight', 'Outro']);
+    // R42 Phase D — the re-cut Podcast Clip carries a Reaction beat.
+    expect(model.poster.slotSegments.map((s) => s.name)).toEqual(['Cold Open', 'Conversation', 'Insight', 'Reaction', 'Outro']);
   });
 
   it('slot segment fractions are proportional and sum to 1', () => {

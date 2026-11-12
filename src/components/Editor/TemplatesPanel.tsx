@@ -7,7 +7,7 @@ import {
   type StudioTemplate,
 } from '../../lib/templates';
 import type { VideoTimelineItem } from '../../types/timeline';
-import { applyFullTemplate, applyHookToProject } from '../../lib/templates/apply';
+import { applyFullTemplate, applyHookToProject, isSlottableMedia } from '../../lib/templates/apply';
 import { prefersReducedMotion, reelCrossfadeAllowed } from '../../lib/reducedMotion';
 import {
   buildPreview,
@@ -55,7 +55,7 @@ import { ReframePicker } from './ReframePicker';
  *
  * Apply behaviour is unchanged from the row era: Hooks (1.5–4s) insert
  * their text/effects into the open project at the playhead. Full Edits
- * (15–45s) make their slot plan REAL: each main-track clip/image is
+ * (15–35s) make their slot plan REAL: each main-track clip/image is
  * reduced to its slot's size and re-packed into the reel, with the
  * template's transition, per-slot motion, and cinematic grade (see
  * `lib/templates/apply.ts`). R20: templates add no music — the app
@@ -93,6 +93,7 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
     focusedId,
     pendingAdjust,
     adjustTargetId,
+    pendingShort,
     pendingFramed,
     reframeTargetId,
     framePromptId,
@@ -231,6 +232,14 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
 
   const handleApply = async (t: StudioTemplate) => {
     if (busyId) return;
+    // R42 Phase D — empty-project guard: a full edit cuts clips to
+    // slots; with no slottable media there is no reel to make, and
+    // the old behaviour (captions restyle, texts land, "Applied ✓")
+    // read as success for an edit that didn't happen.
+    if (t.kind === 'full' && !project.items.some(isSlottableMedia)) {
+      setPanel({ error: 'Add clips first — a full edit needs clips on the timeline to cut into the template.' });
+      return;
+    }
     // v9: a full-edit preset whose FRAME differs from the project canvas
     // asks first — switch the project to the preset's frame, or apply
     // inside the current size (crops still land, computed for the frame).
@@ -272,6 +281,7 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
       setPanel({
         appliedId: t.id,
         pendingAdjust: result.shortenedClips.length > 0 ? result.shortenedClips : null,
+        pendingShort: result.shortClips.length > 0 ? result.shortClips : null,
         pendingFramed: result.framedItems.length > 0 ? result.framedItems : null,
       });
       // R42 Phase B — the biggest one-tap change in the app (every
@@ -419,6 +429,11 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
           {focusedTemplate.kind === 'full' && focusedTemplate.slots && (
             <p className="text-[10px] text-white/35 leading-snug">{focusedTemplate.slots.map((s) => s.name).join(' → ')}</p>
           )}
+          {/* R42 Phase D (E1) — the two-tap rule, stated on the
+              focused card itself at the moment of confusion. */}
+          {appliedId !== focusedTemplate.id && (
+            <p className="text-[11px] font-bold text-gold leading-snug">Tap the card again to apply it.</p>
+          )}
         </div>
       )}
       <p className="text-[10px] text-white/35 leading-snug">
@@ -489,6 +504,27 @@ export function TemplatesPanel({ currentTime = 0, uid, isPlaying = false }: { cu
           ))}
           <button
             onClick={() => setPanel({ pendingAdjust: null })}
+            className="self-end min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
+      {/* R42 Phase D — short-clip honesty: a clip whose source is
+          shorter than its slot stays whole and the reel runs short.
+          Stated plainly, never silently, and never filled. */}
+      {pendingShort && (
+        <div className="flex flex-col gap-1.5 rounded-xl border border-white/15 bg-white/5 p-2.5">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">Short clips</span>
+          {pendingShort.map((clip) => (
+            <p key={clip.itemId} className="text-[11px] text-white/50 leading-snug">
+              {clip.fileName} is {clip.clipSeconds}s — the slot is {clip.slotSeconds}s, so the reel runs{' '}
+              {Math.round((clip.slotSeconds - clip.clipSeconds) * 10) / 10}s short there.
+            </p>
+          ))}
+          <button
+            onClick={() => setPanel({ pendingShort: null })}
             className="self-end min-h-11 px-3 text-[11px] font-bold uppercase tracking-wide text-white/60 hover:text-white"
           >
             Done
@@ -714,7 +750,7 @@ function ReelTemplateCard({
         <span className="flex items-center justify-between gap-1">
           <span className="truncate text-[10px] leading-tight text-white/60">
             {model.kindLabel}
-            {model.slotCount ? ` · ${model.slotCount} clips` : ''}
+            {model.clipsLabel ? ` · ${model.clipsLabel}` : ''}
           </span>
           {focused &&
             (applied ? (

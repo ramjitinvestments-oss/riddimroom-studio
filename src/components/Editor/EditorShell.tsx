@@ -23,7 +23,16 @@ import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
 import { CaptionMotionPanel } from './CaptionMotionPanel';
 import { handleBackPop, pushBackLayer } from '../../lib/backLayers';
-import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair } from '../../lib/timeline/insert';
+import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair, type AppendMediaOptions } from '../../lib/timeline/insert';
+import { applyFullTemplate } from '../../lib/templates/apply';
+import {
+  contractTemplate as getContractTemplate,
+  fitAddedItem,
+  releaseTemplate,
+  templateDrift,
+  type ContractFitResult,
+} from '../../lib/templates/contract';
+import { ensureTemplatesPanelProject, updateTemplatesPanelState } from '../../lib/templates/panelStore';
 import { addPipOverlay, isPipItem } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
 import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
@@ -308,6 +317,49 @@ function EditorInner({ uid }: { uid: string }) {
     });
   }, [project]);
 
+  // R42 Phase D — the template contract fit, composed into the two
+  // single-media add handlers below: append + fit run inside ONE
+  // mutate, so the add and its slot fit are exactly one undo step.
+  // The LIVE run's fit outcome is captured out of the updater (the
+  // pattern TemplatesPanel's apply uses) so the announcement and the
+  // Adjust-clips offer describe the state that actually landed.
+  const contractFitRef = useRef<ContractFitResult | null>(null);
+  const appendWithContract = useCallback((p: Project, asset: MediaAsset, options?: AppendMediaOptions): Project => {
+    const beforeIds = new Set(p.items.map((i) => i.id));
+    let next = appendMediaToTimeline(p, asset, options);
+    const added = next.items.find((i) => !beforeIds.has(i.id));
+    if (added && (added.type === 'video' || added.type === 'image')) {
+      const fit = fitAddedItem(next, added.id);
+      next = fit.project;
+      contractFitRef.current = fit.fitted ? fit : null;
+    } else {
+      contractFitRef.current = null;
+    }
+    return next;
+  }, []);
+
+  // Announce a landed contract fit: the undo toast carries the fit's
+  // own words (with its one-tap Undo), and a shortened video is
+  // offered in the Templates panel's Adjust-clips step.
+  const announceContractFit = useCallback((asset: MediaAsset) => {
+    const fit = contractFitRef.current;
+    contractFitRef.current = null;
+    if (!fit || !fit.fitted) return;
+    if (fit.announcement) {
+      window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: fit.announcement } }));
+    }
+    if (fit.shortened && fit.itemId) {
+      const proj = projectStateRef.current;
+      if (proj) {
+        ensureTemplatesPanelProject(proj.id);
+        updateTemplatesPanelState({
+          appliedId: proj.appliedTemplate?.templateId ?? null,
+          pendingAdjust: [{ itemId: fit.itemId, fileName: asset.fileName }],
+        });
+      }
+    }
+  }, []);
+
   const handleAssetUploaded = useCallback(
     (asset: MediaAsset, options?: { trimStart?: number; trimEnd?: number; role?: AudioTimelineItem['role'] }) => {
       // First-run flow: the moment the first clip lands in an empty
@@ -317,18 +369,22 @@ function EditorInner({ uid }: { uid: string }) {
       // R40 P-32: judge the landing by the project it leaves behind
       // (the insert helpers are pure — applying one here is exactly
       // the state the mutate below produces).
+      const appendOptions: AppendMediaOptions = { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role };
       const before = projectStateRef.current;
       if (before) {
-        noteCapAfterLanding(
-          appendMediaToTimeline(before, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role }),
-        );
+        noteCapAfterLanding(appendWithContract(before, asset, appendOptions));
       }
-      mutate((p) =>
-        appendMediaToTimeline(p, asset, { trimStart: options?.trimStart, trimEnd: options?.trimEnd, role: options?.role }),
-      );
-      if (wasEmpty) setStep(2);
+      mutate((p) => appendWithContract(p, asset, appendOptions));
+      announceContractFit(asset);
+      if (wasEmpty) {
+        setStep(2);
+        // R42 Phase D (E1) — after the first upload the Templates
+        // group starts open: the template is the next thing the job
+        // needs, not something to hunt for.
+        setOpenGroup('templates');
+      }
     },
-    [mutate, noteCapAfterLanding],
+    [mutate, noteCapAfterLanding, appendWithContract, announceContractFit],
   );
 
   // R29 — a finished dual-camera pair (MediaImportPanel dual routing):
@@ -475,10 +531,14 @@ function EditorInner({ uid }: { uid: string }) {
       const wasEmpty = (projectStateRef.current?.items.length ?? 0) === 0;
       const selectedVariantId = bgVariantByAssetId[asset.id];
       const assetToAdd = (selectedVariantId && project?.mediaAssets[selectedVariantId]) || asset;
-      mutate((p) => appendMediaToTimeline(p, assetToAdd, { atTime: currentTime }));
-      if (wasEmpty) setStep(2);
+      mutate((p) => appendWithContract(p, assetToAdd, { atTime: currentTime }));
+      announceContractFit(assetToAdd);
+      if (wasEmpty) {
+        setStep(2);
+        setOpenGroup('templates');
+      }
     },
-    [mutate, currentTime, bgVariantByAssetId, project],
+    [mutate, currentTime, bgVariantByAssetId, project, appendWithContract, announceContractFit],
   );
 
   // Minimal, real keyboard shortcut set (Phase-10 audit item, extended in
@@ -557,6 +617,53 @@ function EditorInner({ uid }: { uid: string }) {
   }
 
   const selectedItem = project.items.find((item) => item.id === selectedItemId) || null;
+
+  // R42 Phase D — the template contract's Step 2 surface: the badge
+  // (with Re-apply / Release), the E3 quick row, and the E4 next-step
+  // chip. Drift is DERIVED from the recorded slot map on every render
+  // (lib/templates/contract.ts) — deleting a slotted clip flags the
+  // badge and offers Re-apply; nothing re-packs silently (D2b).
+  const activeTemplate = getContractTemplate(project);
+  const contractDrift = templateDrift(project);
+  const openGroupAndSheet = (group: string) => {
+    setOpenGroup(group);
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1023px)').matches) {
+      setMobileSheet('panel');
+    }
+  };
+  const handleReapplyTemplate = () => {
+    if (!activeTemplate) return;
+    let result = applyFullTemplate(project, activeTemplate, { switchToFrame: false });
+    mutate((current) => {
+      result = applyFullTemplate(current, activeTemplate, { switchToFrame: false });
+      return result.project;
+    });
+    ensureTemplatesPanelProject(project.id);
+    updateTemplatesPanelState({
+      appliedId: activeTemplate.id,
+      pendingAdjust: result.shortenedClips.length > 0 ? result.shortenedClips : null,
+      pendingShort: result.shortClips.length > 0 ? result.shortClips : null,
+      pendingFramed: result.framedItems.length > 0 ? result.framedItems : null,
+    });
+    window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Template applied' } }));
+  };
+  const handleReleaseTemplate = () => {
+    mutate((p) => releaseTemplate(p));
+    ensureTemplatesPanelProject(project.id);
+    updateTemplatesPanelState({ appliedId: null });
+    window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Template released' } }));
+  };
+  // E4 — the job's next verb, derived from the project's real state.
+  const nextStepChip = ((): { label: string; run: () => void } | null => {
+    if (project.items.length === 0) return null;
+    if (!project.items.some((i) => i.type === 'caption')) {
+      return { label: 'Next: add captions', run: () => openGroupAndSheet('captions') };
+    }
+    if (!project.items.some((i) => i.type === 'audio' && i.role === 'music')) {
+      return { label: 'Next: add music', run: () => openGroupAndSheet('audio') };
+    }
+    return { label: 'Next: Export', run: () => goToStep(3) };
+  })();
 
   // Shared between the desktop `<aside>` columns (always rendered inline,
   // `lg:` and up) and the mobile `BottomSheet`s (rendered only when open,
@@ -875,6 +982,62 @@ function EditorInner({ uid }: { uid: string }) {
               selectedItemId={selectedItemId}
               onSelectItem={setSelectedItemId}
             />
+            {/* R42 Phase D — contract badge + quick row + next step,
+                directly above the timeline where the job happens. */}
+            <div className="w-full max-w-3xl flex flex-col gap-2">
+              {activeTemplate && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border border-gold/30 bg-gold/5 px-3 py-2">
+                  <span className="text-xs font-bold text-gold">Template: {activeTemplate.name}</span>
+                  {contractDrift.drifted ? (
+                    <span className="text-[11px] font-bold text-amber-300">Reel changed since apply</span>
+                  ) : (
+                    <span className="text-[11px] text-white/50">
+                      New clips are fitted to its slots automatically. Overlays don&rsquo;t follow the template.
+                    </span>
+                  )}
+                  <span className="ml-auto flex gap-1.5">
+                    <button
+                      onClick={handleReapplyTemplate}
+                      className="min-h-11 px-3 rounded-lg bg-gold hover:bg-gold-bright text-black text-[11px] font-bold"
+                    >
+                      {contractDrift.drifted ? 'Re-apply to fix' : 'Re-apply'}
+                    </button>
+                    <button
+                      onClick={handleReleaseTemplate}
+                      className="min-h-11 px-3 rounded-lg border border-white/20 bg-white/5 hover:bg-white/10 text-white text-[11px] font-bold"
+                    >
+                      Release
+                    </button>
+                  </span>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-bold uppercase tracking-wide text-white/40 mr-0.5">Quick:</span>
+                {(
+                  [
+                    { label: 'Templates', group: 'templates' },
+                    { label: 'Captions', group: 'captions' },
+                    { label: 'Music', group: 'audio' },
+                  ] as const
+                ).map((chip) => (
+                  <button
+                    key={chip.group}
+                    onClick={() => openGroupAndSheet(chip.group)}
+                    className="min-h-11 px-3 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 text-[11px] font-bold text-white/80"
+                  >
+                    {chip.label}
+                  </button>
+                ))}
+                {nextStepChip && (
+                  <button
+                    onClick={nextStepChip.run}
+                    className="ml-auto min-h-11 px-3 rounded-full bg-gold/15 border border-gold/40 hover:bg-gold/25 text-[11px] font-bold text-gold inline-flex items-center gap-1"
+                  >
+                    {nextStepChip.label} <ArrowRight size={12} />
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="w-full max-w-3xl">
               <TimelinePanel
                 project={project}

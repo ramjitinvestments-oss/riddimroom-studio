@@ -92,6 +92,8 @@ export interface ReelCardModel {
   durationLabel: string;
   /** Full edits only; null for hooks. */
   slotCount: number | null;
+  /** R42 Phase D — the honest card line: 'best with N clips' (N = slot count). Full edits only; null for hooks. */
+  clipsLabel: string | null;
   /** The preset's designed frame, only when it isn't the 9:16 default. */
   frameAspect: string | null;
   accentColor: string;
@@ -162,6 +164,7 @@ export function reelCardModel(t: StudioTemplate): ReelCardModel {
     kindLabel: t.kind === 'hook' ? 'Hook' : 'Full edit',
     durationLabel: formatDurationLabel(t.durationSeconds),
     slotCount: t.kind === 'full' ? (t.slots?.length ?? 0) : null,
+    clipsLabel: t.kind === 'full' ? `best with ${t.slots?.length ?? 0} clips` : null,
     frameAspect: t.frame && t.frame.aspect !== '9:16' ? t.frame.aspect : null,
     accentColor: t.accentColor,
     poster: posterFor(t),

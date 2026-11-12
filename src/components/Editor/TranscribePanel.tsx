@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useProject } from '../../context/ProjectContext';
 import { addCaptionItems } from '../../lib/timeline/insert';
+import { activeCaptionStyleId } from '../../lib/templates/contract';
 import { messageForNonJsonTranscribeResponse, messageForTranscribeFetchFailure } from '../../lib/transcription/clientErrors';
 import { getItemsByTrackType } from '../../lib/timeline/utils';
 import { requestOpenPlan } from '../../lib/upgradeRequest';
@@ -113,7 +114,11 @@ export function TranscribePanel({ uid }: { uid: string }) {
         setError('No speech detected in this media.');
       } else {
         const atTime = item.startTime - item.trimStart;
-        mutate((p) => addCaptionItems(p, { words: data.words, atTime, captionStyleId: 'classic', source: 'ai' }));
+        // R42 Phase D — new cues take the ACTIVE style: the template
+        // contract's caption style while one is live, else the
+        // project's prevailing cue style. (This hardcoded 'classic'
+        // before, silently overriding an applied template's style.)
+        mutate((p) => addCaptionItems(p, { words: data.words, atTime, captionStyleId: activeCaptionStyleId(p), source: 'ai' }));
         // R42 Phase B — a landed transcription is a bulk edit: it
         // announces its own Undo through the shell's undo toast.
         window.dispatchEvent(new CustomEvent('rr:undo-toast', { detail: { message: 'Captions added' } }));

@@ -39,8 +39,17 @@
  * hook's text elements at a caller-supplied time, caption restyle,
  * motion on media underneath, and the optional PiP end-transform glide.
  * Returns a new Project; the input is never mutated.
+ *
+ * R42 Phase D — the full apply also: merges neighbouring slots into
+ * runs when clips are fewer than slots (the reel always lands on the
+ * template's total), records the living contract on the project
+ * (`appliedTemplate` — see lib/templates/contract.ts), marks its
+ * placeholder texts template-owned so a re-apply replaces them, and
+ * reports clips whose source couldn't fill their slot. Hooks now
+ * restyle captions only inside their own window (D2c).
  */
 import type { AudioTimelineItem, CropSettings, MediaAsset, Project, TimelineItem } from '../../types/timeline';
+import type { TemplateSlot } from '../templates';
 import { ASPECT_RATIO_OPTIONS } from '../aspectRatios';
 
 /** Canvas dims for a frame aspect id, from the app's canonical ratio table. */
@@ -84,6 +93,32 @@ function hasTextWithContent(project: Project, text: string): boolean {
   return project.items.some((i) => i.type === 'text' && i.text === text);
 }
 
+/**
+ * R42 Phase D — add a template placeholder text and mark it
+ * template-owned (`templateId` on the item), so the NEXT full apply
+ * replaces it instead of inheriting it. addTextItem doesn't return
+ * the new item's id — recover it by diffing item ids.
+ */
+function addTemplateTextItem(
+  project: Project,
+  options: Parameters<typeof addTextItem>[1],
+  templateId: string,
+): Project {
+  const beforeIds = new Set(project.items.map((i) => i.id));
+  let next = addTextItem(project, options);
+  const added = next.items.find((i) => !beforeIds.has(i.id));
+  if (added) {
+    next = updateItem(next, added.id, { templateId });
+  }
+  return next;
+}
+
+/** R42 Phase D — drop every template-owned placeholder text (any template's). User-authored texts are never marked, never touched. */
+function removeTemplateOwnedTexts(project: Project): Project {
+  if (!project.items.some((i) => i.type === 'text' && i.templateId)) return project;
+  return { ...project, items: project.items.filter((i) => !(i.type === 'text' && i.templateId)) };
+}
+
 /** addTextItem doesn't return the new item's id — recover it by diffing item ids. */
 function addTextItemWithAnimation(
   project: Project,
@@ -115,6 +150,8 @@ export interface ApplyFullTemplateOptions {
    * option (or when the project already has music) no audio is added.
    */
   loopAsset?: MediaAsset;
+  /** R42 Phase D — timestamp stamped onto the recorded template contract (`appliedTemplate.appliedAt`); tests pass a fixed value. Defaults to Date.now(). */
+  nowMs?: number;
   /**
    * v9 — when the template has a FRAME whose aspect differs from the
    * project's canvas, switch the project's canvas to the frame's aspect
@@ -158,10 +195,22 @@ export interface ShortenedClipInfo {
   fileName: string;
 }
 
+/** R42 Phase D — a clip whose SOURCE is shorter than its slot: the reel honestly runs short by the difference (no hold-frame fill). */
+export interface ShortClipInfo {
+  itemId: string;
+  fileName: string;
+  /** The clip's on-timeline duration after the slot pass (seconds, 1dp). */
+  clipSeconds: number;
+  /** The slot (or merged run) it was fitted to (seconds, 1dp). */
+  slotSeconds: number;
+}
+
 export interface ApplyFullTemplateResult {
   project: Project;
   /** Video clips whose on-timeline duration shrank — the panel offers these in the post-apply "Adjust clips" crop step. */
   shortenedClips: ShortenedClipInfo[];
+  /** R42 Phase D — clips whose source couldn't fill their slot; the panel states the shortfall plainly. */
+  shortClips: ShortClipInfo[];
   /** Packed reel span of the slotted items (0/0 when the project had no slottable media). */
   reelStartSeconds: number;
   reelEndSeconds: number;
@@ -174,10 +223,78 @@ export interface ApplyFullTemplateResult {
 }
 
 /** Main-track media for slotting: full-frame videos (not PiP overlays) and `photo` images (not overlay/watermark/logo images). */
-function isSlottableMedia(item: TimelineItem): boolean {
+export function isSlottableMedia(item: TimelineItem): boolean {
   if (item.type === 'video') return !isPipItem(item);
   if (item.type === 'image') return item.role === 'photo';
   return false;
+}
+
+/**
+ * The project's slottable media in SLOT ORDER — the one ordering the
+ * apply, the contract fit and the drift check all share: timeline
+ * order (startTime), ties broken by track order (the video track
+ * stacks above the image track), then zIndex, then id.
+ */
+export function slottableMediaInOrder(project: Project): TimelineItem[] {
+  const trackOrder = new Map(project.tracks.map((t, i) => [t.id, i]));
+  return project.items
+    .filter(isSlottableMedia)
+    .slice()
+    .sort(
+      (a, b) =>
+        a.startTime - b.startTime ||
+        (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) ||
+        a.zIndex - b.zIndex ||
+        (a.id < b.id ? -1 : 1),
+    );
+}
+
+/** One clip's effective slot after the slot-merge mapping. */
+export interface EffectiveSlot {
+  /** Seconds this clip is fitted to (a merged run's summed length). */
+  durationSeconds: number;
+  /** Motion of the run's FIRST slot. */
+  motion: string;
+  /** Transition of the run's FIRST slot (undefined = template default). */
+  transition?: string;
+  /** Index of the run's first slot in the template's slot list. */
+  firstSlotIndex: number;
+}
+
+/**
+ * R42 Phase D — slot-merge mapping. With at least as many clips as
+ * slots, each clip takes one slot (extras repeat the last, as always).
+ * With FEWER clips than slots, neighbouring slots merge into
+ * consecutive runs — one run per clip, earlier runs never shorter
+ * than later ones — so the reel still lands exactly on the template's
+ * total instead of ending early. A run keeps its first slot's motion
+ * and transition (the beat the run opens with).
+ */
+export function effectiveSlotsForClips(slots: TemplateSlot[], clipCount: number): EffectiveSlot[] {
+  if (clipCount <= 0 || slots.length === 0) return [];
+  if (clipCount >= slots.length) {
+    return Array.from({ length: clipCount }, (_, i) => {
+      const idx = Math.min(i, slots.length - 1);
+      const s = slots[idx];
+      return { durationSeconds: s.durationSeconds, motion: s.motion, transition: s.transition, firstSlotIndex: idx };
+    });
+  }
+  const runs: EffectiveSlot[] = [];
+  const base = Math.floor(slots.length / clipCount);
+  const remainder = slots.length % clipCount;
+  let cursor = 0;
+  for (let c = 0; c < clipCount; c++) {
+    const len = base + (c < remainder ? 1 : 0);
+    const run = slots.slice(cursor, cursor + len);
+    runs.push({
+      durationSeconds: run.reduce((sum, s) => sum + s.durationSeconds, 0),
+      motion: run[0].motion,
+      transition: run[0].transition,
+      firstSlotIndex: cursor,
+    });
+    cursor += len;
+  }
+  return runs;
 }
 
 interface SlotPlan {
@@ -206,6 +323,10 @@ export function applyFullTemplate(
   // overlap alone can point a PiP at the wrong "main" clip).
   const pairIds = cameraPairItemIds(project);
   let next = applyCaptionStyle(project, template.captionStyleId);
+  // R42 Phase D — re-apply hygiene: the previous template's
+  // placeholder texts are template-owned and are replaced wholesale
+  // below, never inherited by the new template. User texts stay.
+  next = removeTemplateOwnedTexts(next);
 
   // ── v9 FRAME: optionally switch the canvas to the template's frame
   // aspect first (positions/scales are percentage-based, so the project
@@ -220,31 +341,23 @@ export function applyFullTemplate(
     }
   }
 
-  // ── Slot mapping: durations first (they decide the packed timing). ──
-  // Timeline order = startTime; ties (a clip and a photo both starting
-  // at 0 on their parallel tracks) break by track order — the video
-  // track stacks above the image track, so the clip reads first — then
-  // zIndex, then id for full determinism.
-  const trackOrder = new Map(next.tracks.map((t, i) => [t.id, i]));
-  const slotted = next.items
-    .filter(isSlottableMedia)
-    .slice()
-    .sort(
-      (a, b) =>
-        a.startTime - b.startTime ||
-        (trackOrder.get(a.trackId) ?? 0) - (trackOrder.get(b.trackId) ?? 0) ||
-        a.zIndex - b.zIndex ||
-        (a.id < b.id ? -1 : 1),
-    );
+  // ── Slot mapping: durations first (they decide the packed timing).
+  // Slot order is the shared `slottableMediaInOrder`; the per-clip
+  // effective slots come from the slot-merge mapping (R42 Phase D):
+  // fewer clips than slots merge neighbouring slots into runs so the
+  // reel still lands on the template's total. ──
+  const slotted = slottableMediaInOrder(next);
+  const effectiveSlots = effectiveSlotsForClips(slots, slotted.length);
 
   const plans: SlotPlan[] = [];
+  const shortPlans: { itemId: string; clipSeconds: number; slotSeconds: number }[] = [];
   let reelStart = 0;
   let reelEnd = 0;
   if (slotted.length > 0 && slots.length > 0) {
     reelStart = slotted[0].startTime;
     let cursor = reelStart;
     slotted.forEach((item, index) => {
-      const slot = slots[Math.min(index, slots.length - 1)];
+      const slot = effectiveSlots[index];
       const oldDuration = item.endTime - item.startTime;
       let newDuration = slot.durationSeconds;
       let trimStart: number | undefined;
@@ -275,6 +388,15 @@ export function applyFullTemplate(
         trimEnd = wEnd;
         newDuration = (wEnd - wStart) / speed;
         shortened = newDuration < oldDuration - 0.01;
+        // R42 Phase D — short-clip honesty: the SOURCE couldn't fill
+        // the slot (distinct from being shortened BY the slot).
+        if (sourceDuration < targetWindow - 0.01) {
+          shortPlans.push({
+            itemId: item.id,
+            clipSeconds: Math.round(newDuration * 10) / 10,
+            slotSeconds: Math.round(slot.durationSeconds * 10) / 10,
+          });
+        }
       }
       plans.push({
         itemId: item.id,
@@ -286,7 +408,7 @@ export function applyFullTemplate(
         entranceTransition: slot.transition ?? template.transition,
         exitTransition:
           index + 1 < slotted.length
-            ? (slots[Math.min(index + 1, slots.length - 1)].transition ?? template.transition)
+            ? (effectiveSlots[index + 1].transition ?? template.transition)
             : template.transition,
         shortened,
       });
@@ -310,6 +432,11 @@ export function applyFullTemplate(
       const asset = item && 'mediaAssetId' in item ? next.mediaAssets[item.mediaAssetId] : undefined;
       return { itemId: p.itemId, fileName: asset?.fileName ?? 'Clip' };
     });
+  const shortClips: ShortClipInfo[] = shortPlans.map((p) => {
+    const item = next.items.find((i) => i.id === p.itemId);
+    const asset = item && 'mediaAssetId' in item ? next.mediaAssets[item.mediaAssetId] : undefined;
+    return { itemId: p.itemId, fileName: asset?.fileName ?? 'Clip', clipSeconds: p.clipSeconds, slotSeconds: p.slotSeconds };
+  });
 
   // ── Transitions on every visual/text item; motion per slot for the
   // slotted media (template default for other media). v9: the GRADE now
@@ -428,7 +555,7 @@ export function applyFullTemplate(
   const endAnchor = hasReel ? reelEnd : duration;
 
   if (template.headlineText && !hasTextWithRole(next, 'title')) {
-    next = addTextItem(next, {
+    next = addTemplateTextItem(next, {
       text: template.headlineText,
       atTime: anchorBase + Math.min(0.2, Math.max(0, (endAnchor - anchorBase) * 0.05)),
       durationSeconds: plans[0] ? plans[0].endTime - plans[0].startTime : slots[0]?.durationSeconds ?? 3,
@@ -436,10 +563,10 @@ export function applyFullTemplate(
       fontSize: 64,
       color: template.accentColor,
       position: { x: 50, y: 12 },
-    });
+    }, template.id);
   }
   if (template.subText && !hasTextWithRole(next, 'subtitle')) {
-    next = addTextItem(next, {
+    next = addTemplateTextItem(next, {
       text: template.subText,
       atTime: anchorBase + Math.min(0.4, Math.max(0, (endAnchor - anchorBase) * 0.05)),
       durationSeconds: 3.5,
@@ -447,11 +574,11 @@ export function applyFullTemplate(
       fontSize: 34,
       color: '#FFFFFF',
       position: { x: 50, y: 22 },
-    });
+    }, template.id);
   }
   if (template.ctaText && !hasTextWithContent(next, template.ctaText)) {
     const ctaDuration = 3;
-    next = addTextItem(next, {
+    next = addTemplateTextItem(next, {
       text: template.ctaText,
       atTime: Math.max(anchorBase, endAnchor - ctaDuration),
       durationSeconds: ctaDuration,
@@ -459,11 +586,11 @@ export function applyFullTemplate(
       fontSize: 44,
       color: template.accentColor,
       position: { x: 50, y: 82 },
-    });
+    }, template.id);
   }
   if (template.outroText && !hasTextWithContent(next, template.outroText)) {
     const outroDuration = 2.5;
-    next = addTextItem(next, {
+    next = addTemplateTextItem(next, {
       text: template.outroText,
       atTime: Math.max(anchorBase, endAnchor - outroDuration),
       durationSeconds: outroDuration,
@@ -471,10 +598,31 @@ export function applyFullTemplate(
       fontSize: 52,
       color: template.accentColor,
       position: { x: 50, y: 50 },
-    });
+    }, template.id);
   }
 
-  return { project: next, shortenedClips, reelStartSeconds: reelStart, reelEndSeconds: reelEnd, musicAdded, canvasSwitched, framedItems };
+  // ── R42 Phase D — record the contract. The project now REMEMBERS
+  // its template (id + the slot each slotted item was fitted to), so
+  // later adds can be fitted and drift can be derived. Only a real
+  // reel makes a contract — an apply over no slottable media (the
+  // panel guards it; a programmatic call could still land here)
+  // leaves any existing contract untouched. ──
+  if (plans.length > 0) {
+    const slotByItemId: Record<string, number> = {};
+    plans.forEach((plan, index) => {
+      slotByItemId[plan.itemId] = effectiveSlots[index].firstSlotIndex;
+    });
+    next = {
+      ...next,
+      appliedTemplate: {
+        templateId: template.id,
+        slotByItemId,
+        appliedAt: options.nowMs ?? Date.now(),
+      },
+    };
+  }
+
+  return { project: next, shortenedClips, shortClips, reelStartSeconds: reelStart, reelEndSeconds: reelEnd, musicAdded, canvasSwitched, framedItems };
 }
 
 export function applyTemplateToProject(
@@ -493,9 +641,24 @@ export function applyTemplateToProject(
 export function applyHookToProject(project: Project, template: StudioTemplate, atTime: number): Project {
   if (template.kind !== 'hook' || !template.elements) return project;
 
-  let next = applyCaptionStyle(project, template.captionStyleId);
   const start = Math.max(0, atTime);
   const hookEnd = start + template.durationSeconds;
+  // R42 Phase D (D2c) — a hook restyles captions ONLY inside its own
+  // window. It used to rewrite every cue in the project to the hook's
+  // style: a 2-second insertion silently restyling a whole film.
+  let next = project;
+  if (template.captionStyleId) {
+    for (const item of next.items) {
+      if (
+        item.type === 'caption' &&
+        item.captionStyleId !== template.captionStyleId &&
+        item.startTime < hookEnd &&
+        item.endTime > start
+      ) {
+        next = updateItem(next, item.id, { captionStyleId: template.captionStyleId });
+      }
+    }
+  }
 
   // R32 Phase 3 — camera-pair members under the hook are motion-
   // capped exactly as in a full-template apply (see pairMotion).

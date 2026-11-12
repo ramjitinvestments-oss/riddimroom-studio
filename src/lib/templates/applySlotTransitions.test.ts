@@ -89,17 +89,21 @@ describe('R37 Phase 2 — per-slot transitions', () => {
     const { project: next } = applyFullTemplate(fixture, template);
     const slotted = slottedInOrder(next, fixtureIds);
     expect(slotted).toHaveLength(5);
+    // R42 Phase D — 5 clips into 6 slots: the slot-merge gives the
+    // first clip a 2-slot run (Hook+Setup), so entrances follow each
+    // RUN's first slot: [snap-zoom, whip-pan, whip-pan, cross-zoom,
+    // dip-to-gold]. (Pre-merge this pinned the raw per-slot sequence.)
     expect(slotted.map((i) => animOf(i)?.entrance)).toEqual([
       'snap-zoom',
-      'pop',
+      'whip-pan',
       'whip-pan',
       'cross-zoom',
       'dip-to-gold',
     ]);
-    // Each exit is the NEXT slot's entrance; the last item exits on
+    // Each exit is the NEXT run's entrance; the last item exits on
     // the template default ('cross-zoom').
     expect(slotted.map((i) => animOf(i)?.exit)).toEqual([
-      'pop',
+      'whip-pan',
       'whip-pan',
       'cross-zoom',
       'dip-to-gold',
@@ -114,27 +118,33 @@ describe('R37 Phase 2 — per-slot transitions', () => {
     const { project: next } = applyFullTemplate(fixture, template);
     const slotted = slottedInOrder(next, fixtureIds);
     expect(slotted).toHaveLength(5);
+    // R42 Phase D — same merge: 5 clips into 6 slots, first clip's
+    // run covers Intro+Verse, so its entrance is Intro's 'smoke' and
+    // clip 2 enters on the Chorus run's 'film-burn'.
     expect(slotted.map((i) => animOf(i)?.entrance)).toEqual([
       'smoke',
-      'film-dissolve',
       'film-burn',
       'luma-fade',
+      'smoke',
       'dip-to-black',
     ]);
     expect(slotted.map((i) => animOf(i)?.exit)).toEqual([
-      'film-dissolve',
       'film-burn',
       'luma-fade',
+      'smoke',
       'dip-to-black',
       'film-burn',
     ]);
   });
 
   it('fallback: a lone slot transition affects only its item entrance, its predecessor exit', () => {
-    const base = getTemplate('commercial-30')!; // default 'luma-fade', 4 slots, none tuned
+    const base = getTemplate('commercial-30')!; // default 'luma-fade', 8 slots, none tuned
+    // R42 Phase D — 3 clips into 8 slots merge into runs [3,3,2], so
+    // the run-first slots are 0, 3 and 6: tune slot 3 (the second
+    // clip's run head) — a mid-run tune would be inert by design.
     const cloned: StudioTemplate = {
       ...base,
-      slots: (base.slots ?? []).map((slot, i) => (i === 1 ? { ...slot, transition: 'zoom' } : { ...slot })),
+      slots: (base.slots ?? []).map((slot, i) => (i === 3 ? { ...slot, transition: 'zoom' } : { ...slot })),
     };
     const fixture = projectWithClips(3);
     const fixtureIds = new Set(fixture.items.map((i) => i.id));

@@ -203,16 +203,19 @@ describe('templates v2 — hook apply', () => {
   it('inserts hook text elements at the given time with their reveal animations', () => {
     const project = projectWithCaptionAndClip();
     const template = getTemplate('gold-smash-intro')!;
-    const next = applyHookToProject(project, template, 5);
+    // R42 Phase D — applied at 0 so the fixture caption [0, 0.5]
+    // overlaps the hook window [0, 2.5): the hook restyle is scoped
+    // to that window now (see contract.test.ts for the outside case).
+    const next = applyHookToProject(project, template, 0);
 
     const title = next.items.find((i) => i.type === 'text' && i.type === 'text' && (i as { text?: string }).text === 'YOUR TITLE');
-    expect(title?.type === 'text' ? title.startTime : -1).toBeCloseTo(5, 5);
+    expect(title?.type === 'text' ? title.startTime : -1).toBeCloseTo(0, 5);
     expect(title?.type === 'text' ? title.animation?.entrance : undefined).toBe('pop');
 
     const sub = next.items.find((i) => i.type === 'text' && (i as { text?: string }).text === 'WATCH THIS');
-    expect(sub?.type === 'text' ? sub.startTime : -1).toBeCloseTo(5.35, 5);
+    expect(sub?.type === 'text' ? sub.startTime : -1).toBeCloseTo(0.35, 5);
 
-    // Hook restyles existing captions and pushes motion onto the clip underneath.
+    // Hook restyles the captions inside its window and pushes motion onto the clip underneath.
     const caption = next.items.find((i) => i.type === 'caption');
     expect(caption?.type === 'caption' ? caption.captionStyleId : undefined).toBe('gold-premium');
     const video = next.items.find((i) => i.type === 'video');
@@ -294,15 +297,18 @@ function byId(project: Project, id: string) {
 describe('templates v3 — real slot trims', () => {
   it('video longer than its slot: window becomes the slot length, anchored at trimStart', () => {
     let project = createDefaultProject('uid-1');
-    project = appendMediaToTimeline(project, videoAsset(30));
+    project = appendMediaToTimeline(project, videoAsset(60));
     const video = project.items.find((i) => i.type === 'video')!;
-    const result = applyFullTemplate(project, getTemplate('music-video')!); // slots 5,7,8,6,7 = 33
+    // R42 Phase D — one clip merges ALL of music-video's slots into
+    // a single 35s run (3+12+12+2.5+2.5+3), so the "slot" this lone
+    // clip fills is the whole template.
+    const result = applyFullTemplate(project, getTemplate('music-video')!);
     const item = byId(result.project, video.id);
     expect(item.type === 'video' ? item.trimStart : -1).toBe(0);
-    expect(item.type === 'video' ? item.trimEnd : -1).toBe(5);
-    expect(item.endTime - item.startTime).toBeCloseTo(5, 6);
+    expect(item.type === 'video' ? item.trimEnd : -1).toBe(35);
+    expect(item.endTime - item.startTime).toBeCloseTo(35, 6);
     expect(result.reelStartSeconds).toBe(0);
-    expect(result.reelEndSeconds).toBeCloseTo(5, 6);
+    expect(result.reelEndSeconds).toBeCloseTo(35, 6);
     expect(result.shortenedClips.map((c) => c.itemId)).toEqual([video.id]);
     expect(result.musicAdded).toBe(false); // no loopAsset supplied
     expect(validateProject(result.project).valid).toBe(true);
@@ -313,11 +319,13 @@ describe('templates v3 — real slot trims', () => {
     project = appendMediaToTimeline(project, videoAsset(30));
     const video = project.items.find((i) => i.type === 'video')!;
     project = updateItem(project, video.id, { trimStart: 28, trimEnd: 30, duration: 2 });
-    const result = applyFullTemplate(project, getTemplate('commercial-30')!); // slot 0 = 6s
+    // R42 Phase D — one clip merges all 8 slots: the window is the
+    // whole 21s template, shifted back to end at the source end.
+    const result = applyFullTemplate(project, getTemplate('commercial-30')!);
     const item = byId(result.project, video.id);
-    expect(item.type === 'video' ? item.trimStart : -1).toBe(24);
+    expect(item.type === 'video' ? item.trimStart : -1).toBe(9);
     expect(item.type === 'video' ? item.trimEnd : -1).toBe(30);
-    expect(item.endTime - item.startTime).toBeCloseTo(6, 6);
+    expect(item.endTime - item.startTime).toBeCloseTo(21, 6);
   });
 
   it('video shorter than its slot uses the full source', () => {
@@ -340,34 +348,37 @@ describe('templates v3 — real slot trims', () => {
     project = appendMediaToTimeline(project, videoAsset(20));
     const [v1, img, v2] = project.items.filter((i) => i.type === 'video' || i.type === 'image');
     project = updateItem(project, v2.id, { startTime: 25, endTime: 45 }); // a gap before v2
-    const result = applyFullTemplate(project, getTemplate('commercial-30')!); // slots 6,10,8,6
+    // R42 Phase D — 3 items into 8 slots merge into runs [3,3,2]:
+    // v1 = slots 0–2 (9s), image = slots 3–5 (8s), v2 = slots 6–7 (4s).
+    const result = applyFullTemplate(project, getTemplate('commercial-30')!);
     const r1 = byId(result.project, v1.id);
     const rImg = byId(result.project, img.id);
     const r2 = byId(result.project, v2.id);
     expect(r1.startTime).toBe(0);
-    expect(r1.endTime - r1.startTime).toBeCloseTo(6, 6);
-    expect(rImg.startTime).toBeCloseTo(6, 6);
-    expect(rImg.endTime - rImg.startTime).toBeCloseTo(10, 6); // image = slot exactly
-    expect(r2.startTime).toBeCloseTo(16, 6);
-    expect(r2.endTime - r2.startTime).toBeCloseTo(8, 6);
-    expect(result.reelEndSeconds).toBeCloseTo(24, 6);
+    expect(r1.endTime - r1.startTime).toBeCloseTo(9, 6);
+    expect(rImg.startTime).toBeCloseTo(9, 6);
+    expect(rImg.endTime - rImg.startTime).toBeCloseTo(8, 6); // image = merged slot exactly
+    expect(r2.startTime).toBeCloseTo(17, 6);
+    expect(r2.endTime - r2.startTime).toBeCloseTo(4, 6);
+    expect(result.reelEndSeconds).toBeCloseTo(21, 6);
     expect(validateProject(result.project).valid).toBe(true);
   });
 
   it('items beyond the slot count take the LAST slot duration + treatment', () => {
     let project = createDefaultProject('uid-1');
-    for (let k = 0; k < 6; k++) project = appendMediaToTimeline(project, videoAsset(20));
-    const result = applyFullTemplate(project, getTemplate('product-ad-15')!); // slots 3,6,4,2
+    for (let k = 0; k < 7; k++) project = appendMediaToTimeline(project, videoAsset(20));
+    const result = applyFullTemplate(project, getTemplate('product-ad-15')!); // slots 2,3,3,3,2,2
     const videos = result.project.items.filter((i) => i.type === 'video');
-    expect(videos.map((i) => Math.round((i.endTime - i.startTime) * 100) / 100)).toEqual([3, 6, 4, 2, 2, 2]);
-    expect(videos.map((i) => i.startTime)).toEqual([0, 3, 9, 13, 15, 17]);
-    expect(result.reelEndSeconds).toBeCloseTo(19, 6);
-    // The extra items still get the template grade. Entrances follow
+    expect(videos.map((i) => Math.round((i.endTime - i.startTime) * 100) / 100)).toEqual([2, 3, 3, 3, 2, 2, 2]);
+    expect(videos.map((i) => i.startTime)).toEqual([0, 2, 5, 8, 11, 13, 15]);
+    expect(result.reelEndSeconds).toBeCloseTo(17, 6);
+    // The extra item still gets the template grade. Entrances follow
     // the R37 per-slot transition sequence (Problem shake → Hero
-    // dip-to-gold → Offer pop → CTA flash); extras beyond the slot
-    // count clamp to the last slot, so they enter on 'flash' too.
+    // dip-to-gold → Demo pop → Offer pop → CTA flash → Sting
+    // dip-to-gold); the extra beyond the slot count clamps to the
+    // last slot, so it enters on 'dip-to-gold' too.
     expect(videos.map((v) => (v.type === 'video' ? v.animation?.entrance : undefined))).toEqual([
-      'shake', 'dip-to-gold', 'pop', 'flash', 'flash', 'flash',
+      'shake', 'dip-to-gold', 'pop', 'pop', 'flash', 'dip-to-gold', 'dip-to-gold',
     ]);
     for (const v of videos) {
       expect(v.type === 'video' ? v.colorGrade : undefined).toEqual(getGradePreset('clean-commercial')!.grade);
@@ -385,13 +396,14 @@ describe('templates v3 — real slot trims', () => {
 
   it('keeps speed semantics: slot window is slotDuration × speed of source time', () => {
     let project = createDefaultProject('uid-1');
-    project = appendMediaToTimeline(project, videoAsset(30));
+    project = appendMediaToTimeline(project, videoAsset(100));
     const video = project.items.find((i) => i.type === 'video')!;
     project = setItemSpeed(project, video.id, 2);
-    const result = applyFullTemplate(project, getTemplate('music-video')!); // slot 0 = 5s on-timeline
+    // R42 Phase D — one clip merges all slots: 35s on-timeline.
+    const result = applyFullTemplate(project, getTemplate('music-video')!);
     const item = byId(result.project, video.id);
-    expect(item.type === 'video' ? item.trimEnd - item.trimStart : -1).toBeCloseTo(10, 6); // 5s × 2× speed
-    expect(item.endTime - item.startTime).toBeCloseTo(5, 6);
+    expect(item.type === 'video' ? item.trimEnd - item.trimStart : -1).toBeCloseTo(70, 6); // 35s × 2× speed
+    expect(item.endTime - item.startTime).toBeCloseTo(35, 6);
   });
 
   it('PiP, audio, captions, and user text are NOT retimed; template texts anchor to the reel', () => {
@@ -447,14 +459,15 @@ describe('templates v3 — music auto-fit', () => {
     project = appendMediaToTimeline(project, videoAsset(30));
     const loop = audioLoopAsset(); // 8s source
     const result = applyFullTemplate(project, getTemplate('viral-hook-story')!, { loopAsset: loop });
-    // Single clip → slot 0 = 3s reel; the 8s loop is longer → trim mode.
+    // R42 Phase D — a single clip merges all six slots, so the reel
+    // is the full 16s template; the 8s loop is shorter → loop mode.
     expect(result.musicAdded).toBe(true);
-    expect(result.reelEndSeconds).toBeCloseTo(3, 6);
+    expect(result.reelEndSeconds).toBeCloseTo(16, 6);
     const music = result.project.items.find((i) => i.type === 'audio' && i.role === 'music')!;
     expect(music.startTime).toBeCloseTo(result.reelStartSeconds, 6);
     expect(music.endTime).toBeCloseTo(result.reelEndSeconds, 6);
-    expect(music.type === 'audio' ? music.loop : undefined).toBeFalsy();
-    expect(music.type === 'audio' ? music.trimEnd : -1).toBeCloseTo(3, 6);
+    expect(music.type === 'audio' ? music.loop : undefined).toBe(true);
+    expect(music.type === 'audio' ? music.trimEnd : -1).toBeCloseTo(8, 6);
     expect(music.type === 'audio' ? music.fade?.fadeOutDuration : -1).toBeCloseTo(0.5, 6);
     expect(result.project.mediaAssets[loop.id]).toBeDefined(); // asset registered, no dangling ref
     expect(validateProject(result.project).valid).toBe(true);
@@ -466,12 +479,13 @@ describe('templates v3 — music auto-fit', () => {
     project = appendMediaToTimeline(project, videoAsset(30));
     const loop = audioLoopAsset(); // 8s
     const result = applyFullTemplate(project, getTemplate('viral-hook-story')!, { loopAsset: loop });
-    // Reel = 3 + 6 = 9s > 8s source → loop mode, full source window.
-    expect(result.reelEndSeconds).toBeCloseTo(9, 6);
+    // R42 Phase D — two clips merge into runs [3 slots, 3 slots]:
+    // reel = 8 + 8 = 16s > 8s source → loop mode, full source window.
+    expect(result.reelEndSeconds).toBeCloseTo(16, 6);
     const music = result.project.items.find((i) => i.type === 'audio' && i.role === 'music')!;
     expect(music.type === 'audio' ? music.loop : undefined).toBe(true);
     expect(music.type === 'audio' ? music.trimEnd : -1).toBeCloseTo(8, 6);
-    expect(music.endTime - music.startTime).toBeCloseTo(9, 6);
+    expect(music.endTime - music.startTime).toBeCloseTo(16, 6);
   });
 
   it('never touches existing music, even when a loop asset is supplied', () => {

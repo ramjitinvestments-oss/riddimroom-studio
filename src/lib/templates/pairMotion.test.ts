@@ -135,11 +135,13 @@ describe('template application caps the pair (and only the pair)', () => {
 
     const extra = videoItem(next, 'asset-extra');
     expect(extra.motion).not.toEqual(PAIR_SAFE_MOTION);
-    // R37: the extra clip is slotted item index 1 (Setup), so it enters
-    // on that slot's transition 'pop' — before per-slot sequences it
-    // took the template default 'cross-zoom'. The pair cap assertions
-    // above are unaffected (every raw value still wraps to 'fade').
-    expect(extra.animation?.entrance).toBe('pop');
+    // R37: the extra clip is slotted item index 1, so it enters on its
+    // slot's transition — before per-slot sequences it took the
+    // template default 'cross-zoom'. R42 Phase D: 2 clips into 6
+    // slots merge into runs [3,3], so the extra's run head is slot 3
+    // (Build II, 'whip-pan'). The pair cap assertions above are
+    // unaffected (every raw value still wraps to 'fade').
+    expect(extra.animation?.entrance).toBe('whip-pan');
   });
 
   it('hook: motion under the hook is capped on pair items only', () => {

@@ -74,9 +74,11 @@ describe('R37 TemplatesPanel — reel strip chooser', () => {
   it('cards carry their facts: duration chips, kind labels, slot counts, frame chips', () => {
     const markup = renderPanel();
     expect(markup).toContain('>2.5s<');
-    expect(markup).toContain('>30s<');
+    // R42 Phase D — card copy is the TRUE total (Commercial = 21s)
+    // and the honest clip count ('best with N clips').
+    expect(markup).toContain('>21s<');
     expect(markup).toContain('Full edit');
-    expect(markup).toContain('5 clips');
+    expect(markup).toContain('best with 8 clips');
     expect(markup).toContain('>16:9<');
     // The focused (first) card carries the Apply affordance.
     expect(markup).toContain('>Apply<');

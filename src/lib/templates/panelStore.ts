@@ -21,7 +21,7 @@
  */
 import type { Project } from '../../types/timeline';
 import type { StudioTemplate } from '../templates';
-import type { ShortenedClipInfo } from './apply';
+import type { ShortClipInfo, ShortenedClipInfo } from './apply';
 import type { ReelChip } from './reelMeta';
 import {
   createPreviewCache,
@@ -40,6 +40,8 @@ export interface TemplatesPanelState {
   /** Post-apply "Adjust clips" step (shortened videos), if open. */
   pendingAdjust: ShortenedClipInfo[] | null;
   adjustTargetId: string | null;
+  /** R42 Phase D — post-apply short-clip honesty (sources shorter than their slot), if any. */
+  pendingShort: ShortClipInfo[] | null;
   /** Post-apply "Reframe clips" step (frame-cropped items), if open. */
   pendingFramed: ShortenedClipInfo[] | null;
   reframeTargetId: string | null;
@@ -59,6 +61,7 @@ export function initialTemplatesPanelState(projectId: string | null): TemplatesP
     focusedId: null,
     pendingAdjust: null,
     adjustTargetId: null,
+    pendingShort: null,
     pendingFramed: null,
     reframeTargetId: null,
     framePromptId: null,

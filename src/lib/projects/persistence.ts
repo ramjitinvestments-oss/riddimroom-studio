@@ -66,12 +66,18 @@ export interface ProjectSummary {
  * one real caller that now always passes an explicit size, chosen once at
  * creation from the 4 marketing-standard ratios.
  */
-export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean }): Project {
+export function createDefaultProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean; appliedTemplate?: Project['appliedTemplate'] }): Project {
   let project = createEmptyProject({ ownerUid, name, canvasWidth, canvasHeight });
   // v1 free default: watermark on. Lifetime users can toggle it off per project,
   // and callers that know the creator's tier (Dashboard) pass it so paid/owner
   // projects start with the watermark OFF instead of needing a manual toggle.
   project = { ...project, watermarkEnabled: opts?.watermarkEnabled ?? true };
+  // R42 Phase D (E2) — Start-from-a-template: the contract is saved
+  // with the project from birth, so every clip added afterwards is
+  // fitted to the template's slots by the editor's contract fit.
+  if (opts?.appliedTemplate) {
+    project = { ...project, appliedTemplate: opts.appliedTemplate };
+  }
   const trackSpecs: Array<[Project['tracks'][number]['type'], string]> = [
     ['video', 'Main Video'],
     ['image', 'Watermark'],
@@ -85,7 +91,7 @@ export function createDefaultProject(ownerUid: string, name?: string, canvasWidt
   return project;
 }
 
-export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean }): Promise<Project> {
+export async function createProject(ownerUid: string, name?: string, canvasWidth?: number, canvasHeight?: number, opts?: { watermarkEnabled?: boolean; appliedTemplate?: Project['appliedTemplate'] }): Promise<Project> {
   const project = createDefaultProject(ownerUid, name, canvasWidth, canvasHeight, opts);
   assertValidProject(project);
   await setDoc(doc(db, PROJECTS_COLLECTION, project.id), serializeProject(project));
