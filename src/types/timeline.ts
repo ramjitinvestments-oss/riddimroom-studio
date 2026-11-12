@@ -572,6 +572,13 @@ export interface CaptionTimelineItem extends TimelineItemBase {
   sizeScale?: number;
   /** R19 placement zone. Absent = 'bottom' (the safe-area anchor). */
   anchorY?: 'bottom' | 'middle' | 'top';
+  /**
+   * R42 Phase C — caption-motion override (see lib/captions/motion.ts):
+   * a kind forces that entrance, 'off' renders the old hard cut, and
+   * absent follows the caption style's own animation hint. The exit
+   * is not overridable — every cue fades out.
+   */
+  animation?: 'off' | 'fade' | 'pop' | 'rise';
   source: 'ai' | 'manual';
   /**
    * Always true in this data model — captions remain editable structured

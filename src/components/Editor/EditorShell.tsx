@@ -21,6 +21,7 @@ import { EffectsPanel } from './EffectsPanel';
 import { MusicPanel } from './MusicPanel';
 import { LicensingPanel } from './LicensingPanel';
 import { CaptionsExportPanel } from './CaptionsExportPanel';
+import { CaptionMotionPanel } from './CaptionMotionPanel';
 import { handleBackPop, pushBackLayer } from '../../lib/backLayers';
 import { appendDualCaptureToTimeline, appendMediaToTimeline, placeImportPair } from '../../lib/timeline/insert';
 import { addPipOverlay, isPipItem } from '../../lib/pip';
@@ -670,6 +671,8 @@ function EditorInner({ uid }: { uid: string }) {
         <TranscribePanel uid={uid} />
         <p className="text-[10px] font-bold uppercase tracking-wide text-white/40 -mb-1">Add your own</p>
         <AddCaptionPanel currentTime={currentTime} />
+        <p className="text-[10px] font-bold uppercase tracking-wide text-white/40 -mb-1">Caption motion</p>
+        <CaptionMotionPanel />
         <p className="text-[10px] font-bold uppercase tracking-wide text-white/40 -mb-1">Caption files</p>
         <CaptionsExportPanel />
       </PanelGroup>

@@ -42,6 +42,7 @@ import { getItemsAtTime, getProjectDuration, isMainVisualItem } from '../timelin
 import type { TimelineItem } from '../../types/timeline';
 import { colorGradeToFilter } from '../grades';
 import { getCaptionStyle, resolveCaptionFontPx } from '../captions/styles';
+import { resolveCaptionMotion, type CaptionMotionKind } from '../captions/motion';
 import { findTransitionPreset, TRANSITION_INTENSITY_MAX, TRANSITION_INTENSITY_MIN } from '../transitions';
 import { MOTION_INTENSITY_MAX, MOTION_INTENSITY_MIN } from '../motionEffects';
 import { cineInOut, lerp, returnBlend, smootherstep } from '../motion/easing';
@@ -1716,6 +1717,55 @@ const CAPTION_SAFE_AREA_TOP_FRACTION = 0.13;
 const CAPTION_MAX_LINE_WIDTH_FRACTION = 0.86;
 const CAPTION_WORD_POP_SECONDS = 0.18;
 
+/** R42 Phase C — every caption cue fades out over this long at its end. */
+export const CAPTION_EXIT_FADE_SECONDS = 0.25;
+
+/** The transitions-catalog preset whose duration each caption entrance borrows. */
+const CAPTION_ENTER_PRESET: Record<CaptionMotionKind, AnimationPreset> = { fade: 'fade', pop: 'pop', rise: 'fadeup' };
+
+export interface CaptionPhase {
+  opacityMul: number;
+  scaleMul: number;
+  offsetYPx: number;
+}
+
+/**
+ * R42 Phase C — a caption cue's motion phase for one frame: animate
+ * in (per the resolved kind), fade out (always). Pure and
+ * deterministic — preview and export call the same drawFrame, so a
+ * frame here is a frame there. Both phases cap at a THIRD of the
+ * cue's length (tighter than the transitions engine's half) so a
+ * short cue is never all entrance or all exit; the mid-cue is always
+ * the identity (full strength, unscaled, unshifted), and the existing
+ * per-word pop/karaoke motion inside the cue is untouched — this
+ * moves the whole block, background box included, as one piece.
+ */
+export function computeCaptionPhase(
+  motion: CaptionMotionKind,
+  sinceStart: number,
+  untilEnd: number,
+  cueDurationSeconds: number,
+  riseDistancePx: number,
+): CaptionPhase {
+  const cap = Math.max(0.05, cueDurationSeconds / 3);
+  const enterCatalog = findTransitionPreset(CAPTION_ENTER_PRESET[motion])?.defaultDurationSeconds ?? 0.35;
+  const enterDur = Math.min(enterCatalog, cap);
+  const exitDur = Math.min(CAPTION_EXIT_FADE_SECONDS, cap);
+  let opacityMul = 1;
+  let scaleMul = 1;
+  let offsetYPx = 0;
+  if (sinceStart < enterDur) {
+    const p = clamp01(sinceStart / enterDur);
+    opacityMul = Math.min(opacityMul, easeOutCubic(p));
+    if (motion === 'pop') scaleMul = Math.max(0.85, easeOutBack(p));
+    if (motion === 'rise') offsetYPx = (1 - easeOutCubic(p)) * riseDistancePx;
+  }
+  if (untilEnd < exitDur) {
+    opacityMul = Math.min(opacityMul, easeOutCubic(clamp01(untilEnd / exitDur)));
+  }
+  return { opacityMul, scaleMul, offsetYPx };
+}
+
 interface CaptionLine {
   words: string[];
   widths: number[];
@@ -1820,6 +1870,27 @@ function drawCaptionItem(
     if (res.shiftedByPx !== 0) {
       firstLineCenterY += res.shiftedByPx;
       lastLineCenterY += res.shiftedByPx;
+    }
+  }
+
+  // R42 Phase C — the cue's motion phase (animate in, fade out),
+  // applied to the WHOLE block — background box and words together —
+  // as a transform + globalAlpha around the block's own center, after
+  // the occupancy claim above has placed the resting box. Identity
+  // mid-cue, so a settled cue renders exactly as it did pre-R42; the
+  // per-word pop below composes inside it untouched. 'off' (or a cue
+  // with no resolvable motion) skips this entirely — the old hard cut.
+  const motion = resolveCaptionMotion(item);
+  if (motion) {
+    const cueDuration = Math.max(0, item.endTime - item.startTime);
+    const phase = computeCaptionPhase(motion, relativeTime, cueDuration - relativeTime, cueDuration, fontPx * 0.6);
+    if (phase.opacityMul < 1 || phase.scaleMul !== 1 || phase.offsetYPx !== 0) {
+      const blockCenterY = (firstLineCenterY + lastLineCenterY) / 2;
+      ctx.translate(centerX, blockCenterY);
+      if (phase.offsetYPx !== 0) ctx.translate(0, phase.offsetYPx);
+      if (phase.scaleMul !== 1) ctx.scale(phase.scaleMul, phase.scaleMul);
+      ctx.translate(-centerX, -blockCenterY);
+      if (phase.opacityMul < 1) ctx.globalAlpha = phase.opacityMul;
     }
   }
 
