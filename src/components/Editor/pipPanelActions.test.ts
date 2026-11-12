@@ -37,8 +37,8 @@ describe('WS-1 PipPanel add actions', () => {
   it('no PiP selected or existing: Record PiP and Upload PiP are both shown as the add actions', () => {
     projectRef.current = createDefaultProject('u1');
     const markup = renderToStaticMarkup(React.createElement(PipPanel, { item: null }));
-    expect(markup).toContain('Record PiP');
-    expect(markup).toContain('Upload PiP');
+    expect(markup).toContain('Record overlay');
+    expect(markup).toContain('Upload overlay');
   });
 
   it('a PiP selected: the panel shows that PiP’s controls and the empty-state add pair steps aside', () => {

@@ -100,7 +100,7 @@ describe('R42 E5 — guidance copy traps fixed', () => {
   it('step guidance names the overlay the way its panel does — no bare PiP', () => {
     expect(shellSource).toContain("'Edit, transitions, effects, captions, overlay'");
     expect(shellSource).not.toContain('captions, PiP');
-    expect(shellSource).toContain('title="Overlay — picture in picture"');
+    expect(shellSource).toContain('title="Overlay clip"');
   });
 
   it('step 1 guidance says templates live in Edit too (the auto-advance destination)', () => {

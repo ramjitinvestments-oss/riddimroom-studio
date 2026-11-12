@@ -95,7 +95,9 @@ describe('R40 P-48 — loading states name what is loading', () => {
     const app = read('App.tsx');
     const routeLoading = app.slice(app.indexOf('function RouteLoading'), app.indexOf('function RouteLoading') + 700);
     expect(routeLoading).toContain('animate-spin');
-    expect(routeLoading).toContain('Loading…');
+    // R44 Phase E (PL-8): the route fallback names the product, matching
+    // ProtectedRoute's wording — no bare "Loading…" anywhere.
+    expect(routeLoading).toContain('Loading RiddimRoom Studio…');
   });
 });
 

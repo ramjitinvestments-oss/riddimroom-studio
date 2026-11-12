@@ -24,8 +24,8 @@ describe('WS-1 MediaImportPanel PiP actions', () => {
         onOverlayAssetUploaded: () => undefined,
       }),
     );
-    expect(markup).toContain('Record PiP');
-    expect(markup).toContain('Upload PiP');
+    expect(markup).toContain('Record overlay');
+    expect(markup).toContain('Upload overlay');
     expect(markup).toContain('Record with camera instead');
     expect(markup).toContain('Add Video / Image');
     expect(markup).toContain('Add Overlay');
@@ -55,7 +55,7 @@ describe('WS-1 MediaImportPanel PiP actions', () => {
   });
 
   it('R40 P-45: the pair layout choice is [Corner PiP, Split 50/50] with Corner PiP the default', () => {
-    const pipIdx = panelSource.indexOf("{ id: 'pip', label: 'Corner PiP' }");
+    const pipIdx = panelSource.indexOf("{ id: 'pip', label: 'Corner overlay' }");
     const splitIdx = panelSource.indexOf("{ id: 'split', label: 'Split 50/50' }");
     expect(pipIdx).toBeGreaterThan(-1);
     expect(splitIdx).toBeGreaterThan(pipIdx);

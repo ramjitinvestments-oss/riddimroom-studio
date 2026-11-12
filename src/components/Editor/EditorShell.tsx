@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, FolderOpen, Plus, Redo2, Settings, Undo2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronDown, ChevronRight, FolderOpen, Plus, Redo2, SlidersHorizontal, Undo2, X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import BrandLogo from '../BrandLogo';
 import { ProjectProvider, useProject } from '../../context/ProjectContext';
@@ -773,7 +773,7 @@ function EditorInner({ uid }: { uid: string }) {
         <MusicPanel uid={uid} item={selectedItem} />
       </PanelGroup>
 
-      <PanelGroup title="Overlay — picture in picture" {...groupProps('overlay')}>
+      <PanelGroup title="Overlay clip" {...groupProps('overlay')}>
         <PipPanel item={selectedItem} />
       </PanelGroup>
 
@@ -1113,7 +1113,7 @@ function EditorInner({ uid }: { uid: string }) {
             onClick={() => setMobileSheet('panel')}
             className="flex-1 min-h-[56px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-bold uppercase tracking-wide text-white/80"
           >
-            <Settings size={18} /> {step === 3 ? 'Export' : selectedItem ? 'Selected item' : 'Tools'}
+            <SlidersHorizontal size={18} /> {step === 3 ? 'Export' : selectedItem ? 'Selected item' : 'Tools'}
           </button>
           {step === 2 && (
             <button

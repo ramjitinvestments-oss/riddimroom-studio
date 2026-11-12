@@ -195,7 +195,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Picture in picture (PiP)</h3>
+      <h3 className="text-[11px] font-bold uppercase tracking-wide text-white/50">Overlay clip</h3>
       <p className="text-[11px] text-white/60">Talking-head / explainer: overlay a video on top of your main video. Drag + resize on canvas.</p>
       {pipCount > 0 && <p className="text-[11px] text-emerald-400">{pipCount} overlay{pipCount === 1 ? '' : 's'} on timeline</p>}
       {error && <p className="text-xs text-red-400">{error}</p>}
@@ -216,7 +216,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
         {videoAssets.map((asset) => (
           <li key={asset.id} className="flex items-center gap-2 bg-white/5 rounded px-2 py-1.5 text-xs">
             <span className="flex-1 truncate">{asset.fileName}</span>
-            <button onClick={() => handleAdd(asset)} className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center">+ Add as PiP</button>
+            <button onClick={() => handleAdd(asset)} className="px-2 py-1 text-[10px] font-bold uppercase bg-white/10 hover:bg-white/20 rounded text-white min-h-11 inline-flex items-center">+ Add as overlay</button>
           </li>
         ))}
       </ul>
@@ -340,7 +340,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
             <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
             {(
               [
-                { id: 'pip', label: 'Corner PiP' },
+                { id: 'pip', label: 'Corner overlay' },
                 { id: 'split', label: 'Split 50/50' },
               ] as Array<{ id: PairLayout; label: string }>
             ).map((choice) => (
@@ -601,7 +601,7 @@ export function PipPanel({ item }: { item?: TimelineItem | null }) {
         </div>
       ) : (
         pipCount > 0 && (
-          <p className="text-[10px] text-white/60">Select a PiP clip on the timeline to set its volume here — each overlay has its own sound level. Uploaded overlays start muted; camera overlays start with sound on.</p>
+          <p className="text-[10px] text-white/60">Select an overlay clip on the timeline to set its volume here — each overlay has its own sound level. Uploaded overlays start muted; camera overlays start with sound on.</p>
         )
       )}
       <p className="text-[10px] text-white/60">Tip: overlays keep their own volume in preview and export — set it under Overlay audio above, in the inspector, or with the mute button on the timeline clip.</p>

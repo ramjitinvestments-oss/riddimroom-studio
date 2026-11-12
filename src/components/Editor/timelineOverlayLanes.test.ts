@@ -243,8 +243,8 @@ describe('WS-2 / WS-1 TimelinePanel rendering', () => {
     const project = createDefaultProject('u1');
     const markup = renderPanel(project);
     expect(markup).toContain('data-overlay-lane="overlay-empty"');
-    expect(markup).toContain('Record PiP');
-    expect(markup).toContain('Upload PiP');
+    expect(markup).toContain('Record overlay');
+    expect(markup).toContain('Upload overlay');
     expect(markup).toContain('Overlay');
   });
 });

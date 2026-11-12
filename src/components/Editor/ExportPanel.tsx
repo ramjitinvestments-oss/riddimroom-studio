@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useProject } from '../../context/ProjectContext';
 import { useAuth } from '../../context/AuthContext';
 import { validateRenderResult } from '../../lib/export/validate';
@@ -122,6 +122,35 @@ export function ExportPanel() {
   const [easeConfusing, setEaseConfusing] = useState<string[]>([]);
   const [easeComment, setEaseComment] = useState('');
   const busy = status === 'rendering' || status === 'converting';
+
+  // R44 Phase E (PL-7) — hold a screen WakeLock while a render runs:
+  // a sleeping screen throttles/freezes the tab and can kill the export
+  // (the web ceiling AUDIT-R43 §1.3 names; even native CapCut is
+  // foreground-only). Graceful no-op where WakeLock is unsupported or
+  // the request is refused (e.g. low battery) — the export proceeds
+  // either way, and the keep-open line below says why it matters.
+  useEffect(() => {
+    if (!busy) return;
+    let lock: { release: () => Promise<void> } | null = null;
+    let cancelled = false;
+    const wakeLock = (navigator as Navigator & {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+    }).wakeLock;
+    wakeLock
+      ?.request('screen')
+      .then((l) => {
+        if (cancelled) {
+          void l.release().catch(() => {});
+        } else {
+          lock = l;
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      void lock?.release().catch(() => {});
+    };
+  }, [busy]);
   // Effective tier (server profile when the API answered; admin-grant
   // fallback on builds without /api/*) — see hooks/useLicenseTier.
   const { tier } = useLicenseTier();
@@ -445,6 +474,7 @@ export function ExportPanel() {
           <p className="text-[10px] text-white/60">
             {progress ? `Rendering… ${progress.renderedSeconds.toFixed(1)}s / ${progress.totalSeconds.toFixed(1)}s` : 'Starting…'}
           </p>
+          <p className="text-[10px] text-white/60">Keep this screen open while it renders.</p>
           <button onClick={handleCancel} className="min-h-11 text-[10px] text-white/40 hover:text-white/70 underline self-start">
             Cancel
           </button>
@@ -456,12 +486,28 @@ export function ExportPanel() {
             <div className="h-full bg-gold transition-all" style={{ width: `${Math.round(convertRatio * 100)}%` }} />
           </div>
           <p className="text-[10px] text-white/60">Preparing MP4… {Math.round(convertRatio * 100)}%</p>
+          <p className="text-[10px] text-white/60">Keep this screen open while it renders.</p>
         </div>
       )}
       {status === 'error' && error && <p className="text-xs text-red-400">{error}</p>}
       {status === 'done' && downloadUrl && (
         <div className="flex flex-col gap-1.5 rounded-xl border border-gold/30 bg-gold/5 p-2.5">
-          <span className="text-[11px] font-bold uppercase tracking-wide text-gold">Share pack</span>
+          {/* R44 Phase E (PL-8) — Share pack DEMOTED: the export actions
+              (save the file, see the saved confirmation) lead this block;
+              the share extras sit behind them, and the "Share pack" name
+              now heads the ready-to-paste posts block at the bottom of
+              Step 3. The feature is unchanged — only the order moved. */}
+          <a
+            href={downloadUrl}
+            download={exportFileName}
+            onClick={() => setSavedFileName(exportFileName)}
+            className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-gold hover:bg-gold-bright rounded-lg text-white flex items-center justify-center"
+          >
+            Save MP4 to this device
+          </a>
+          {savedFileName && (
+            <p className="text-xs font-bold text-emerald-400">Saved ✓ — {savedFileName} is in your Downloads.</p>
+          )}
           {canShareFiles && (
             <button
               onClick={() => void handleShare()}
@@ -469,17 +515,6 @@ export function ExportPanel() {
             >
               Share video…
             </button>
-          )}
-          <a
-            href={downloadUrl}
-            download={exportFileName}
-            onClick={() => setSavedFileName(exportFileName)}
-            className="min-h-11 px-3 py-2 text-xs font-bold uppercase tracking-wide bg-white/10 hover:bg-white/20 rounded-lg text-white flex items-center justify-center"
-          >
-            Save MP4 to this device
-          </a>
-          {savedFileName && (
-            <p className="text-xs font-bold text-emerald-400">Saved ✓ — {savedFileName} is in your Downloads.</p>
           )}
           <button
             onClick={() => void handleCopyCaption()}
@@ -595,7 +630,7 @@ export function ExportPanel() {
       {status === 'done' && activePost && (
         <div className="flex flex-col gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-3">
           <span className="text-[11px] font-bold uppercase tracking-wide text-white/70">
-            Your posts — ready to paste, 5 tags each
+            Share pack — your posts, ready to paste, 5 tags each
           </span>
           <select
             aria-label="Post platform"

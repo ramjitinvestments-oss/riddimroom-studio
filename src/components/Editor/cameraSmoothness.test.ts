@@ -88,9 +88,9 @@ describe('WS-4 Phase 2 — capture discipline', () => {
 });
 
 describe('WS-4 — overlayOnly review (from WS-1)', () => {
-  it('CameraCapture declares the prop and the single "Add as PiP" primary action', () => {
+  it('CameraCapture declares the prop and the single "Add as overlay" primary action', () => {
     expect(cameraSource).toContain('overlayOnly?: boolean');
-    expect(cameraSource).toContain('Add as PiP');
+    expect(cameraSource).toContain('Add as overlay');
     // The default review is untouched: both standard actions remain.
     expect(cameraSource).toContain('Add to timeline');
     expect(cameraSource).toContain('Use as Overlay (PiP)');

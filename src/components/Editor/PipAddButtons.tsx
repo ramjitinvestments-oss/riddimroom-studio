@@ -3,8 +3,8 @@ import { Camera, Upload } from 'lucide-react';
 import { requestRecordPip, requestUploadPip } from '../../lib/pipRequests';
 
 /**
- * R36 WS-1 — the equal primary PiP add actions: "Record PiP" and
- * "Upload PiP", side by side at the same size and weight wherever a
+ * R36 WS-1 — the equal primary PiP add actions: "Record overlay" and
+ * "Upload overlay", side by side at the same size and weight wherever a
  * PiP is being added or a PiP slot is empty (PipPanel empty state,
  * the timeline Overlay lane's empty state, the import panel).
  *
@@ -26,10 +26,10 @@ export function PipAddButtons({
   return (
     <div className="flex gap-2">
       <button type="button" onClick={onRecord ?? (() => requestRecordPip())} className={buttonClass}>
-        <Camera size={15} /> Record PiP
+        <Camera size={15} /> Record overlay
       </button>
       <button type="button" onClick={onUpload ?? (() => requestUploadPip())} className={buttonClass}>
-        <Upload size={15} /> Upload PiP
+        <Upload size={15} /> Upload overlay
       </button>
     </div>
   );

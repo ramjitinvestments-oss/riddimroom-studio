@@ -3381,7 +3381,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
             <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
             {(
               [
-                { id: 'pip', label: 'Corner PiP' },
+                { id: 'pip', label: 'Corner overlay' },
                 { id: 'split', label: 'Split 50/50' },
               ] as Array<{ id: 'pip' | 'split'; label: string }>
             ).map((choice) => (
@@ -3478,7 +3478,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                 onClick={() => confirmPendingVideo(true)}
                 className="min-h-11 px-4 rounded-xl bg-gold hover:bg-gold-bright text-black text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
               >
-                <PictureInPicture2 size={15} /> Add as PiP
+                <PictureInPicture2 size={15} /> Add as overlay
               </button>
               <button
                 onClick={discardPendingVideo}
@@ -3515,7 +3515,7 @@ export function CameraCapture({ onCapture, onCaptureAsOverlay, onCaptureDual, ov
                   onClick={() => confirmPendingVideo(true)}
                   className="min-h-11 px-4 rounded-xl border border-gold/40 bg-gold/10 hover:bg-gold/20 text-gold text-xs font-bold uppercase tracking-wide flex items-center gap-2 transition"
                 >
-                  <PictureInPicture2 size={15} /> Use as Overlay (PiP)
+                  <PictureInPicture2 size={15} /> Use as overlay
                 </button>
               )}
               <button

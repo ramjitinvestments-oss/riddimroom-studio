@@ -335,21 +335,21 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
 
       {item.type === 'video' && (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-2">
-          <span className="font-bold uppercase tracking-wide text-white/40">Picture in picture (PiP)</span>
+          <span className="font-bold uppercase tracking-wide text-white/40">Overlay clip</span>
           <div className="flex gap-2">
             <button
               onClick={() => patch({ pip: { shape: (item as { pip?: { shape?: string } }).pip?.shape ?? 'rounded', borderWidth: (item as { pip?: { borderWidth?: number } }).pip?.borderWidth ?? 4, borderColor: (item as { pip?: { borderColor?: string } }).pip?.borderColor ?? '#FFFFFF', shadow: (item as { pip?: { shadow?: boolean } }).pip?.shadow ?? true, isPip: true } })}
               disabled={!!(item as { pip?: { isPip?: boolean } }).pip?.isPip}
               className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold disabled:opacity-40 flex items-center gap-1.5"
             >
-              {(item as { pip?: { isPip?: boolean } }).pip?.isPip ? (<><Check size={14} strokeWidth={3} /> Is PiP overlay</>) : 'Make PiP overlay'}
+              {(item as { pip?: { isPip?: boolean } }).pip?.isPip ? (<><Check size={14} strokeWidth={3} /> Is overlay clip</>) : 'Make overlay clip'}
             </button>
             {(item as { pip?: { isPip?: boolean } }).pip?.isPip && (
               <button
                 onClick={() => patch({ pip: { shape: 'rounded', borderWidth: 0, borderColor: '#FFFFFF', shadow: false, isPip: false } })}
                 className="min-h-11 px-3 rounded bg-white/10 hover:bg-white/20 text-xs font-bold"
               >
-                Remove PiP
+                Remove overlay clip
               </button>
             )}
           </div>

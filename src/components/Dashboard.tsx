@@ -283,7 +283,7 @@ export function Dashboard({ onOpenProject, onOpenAdmin, onOpenPromo, onOpenLegal
         <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6 text-xs text-white/60 space-y-1">
           <p className="font-bold text-white text-sm">How it works</p>
           <p><span className="font-bold text-white">1. Capture / Upload</span> — record, upload, or pick a template.</p>
-          <p><span className="font-bold text-white">2. Edit + Captions</span> — trim, add captions, PiP overlay, text.</p>
+          <p><span className="font-bold text-white">2. Edit + Captions</span> — trim, add captions, overlay clips, text.</p>
           <p><span className="font-bold text-white">3. Export</span> — an MP4 video ready to post, or a caption file for YouTube/TikTok.</p>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">

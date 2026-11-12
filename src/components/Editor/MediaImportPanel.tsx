@@ -643,7 +643,7 @@ export function MediaImportPanel({ uid, canvasWidth, canvasHeight, onAssetUpload
             <span className="text-[11px] font-bold uppercase tracking-wide text-white/50">Layout:</span>
             {(
               [
-                { id: 'pip', label: 'Corner PiP' },
+                { id: 'pip', label: 'Corner overlay' },
                 { id: 'split', label: 'Split 50/50' },
               ] as Array<{ id: 'pip' | 'split'; label: string }>
             ).map((choice) => (

@@ -31,7 +31,7 @@ function RouteLoading() {
       {/* R40 P-48: words AND a spinner — every loading state says what
           is loading and shows motion while it does. */}
       <div className="w-10 h-10 rounded-full border-4 border-gold/20 border-t-gold animate-spin" aria-hidden="true" />
-      <p className="text-sm text-white/50">Loading…</p>
+      <p className="text-sm text-white/50">Loading RiddimRoom Studio…</p>
     </div>
   );
 }
