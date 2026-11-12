@@ -145,6 +145,124 @@ export function getAssetPoster(asset: MediaAsset): Promise<string | null> {
   return promise;
 }
 
+/**
+ * R44 Phase D (PL-2) — filmstrip frames along a video clip.
+ *
+ * `getAssetPoster` gives ONE frame per asset; a 30s clip and a 2s clip
+ * read identically on the timeline. The filmstrip samples
+ * FILMSTRIP_FRAME_COUNT frames evenly across the asset's duration so a
+ * long clip reads as a strip (the CapCut pattern, AUDIT-R43 P11). The
+ * frames are sampled across the ASSET (not per clip/trim): the timeline
+ * scales/offsets the strip so the frames under a clip are the frames of
+ * its trim window (pure CSS geometry in TimelinePanel — no re-decode
+ * when a trim changes). Deliberate limit, documented rather than
+ * hidden: frames are session-cached per asset, so a replaced asset
+ * (new id) re-samples, but a trim never does.
+ */
+export const FILMSTRIP_FRAME_COUNT = 6;
+/** Hard ceiling for a whole strip (several seeks) — past this, resolve null and the clip keeps its single poster. */
+const FILMSTRIP_TIMEOUT_MS = 20000;
+
+const filmstripCache = new Map<string, string[] | null>();
+const inflightFilmstrips = new Map<string, Promise<string[] | null>>();
+
+/** Centre time of each of `count` even slices of a duration — the frames a strip samples. */
+export function filmstripFrameTimes(durationSeconds: number, count: number = FILMSTRIP_FRAME_COUNT): number[] {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || count <= 0) return [];
+  return Array.from({ length: count }, (_, i) => ((i + 0.5) / count) * durationSeconds);
+}
+
+function loadVideoFilmstrip(asset: MediaAsset): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.crossOrigin = 'anonymous';
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.style.position = 'fixed';
+    video.style.width = '1px';
+    video.style.height = '1px';
+    video.style.opacity = '0';
+    video.style.pointerEvents = 'none';
+    video.tabIndex = -1;
+    document.body.appendChild(video);
+
+    let settled = false;
+    const finish = (value: string[] | null) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      if (video.parentNode) video.parentNode.removeChild(video);
+      resolve(value);
+    };
+    const timer = window.setTimeout(() => finish(null), FILMSTRIP_TIMEOUT_MS);
+
+    video.addEventListener('loadedmetadata', () => {
+      const times = filmstripFrameTimes(video.duration);
+      if (times.length === 0) {
+        finish(null);
+        return;
+      }
+      const frames: string[] = [];
+      let index = 0;
+      const onSeeked = () => {
+        try {
+          const url = drawToPosterCanvas(video, video.videoWidth, video.videoHeight);
+          if (url) frames.push(url);
+        } catch {
+          // A tainted/failed frame just shortens the strip.
+        }
+        index += 1;
+        if (index >= times.length) {
+          video.removeEventListener('seeked', onSeeked);
+          finish(frames.length > 0 ? frames : null);
+          return;
+        }
+        try {
+          video.currentTime = times[index];
+        } catch {
+          video.removeEventListener('seeked', onSeeked);
+          finish(frames.length > 0 ? frames : null);
+        }
+      };
+      video.addEventListener('seeked', onSeeked);
+      try {
+        video.currentTime = times[0];
+      } catch {
+        finish(null);
+      }
+    });
+    video.addEventListener('error', () => finish(null));
+    video.src = asset.storageUrl;
+  });
+}
+
+/**
+ * Filmstrip frames for a video asset (null for images/audio — they keep
+ * the single poster / flat rendering). Session-cached per asset id,
+ * in-flight deduped, exactly like getAssetPoster.
+ */
+export function getAssetFilmstrip(asset: MediaAsset): Promise<string[] | null> {
+  if (asset.kind !== 'video') return Promise.resolve(null);
+  if (filmstripCache.has(asset.id)) {
+    return Promise.resolve(filmstripCache.get(asset.id) ?? null);
+  }
+  const existing = inflightFilmstrips.get(asset.id);
+  if (existing) return existing;
+  const promise = loadVideoFilmstrip(asset)
+    .catch(() => null)
+    .then((urls) => {
+      filmstripCache.set(asset.id, urls);
+      inflightFilmstrips.delete(asset.id);
+      return urls;
+    });
+  inflightFilmstrips.set(asset.id, promise);
+  return promise;
+}
+
 /** The asset a project poster should come from: the earliest video/image item's asset. */
 export function getFirstVisualAsset(project: Project): MediaAsset | null {
   const byStartTime = [...project.items].sort((a, b) => a.startTime - b.startTime);

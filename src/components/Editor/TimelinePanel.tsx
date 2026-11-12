@@ -3,7 +3,8 @@ import { Volume2, VolumeX, ZoomIn, ZoomOut } from 'lucide-react';
 import type { Project, TimelineItem, Track } from '../../types/timeline';
 import { trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode, updateItem } from '../../lib/timeline/utils';
 import { moveItemMagnetic } from '../../lib/timeline/magnetic';
-import { getAssetPoster } from '../../lib/media/thumbnails';
+import { getAssetFilmstrip, getAssetPoster } from '../../lib/media/thumbnails';
+import { getAssetWaveform, waveformBarHeights } from '../../lib/media/waveform';
 import { useProject } from '../../context/ProjectContext';
 import {
   computeDragTarget,
@@ -87,6 +88,58 @@ interface ActiveDrag {
 // exact re-render counts.
 // ---------------------------------------------------------------------------
 
+/**
+ * R44 Phase D (PL-3) — draws an audio clip's waveform from the cached
+ * peaks (lib/media/waveform), sliced to the clip's trim window so the
+ * shape under the clip is the sound the clip actually plays. Redraws on
+ * resize (timeline zoom changes the clip's pixel width). Pure dressing:
+ * no peaks → the component isn't rendered and the clip stays a flat
+ * block (the graceful failure state).
+ */
+function WaveformCanvas({
+  peaks,
+  duration,
+  trimStart,
+  trimEnd,
+}: {
+  peaks: Float32Array;
+  duration: number | undefined;
+  trimStart: number;
+  trimEnd: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const draw = () => {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (w === 0 || h === 0) return;
+      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const startFrac = duration && duration > 0 ? trimStart / duration : 0;
+      const endFrac = duration && duration > 0 ? trimEnd / duration : 1;
+      const columns = Math.max(1, Math.floor(w / 2));
+      const heights = waveformBarHeights(peaks, startFrac, endFrac, columns);
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      const barW = canvas.width / columns;
+      heights.forEach((v, i) => {
+        const barH = Math.max(1, v * canvas.height * 0.9);
+        ctx.fillRect(i * barW, (canvas.height - barH) / 2, Math.max(1, barW * 0.6), barH);
+      });
+    };
+    draw();
+    const ro = new ResizeObserver(draw);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [peaks, duration, trimStart, trimEnd]);
+  return <canvas ref={canvasRef} aria-hidden="true" className="absolute inset-0 w-full h-full pointer-events-none opacity-80" />;
+}
+
 interface ClipRowProps {
   item: TimelineItem;
   trackType: Track['type'];
@@ -97,6 +150,12 @@ interface ClipRowProps {
   selected: boolean;
   beingDragged: boolean;
   posterUrl: string | undefined;
+  /** R44 Phase D (PL-2): sampled frames across the video asset + the asset's duration, for the trim-aligned strip. */
+  filmstripUrls: string[] | undefined;
+  filmstripDuration: number | undefined;
+  /** R44 Phase D (PL-3): decoded peaks for an audio asset (undefined = not loaded yet, null = unavailable → flat block). */
+  waveformPeaks: Float32Array | null | undefined;
+  waveformDuration: number | undefined;
   clipLabel: string;
   onClipClick: (item: TimelineItem) => void;
   onMouseDragStart: (e: React.MouseEvent, item: TimelineItem, mode: TimelineDragMode) => void;
@@ -112,6 +171,10 @@ const ClipRow = React.memo(function ClipRow({
   selected,
   beingDragged,
   posterUrl,
+  filmstripUrls,
+  filmstripDuration,
+  waveformPeaks,
+  waveformDuration,
   clipLabel,
   onClipClick,
   onMouseDragStart,
@@ -147,7 +210,36 @@ const ClipRow = React.memo(function ClipRow({
       } ${!item.visible ? 'opacity-30' : ''} ${beingDragged ? 'z-20' : ''}`}
       style={{ left: `${left}%`, width: `${width}%` }}
     >
-      {posterUrl && (
+      {filmstripUrls && filmstripUrls.length > 0 ? (
+        // R44 Phase D (PL-2): the strip is laid out across the ASSET's
+        // duration and shifted/scaled so the frames under this clip are
+        // its trim window's frames — a trim change re-aligns the strip
+        // with pure CSS, never a re-decode. Falls back to a plain
+        // full-width strip when the window can't be aligned.
+        (() => {
+          const trimStart = item.type === 'video' ? item.trimStart : 0;
+          const trimEnd = item.type === 'video' ? item.trimEnd : 0;
+          const windowSeconds = trimEnd - trimStart;
+          const aligned =
+            filmstripDuration !== undefined && filmstripDuration > 0 && windowSeconds > 0 && windowSeconds <= filmstripDuration;
+          return (
+            <div aria-hidden="true" className="absolute inset-0 overflow-hidden pointer-events-none opacity-55">
+              <div
+                className="absolute top-0 bottom-0 flex"
+                style={
+                  aligned
+                    ? { width: `${(filmstripDuration / windowSeconds) * 100}%`, left: `${-(trimStart / windowSeconds) * 100}%` }
+                    : { left: 0, right: 0 }
+                }
+              >
+                {filmstripUrls.map((url, i) => (
+                  <img key={i} src={url} alt="" draggable={false} className="flex-1 min-w-0 h-full object-cover" />
+                ))}
+              </div>
+            </div>
+          );
+        })()
+      ) : posterUrl ? (
         <img
           src={posterUrl}
           alt=""
@@ -155,7 +247,10 @@ const ClipRow = React.memo(function ClipRow({
           draggable={false}
           className="absolute inset-0 w-full h-full object-cover opacity-55 pointer-events-none"
         />
-      )}
+      ) : null}
+      {item.type === 'audio' && waveformPeaks ? (
+        <WaveformCanvas peaks={waveformPeaks} duration={waveformDuration} trimStart={item.trimStart} trimEnd={item.trimEnd} />
+      ) : null}
       {ghost && (
         <div
           data-testid="clip-ghost"
@@ -330,6 +425,40 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
         });
       });
     });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.items, project.mediaAssets]);
+
+  // R44 Phase D (PL-2/PL-3) — filmstrips for video assets, waveforms for
+  // audio assets. Same request-once shape as the poster effect above;
+  // the modules session-cache per asset id, so remounts and re-renders
+  // never re-sample or re-decode (the idle-CPU spend the owner accepted
+  // for this phase happens once per asset, ever).
+  const [filmstrips, setFilmstrips] = useState<Map<string, string[]>>(new Map());
+  const [waveforms, setWaveforms] = useState<Map<string, Float32Array>>(new Map());
+  const filmstripRequestedRef = useRef<Set<string>>(new Set());
+  const waveformRequestedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    for (const item of project.items) {
+      const asset = project.mediaAssets[(item as { mediaAssetId?: string }).mediaAssetId ?? ''];
+      if (!asset) continue;
+      if (item.type === 'video' && !filmstripRequestedRef.current.has(asset.id)) {
+        filmstripRequestedRef.current.add(asset.id);
+        getAssetFilmstrip(asset).then((urls) => {
+          if (!urls || cancelled) return;
+          setFilmstrips((prev) => (prev.get(asset.id) === urls ? prev : new Map(prev).set(asset.id, urls)));
+        });
+      }
+      if (item.type === 'audio' && !waveformRequestedRef.current.has(asset.id)) {
+        waveformRequestedRef.current.add(asset.id);
+        getAssetWaveform(asset).then((peaks) => {
+          if (!peaks || cancelled) return;
+          setWaveforms((prev) => (prev.get(asset.id) === peaks ? prev : new Map(prev).set(asset.id, peaks)));
+        });
+      }
+    }
     return () => {
       cancelled = true;
     };
@@ -820,6 +949,12 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
           : (project.mediaAssets[(item as { mediaAssetId: string }).mediaAssetId]?.fileName ?? item.type);
     const posterUrl =
       item.type === 'video' || item.type === 'image' ? posters.get(item.mediaAssetId) : undefined;
+    const filmstripUrls = item.type === 'video' ? filmstrips.get(item.mediaAssetId) : undefined;
+    const filmstripDuration =
+      item.type === 'video' ? project.mediaAssets[item.mediaAssetId]?.durationSeconds : undefined;
+    const waveformPeaks = item.type === 'audio' ? waveforms.get(item.mediaAssetId) : undefined;
+    const waveformDuration =
+      item.type === 'audio' ? project.mediaAssets[item.mediaAssetId]?.durationSeconds : undefined;
     return (
       <ClipRow
         key={item.id}
@@ -830,6 +965,10 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
         selected={item.id === selectedItemId}
         beingDragged={item.id === draggingItemId}
         posterUrl={posterUrl}
+        filmstripUrls={filmstripUrls}
+        filmstripDuration={filmstripDuration}
+        waveformPeaks={waveformPeaks}
+        waveformDuration={waveformDuration}
         clipLabel={clipLabel}
         onClipClick={handleClipClick}
         onMouseDragStart={handleMouseDragStart}
