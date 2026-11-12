@@ -4,6 +4,7 @@ import { Maximize, Pause, Play, RotateCcw, RotateCw, Volume2, X } from 'lucide-r
 import type { Project, TimelineItem } from '../../types/timeline';
 import { getItemsAtTime, getItemsByTrackType, getProjectDuration, updateItem, formatTimecode } from '../../lib/timeline/utils';
 import { computeFadeOpacity, computeLoopedSourceTime, drawFrame, effectiveAudioEndTime, findHeldMainVisualItem, getItemBoundsPercent, videoSourceTimeForItem, type FrameAssets, type ItemBoundsPercent } from '../../lib/render/compositor';
+import { mediaFrameSignature, previewBackingSize, previewDrawDecision } from '../../lib/render/previewScale';
 import { useProject } from '../../context/ProjectContext';
 
 /**
@@ -63,6 +64,16 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
   const containerRef = useRef<HTMLDivElement>(null);
   const outerRef = useRef<HTMLDivElement>(null);
   const [previewBoxSize, setPreviewBoxSize] = useState({ width: 360, height: 640 });
+  // R44 Phase A (SF-1) — the tick loop runs from a stable closure, so
+  // it reads the fitted box through this mirror: the backing store is
+  // capped at box × devicePixelRatio (see previewBackingSize), never
+  // the full project resolution the exporters use.
+  const previewBoxSizeRef = useRef(previewBoxSize);
+  previewBoxSizeRef.current = previewBoxSize;
+  // R44 Phase A (SF-2) — the idle skip's memory: what the last drawn
+  // frame was made of. A paused tick that matches all of it has
+  // nothing new to paint and skips the composite entirely.
+  const lastDrawnRef = useRef<{ project: Project; time: number; mediaSig: string } | null>(null);
   const videoElsRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const imageElsRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
@@ -284,7 +295,15 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       // past the main track (the R36 law; R26 anchored to the main
       // track's end, which would cut audio at the old main end).
       const projectEnd = getProjectDuration(proj);
+      // R44 Phase A (PL-1) — the tick derives each track list ONCE and
+      // reuses it for the whole pass (the pre-diet tick re-derived the
+      // video/image/audio lists — and the project duration — several
+      // times per frame, and the audio cleanup re-derived the audio
+      // list inside its per-element loop: steady GC pressure at 60/s
+      // on exactly the phones least able to spare it).
       const videoItems = getItemsByTrackType(proj, 'video').filter((i) => i.type === 'video');
+      const imageItems = getItemsByTrackType(proj, 'image');
+      const audioItems = getItemsByTrackType(proj, 'audio');
       let t = currentTimeRef.current;
       const active = videoItems.find((i) => t >= i.startTime && t < i.endTime) as
         | (typeof videoItems)[number]
@@ -292,7 +311,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
 
       // Preload every image item currently referenced so drawFrame never
       // has to wait on a network fetch mid-draw.
-      getItemsByTrackType(proj, 'image').forEach((item) => {
+      imageItems.forEach((item) => {
         if (item.type !== 'image') return;
         const asset = proj.mediaAssets[item.mediaAssetId];
         if (asset) getImageEl(asset.id, asset.storageUrl);
@@ -392,13 +411,13 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       // in correctly. Mirrors the video branch above: seek/play/pause each
       // active audio item's element and apply its own volume/mute, pause
       // every audio item that is not currently active.
-      const activeAudioItemIds = new Set<string>();
-      getItemsByTrackType(proj, 'audio').forEach((item) => {
+      const activeAudioAssetIds = new Set<string>();
+      audioItems.forEach((item) => {
         if (item.type !== 'audio') return;
         if (!(t >= item.startTime && t < item.endTime)) return;
         const asset = proj.mediaAssets[item.mediaAssetId];
         if (!asset) return;
-        activeAudioItemIds.add(item.id);
+        activeAudioAssetIds.add(asset.id);
         const audioEl = getAudioEl(asset.id, asset.storageUrl);
         const fadeMul = computeFadeOpacity(item.fade, t - item.startTime, effectiveAudioEndTime(item.endTime, projectEnd) - t);
         audioEl.muted = item.muted;
@@ -430,11 +449,10 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         }
       });
       audioElsRef.current.forEach((el, assetId) => {
-        // Pause any audio element whose owning item is no longer active at this time.
-        const stillActive = getItemsByTrackType(proj, 'audio').some(
-          (item) => item.type === 'audio' && proj.mediaAssets[item.mediaAssetId]?.id === assetId && activeAudioItemIds.has(item.id),
-        );
-        if (!stillActive && !el.paused) el.pause();
+        // Pause any audio element no active item is using at this time
+        // (R44 PL-1: decided from the pass's own hoisted sets — the
+        // pre-diet tick re-derived the audio list per element).
+        if (!activeAudioAssetIds.has(assetId) && !el.paused) el.pause();
       });
 
       lastFrameWallClockRef.current = wallClockNow;
@@ -448,7 +466,7 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       // but this clamp is what makes it correct in general (e.g. a
       // shorter video item followed by an image/text/caption tail, or a
       // manual-clock-only project with no video at all).
-      const projectDuration = getProjectDuration(proj);
+      const projectDuration = projectEnd;
       if (projectDuration > 0 && t >= projectDuration) {
         t = projectDuration;
         currentTimeRef.current = t;
@@ -460,17 +478,32 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         }
       }
 
-      // R42 S1 (closes R41 F11) — set the backing store ONLY when the
-      // project's canvas dimensions actually change. Assigning
-      // canvas.width/height — even to the same values — wipes the
-      // drawing buffer by spec, so the old unconditional per-tick
-      // assignment reset the whole (up to 4K) backing store before
-      // every redraw. drawFrame fully repaints every tick (clearRect +
-      // full-canvas fill), so skipping the reset changes nothing
-      // visually: paused edits still repaint on the very next tick.
-      if (canvas.width !== proj.canvasWidth || canvas.height !== proj.canvasHeight) {
-        canvas.width = proj.canvasWidth;
-        canvas.height = proj.canvasHeight;
+      // R42 S1 (closes R41 F11) — set the backing store ONLY when its
+      // size actually changes. Assigning canvas.width/height — even to
+      // the same values — wipes the drawing buffer by spec, so the old
+      // unconditional per-tick assignment reset the whole backing
+      // store before every redraw.
+      // R44 Phase A (SF-1, closes the S4 item R42 left behind) — the
+      // size being guarded is now the DISPLAY-SCALE size: the fitted
+      // on-screen box × devicePixelRatio, never the full project
+      // resolution (up to 2160×3840) the exporters composite at. The
+      // draw below runs drawFrame under the matching scale transform —
+      // the compositor's own scale route, proven frame-identical to
+      // the full-res composite by the parity gate in
+      // src/lib/render/previewScale.test.ts. Export rendering is
+      // untouched: it still sizes its canvases at project resolution.
+      const backing = previewBackingSize(
+        previewBoxSizeRef.current.width,
+        previewBoxSizeRef.current.height,
+        proj.canvasWidth,
+        proj.canvasHeight,
+        typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1,
+      );
+      let sizeChanged = false;
+      if (canvas.width !== backing.width || canvas.height !== backing.height) {
+        canvas.width = backing.width;
+        canvas.height = backing.height;
+        sizeChanged = true;
       }
       // v1 PiP: sync EVERY active video item (main + overlays), not just
       // the first. The clock is still driven by the first (main) video
@@ -478,8 +511,8 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
       // frame so they stay in sync even when they start mid-timeline.
       {
         const videos = new Map<string, HTMLVideoElement>();
-        const activeVideoItems = getItemsByTrackType(proj, 'video').filter(
-          (i) => i.type === 'video' && t >= i.startTime && t < i.endTime,
+        const activeVideoItems = videoItems.filter(
+          (i) => t >= i.startTime && t < i.endTime,
         );
         // R36 hold-last-frame (media binding): past the main layer's
         // end, the held main video's element must ALSO be in the map
@@ -529,16 +562,39 @@ export function PreviewPane({ project, currentTime, isPlaying, onTimeChange, onP
         });
         frameAssets = { ...frameAssets, videos };
       }
-      drawFrame(ctx, proj, t, frameAssets);
+      // R44 Phase A (SF-2) — the idle skip: while paused, a tick whose
+      // project, playhead time, media state and canvas size all match
+      // the last drawn frame skips the composite entirely (the media
+      // sync above still ran, so a settling seek still lands — its
+      // element movement moves the media signature and forces the
+      // draw). While playing, or on ANY change, the draw always runs:
+      // a paused edit is a project change, so paused edits still
+      // repaint on the very next tick, exactly as R42 required.
+      const mediaSig = mediaFrameSignature(frameAssets.videos ?? null, frameAssets.images);
+      const lastDrawn = lastDrawnRef.current;
+      const shouldDraw = previewDrawDecision({
+        isPlaying: isPlayingRef.current,
+        hasDrawn: lastDrawn !== null,
+        sizeChanged,
+        projectChanged: !lastDrawn || lastDrawn.project !== proj,
+        timeChanged: !lastDrawn || lastDrawn.time !== t,
+        mediaChanged: !lastDrawn || lastDrawn.mediaSig !== mediaSig,
+      });
+      if (shouldDraw) {
+        ctx.setTransform(backing.scaleX, 0, 0, backing.scaleY, 0, 0);
+        drawFrame(ctx, proj, t, frameAssets);
+        lastDrawnRef.current = { project: proj, time: t, mediaSig };
+      }
 
       // If the main video's media hasn't decoded a frame yet (still
       // loading, or failed outright), paint a simple slate over the canvas
       // so a stalled/failed load reads as feedback instead of a frozen
       // black rectangle that looks like a hang.
-      if (active && active.type === 'video') {
+      if (shouldDraw && active && active.type === 'video') {
         const asset = proj.mediaAssets[active.mediaAssetId];
         const el = asset ? videoElsRef.current.get(asset.id) : undefined;
         if (el && el.readyState < 2) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
           ctx.save();
           ctx.fillStyle = 'rgba(255,255,255,0.5)';
           ctx.font = `${Math.max(14, Math.round(canvas.height * 0.035))}px Arial, Helvetica, sans-serif`;

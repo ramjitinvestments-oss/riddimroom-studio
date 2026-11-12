@@ -28,12 +28,18 @@ const compositorSource = readFileSync(join(HERE, '../../lib/render/compositor.ts
 
 describe('R42 S1 — canvas size is set only on dimension change (F11)', () => {
   it('the tick guards the size assignment behind a dimension check', () => {
+    // R44 Phase A (SF-1) supersedes the size being guarded: the guard
+    // now compares against the DISPLAY-SCALE backing size (box × DPR
+    // via previewBackingSize), not the full project resolution — the
+    // S1 discipline (assign only on change, exactly one site) is
+    // unchanged; the full-res assignment is gone entirely.
     expect(previewSource).toContain(
-      'if (canvas.width !== proj.canvasWidth || canvas.height !== proj.canvasHeight) {',
+      'if (canvas.width !== backing.width || canvas.height !== backing.height) {',
     );
-    // Exactly one place assigns the backing-store size: inside the guard.
-    expect(previewSource.split('canvas.width = proj.canvasWidth;').length - 1).toBe(1);
-    expect(previewSource.split('canvas.height = proj.canvasHeight;').length - 1).toBe(1);
+    expect(previewSource.split('canvas.width = backing.width;').length - 1).toBe(1);
+    expect(previewSource.split('canvas.height = backing.height;').length - 1).toBe(1);
+    expect(previewSource).not.toContain('canvas.width = proj.canvasWidth;');
+    expect(previewSource).not.toContain('canvas.height = proj.canvasHeight;');
   });
 
   it('paused edits still repaint instantly: drawFrame fully repaints every frame', () => {
@@ -41,8 +47,12 @@ describe('R42 S1 — canvas size is set only on dimension change (F11)', () => {
     const head = compositorSource.slice(drawFrameAt, drawFrameAt + 400);
     expect(head).toContain('ctx.clearRect(0, 0, canvasWidth, canvasHeight);');
     expect(head).toContain('ctx.fillRect(0, 0, canvasWidth, canvasHeight);');
-    // And the tick still draws on every pass, playing or paused.
+    // R44 SF-2 refines "draws on every pass": the draw is gated by
+    // previewDrawDecision, whose rules (pinned in previewScale.test.ts)
+    // force a draw on ANY project change — a paused edit is a project
+    // change, so paused edits still repaint on the very next tick.
     expect(previewSource).toContain('drawFrame(ctx, proj, t, frameAssets);');
+    expect(previewSource).toContain('const shouldDraw = previewDrawDecision({');
   });
 });
 
