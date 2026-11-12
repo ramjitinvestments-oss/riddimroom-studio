@@ -2797,7 +2797,7 @@ export function PromoPage({ onOpenProject, onBack }: PromoPageProps) {
                                       step={0.1}
                                       value={val}
                                       onChange={(e) => handleResultFade(r, field, Number(e.target.value))}
-                                      className="flex-1 accent-[#FFD100]"
+                                      className="flex-1 accent-[#D4A437]"
                                       aria-label={`${r.piece.label} music ${label.toLowerCase()}, seconds`}
                                     />
                                     <span className="w-9 shrink-0 text-right text-white/80">{val.toFixed(1)}s</span>

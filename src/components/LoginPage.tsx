@@ -180,7 +180,7 @@ export function LoginPage({ onOpenLegal }: { onOpenLegal?: (path: '/privacy' | '
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => setRememberMe(e.target.checked)}
-                  className="accent-[#ffd100]"
+                  className="accent-[#D4A437]"
                 />
                 Remember me
               </label>

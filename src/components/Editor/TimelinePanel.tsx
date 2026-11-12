@@ -57,7 +57,7 @@ const ZOOM_STEP = 1.25;
 const SCRUB_COMMIT_INTERVAL_MS = 100;
 
 // R40 P-50c — the type coding follows the design law at the top of
-// src/index.css (gold #FFD100 as the one accent, cream/white text,
+// src/index.css (Riddim Gold #D4A437 as the one accent, cream/white text,
 // neutral surfaces; green reserved for success only): a restrained
 // gold / white / neutral tint scale that still tells the types apart
 // by depth. Colour is never the only signal — every clip also

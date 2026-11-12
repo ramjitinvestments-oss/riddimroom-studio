@@ -52,3 +52,24 @@ describe('R45 Phase 1 — medallion is the brand mark', () => {
     expect(html).not.toContain('logo.jpg');
   });
 });
+
+describe('R45 Phase 2 — chrome colour system (index.css tokens)', () => {
+  const css = readFileSync(join(SRC, 'index.css'), 'utf8');
+
+  it('Riddim Gold #D4A437 is the primary gold token', () => {
+    expect(css).toContain('--color-gold: #d4a437;');
+    expect(css).toContain('--color-gold-bright: #ffe45c;');
+    expect(css).toContain('--color-cream: #f4ede1;');
+  });
+
+  it('#FFD100 survives only as the signal token', () => {
+    expect(css).toContain('--color-signal: #ffd100;');
+    expect(css).not.toContain('--color-gold: #ffd100;');
+    expect(css).not.toContain('background: #ffd100;');
+    expect(css).not.toContain('accent-color: #ffd100;');
+  });
+
+  it('the base ground is Rich Black #0B0B0C', () => {
+    expect(css).toContain('background: #0b0b0c;');
+  });
+});

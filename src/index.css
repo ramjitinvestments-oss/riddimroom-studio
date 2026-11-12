@@ -1,12 +1,18 @@
 @import "tailwindcss";
 
-/* Locked brand system (v1): near-black surfaces, gold #FFD100 as the one
-   primary accent, cream text. Emerald/green is reserved for success states
-   only — never for primary actions, selection, or progress. */
+/* Locked brand system (v2, R45): Rich Black surfaces, Riddim Gold
+   #D4A437 (the medallion ring's antique gold, Style Sheet §1) as the one
+   primary accent, Warm Cream text. #FFD100 survives ONLY as the signal
+   colour (--color-signal) — tiny dots and markers (export watermark dot,
+   REC, beat markers), never a fill, never text. Emerald/green is reserved
+   for success states only — never for primary actions, selection, or
+   progress. Render/content colours (caption styles, templates, PiP glow,
+   dip-to-gold) are user content and do NOT follow this chrome system. */
 @theme {
-  --color-gold: #ffd100;
-  --color-gold-bright: #ffe14d;
-  --color-cream: #fff6d8;
+  --color-gold: #d4a437;
+  --color-gold-bright: #ffe45c;
+  --color-signal: #ffd100;
+  --color-cream: #f4ede1;
 }
 
 :root {
@@ -22,13 +28,13 @@
 
 body {
   margin: 0;
-  background: #070707;
+  background: #0b0b0c;
   color: #fff;
   font-family: system-ui, -apple-system, sans-serif;
 }
 
 ::selection {
-  background: #ffd100;
+  background: #d4a437;
   color: #000;
 }
 
@@ -49,7 +55,7 @@ body {
   border-radius: 999px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 209, 0, 0.45);
+  background: rgba(212, 164, 55, 0.45);
 }
 
 /* Range inputs — gold accent everywhere (sliders, scrub bar, volume).
@@ -71,7 +77,7 @@ input[type='range']::-webkit-slider-thumb {
   width: 20px;
   height: 20px;
   border-radius: 999px;
-  background: #ffd100;
+  background: #d4a437;
   border: none;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
   cursor: pointer;
@@ -80,7 +86,7 @@ input[type='range']::-moz-range-thumb {
   width: 20px;
   height: 20px;
   border-radius: 999px;
-  background: #ffd100;
+  background: #d4a437;
   border: none;
   box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
   cursor: pointer;
@@ -92,7 +98,7 @@ input[type='range']::-moz-range-track {
 }
 input[type='checkbox'],
 input[type='radio'] {
-  accent-color: #ffd100;
+  accent-color: #d4a437;
 }
 
 /* R40 P-18 — reduced motion: when the user's phone asks for reduced

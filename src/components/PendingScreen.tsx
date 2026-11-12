@@ -91,7 +91,7 @@ export function PendingScreen({ onOpenLegal }: { onOpenLegal?: (path: '/privacy'
               type="checkbox"
               checked={optIn}
               onChange={(e) => handleOptInChange(e.target.checked)}
-              className="mt-0.5 h-4 w-4 shrink-0 accent-[#ffd100]"
+              className="mt-0.5 h-4 w-4 shrink-0 accent-[#D4A437]"
             />
             <span className="text-sm text-white/80 leading-snug">
               Email me RiddimRoom news, drops and offers
