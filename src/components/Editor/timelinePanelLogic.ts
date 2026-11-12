@@ -381,3 +381,52 @@ export function resetTimelinePerfCounts(): void {
 export function getTimelinePerfCounts(): { total: number; perItem: Map<string, number> } {
   return { total: totalRowRenders, perItem: new Map(rowRenderCounts) };
 }
+
+// ---------------------------------------------------------------------------
+// R44 — snap haptics (PL-4) + per-project zoom memory (SF-5).
+// ---------------------------------------------------------------------------
+
+/**
+ * A short tick where the platform supports it (Android Chrome).
+ * iOS Safari has no `navigator.vibrate` — this silently no-ops there,
+ * by design: haptics are a garnish, never a dependency.
+ */
+export function snapHaptic(): void {
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(10);
+    }
+  } catch {
+    /* platform without haptics — nothing to do */
+  }
+}
+
+const TIMELINE_ZOOM_STORAGE_KEY = 'riddimroom.timeline.zoom.v1';
+
+function readZoomMap(): Record<string, number> {
+  try {
+    const raw = window.localStorage.getItem(TIMELINE_ZOOM_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, number>;
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+/** The zoom level (px/sec) the user last left this project at, or null. */
+export function loadTimelineZoom(projectId: string): number | null {
+  const value = readZoomMap()[projectId];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+export function saveTimelineZoom(projectId: string, pxPerSec: number): void {
+  try {
+    const map = readZoomMap();
+    map[projectId] = pxPerSec;
+    window.localStorage.setItem(TIMELINE_ZOOM_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    /* storage unavailable (private mode / quota) — zoom memory is a nicety */
+  }
+}

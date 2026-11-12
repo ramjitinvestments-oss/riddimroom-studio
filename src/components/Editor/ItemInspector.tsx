@@ -10,7 +10,6 @@ import { PipRingControls, PipShapeStrip } from './PipShapeControls';
 import { useProject } from '../../context/ProjectContext';
 import {
   updateItem,
-  removeItem,
   getItemDuration,
   trimItemStart,
   setItemDuration,
@@ -32,6 +31,7 @@ import {
   bringToFront,
   sendToBack,
 } from '../../lib/timeline/utils';
+import { removeItemClosingGap } from '../../lib/timeline/magnetic';
 import { CAPTION_STYLES } from '../../lib/captions/styles';
 import { isPipItem } from '../../lib/pip';
 import { findHeldMainVisualItem } from '../../lib/render/compositor';
@@ -96,7 +96,9 @@ export const ItemInspector = React.memo(function ItemInspector({ item }: { item:
   };
 
   const handleDelete = () => {
-    mutate((project) => removeItem(project, item.id));
+    // R44 SF-7 — closes the main-track gap on plain projects; contracted
+    // reels keep the hole for drift/Re-apply (lib/timeline/magnetic.ts).
+    mutate((project) => removeItemClosingGap(project, item.id));
     // R27 WS-M6 — surface the undo toast at the moment of loss
     // (EditorShell listens for 'rr:undo-toast' and offers one-tap Undo).
     // R40 P-46: every delete path uses the one message — "Deleted".

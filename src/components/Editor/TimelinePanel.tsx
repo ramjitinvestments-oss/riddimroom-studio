@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Volume2, VolumeX, ZoomIn, ZoomOut } from 'lucide-react';
 import type { Project, TimelineItem, Track } from '../../types/timeline';
-import { moveItem, trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode, updateItem } from '../../lib/timeline/utils';
+import { trimItemStart, trimItemEnd, splitItemAtTime, formatTimecode, updateItem } from '../../lib/timeline/utils';
+import { moveItemMagnetic } from '../../lib/timeline/magnetic';
 import { getAssetPoster } from '../../lib/media/thumbnails';
 import { useProject } from '../../context/ProjectContext';
 import {
@@ -14,8 +15,11 @@ import {
   getPosterStrip,
   getProjectEndSeconds,
   getTimelineExtent,
+  loadTimelineZoom,
   recordClipRowRender,
+  saveTimelineZoom,
   setPosterStrip,
+  snapHaptic,
   type DragSession,
   type DragTarget,
   type TimelineDragMode,
@@ -28,6 +32,8 @@ interface TimelinePanelProps {
   onSeek: (time: number) => void;
   selectedItemId: string | null;
   onSelectItem: (itemId: string | null) => void;
+  /** R44 SF-4 — drives playback follow (the timeline scrolls to keep the playhead in view while playing). */
+  isPlaying?: boolean;
 }
 
 // "Final production fix" spec item 3c (mobile timeline behavior) — below
@@ -180,9 +186,11 @@ const ClipRow = React.memo(function ClipRow({
             e.stopPropagation();
             onToggleMute(item);
           }}
-          className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-8 h-8 shrink-0 flex items-center justify-center rounded bg-black/50 hover:bg-black/75 text-white/80"
+          className="absolute right-1 top-1/2 -translate-y-1/2 z-10 w-11 h-11 shrink-0 flex items-center justify-center hover:[&>span]:bg-black/75"
         >
-          {clipMuted ? <VolumeX size={12} className="text-gold" /> : <Volume2 size={12} />}
+          <span className="w-8 h-8 flex items-center justify-center rounded bg-black/50 text-white/80 pointer-events-none">
+            {clipMuted ? <VolumeX size={12} className="text-gold" /> : <Volume2 size={12} />}
+          </span>
         </button>
       )}
       {/* Trim handles — layered above the move handler via stopPropagation.
@@ -234,7 +242,7 @@ const ClipRow = React.memo(function ClipRow({
  * getProjectEndSeconds → getProjectDuration) — in a PiP-longest project
  * the line sits at the PiP's end and audio past that line ghosts.
  */
-export const TimelinePanel = React.memo(function TimelinePanel({ project, currentTime, onSeek, selectedItemId, onSelectItem }: TimelinePanelProps) {
+export const TimelinePanel = React.memo(function TimelinePanel({ project, currentTime, onSeek, selectedItemId, onSelectItem, isPlaying = false }: TimelinePanelProps) {
   const { mutate } = useProject();
   // The track-box column (clip area only, NOT the track-name label column
   // to its left) — clip geometry, the playhead line, and click/scrub-to-
@@ -264,6 +272,22 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
   extentRef.current = extent;
   const onSeekRef = useRef(onSeek);
   onSeekRef.current = onSeek;
+
+  // R44 — zoom anchors, playback follow (SF-4), pinch (SF-5) state.
+  const pxPerSecRef = useRef(pxPerSec);
+  pxPerSecRef.current = pxPerSec;
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  /** Pending zoom anchor: keep this timeline time at this screen x across the zoom render. */
+  const zoomAnchorRef = useRef<{ time: number; clientX: number } | null>(null);
+  /** SF-4 follow is suspended when the user scrolls the timeline by hand during playback. */
+  const followSuspendedRef = useRef(false);
+  /** The scrollLeft our own follow/zoom code last wrote — lets the scroll listener tell our scrolls from the user's. */
+  const lastProgrammaticScrollRef = useRef<number | null>(null);
+  const prevTimeRef = useRef(currentTime);
+  const wasPlayingRef = useRef(false);
+  const scrubbingRef = useRef(false);
+  const pinchRef = useRef<{ startDist: number; startPx: number; time: number } | null>(null);
 
   // Filmstrip posters (polish batch 2 + R26 WS-T1 (d)): one poster per
   // video/image asset, derived once per asset and kept in the module-level
@@ -311,16 +335,107 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
     };
   }, [project.items, project.mediaAssets]);
 
+  // R44 SF-5 — per-project zoom: reopening a project restores the zoom
+  // the user left it at; a project with no remembered zoom seeds from
+  // the container fit (the pre-R44 mount behaviour, now per project).
   useEffect(() => {
-    if (zoomTouchedRef.current) return;
+    const stored = loadTimelineZoom(project.id);
+    if (stored !== null) {
+      zoomTouchedRef.current = true;
+      setPxPerSec(Math.max(MIN_ZOOM_PX_PER_SECOND, Math.min(MAX_ZOOM_PX_PER_SECOND, stored)));
+      return;
+    }
+    zoomTouchedRef.current = false;
     const w = scrollContainerRef.current?.clientWidth ?? 0;
     if (w > 0) {
       const fit = (w - 88) / extentRef.current; // minus label column + gaps/padding
       setPxPerSec(Math.max(MIN_ZOOM_PX_PER_SECOND, Math.min(MAX_ZOOM_PX_PER_SECOND, Math.max(DEFAULT_PX_PER_SECOND, fit))));
     }
-    // Mount-only seed: after this, pxPerSec is user state.
+    // Runs on mount + project switch only — extent is ref-read on purpose.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
+
+  // Persist the user's zoom choice per project (only once they've zoomed).
+  useEffect(() => {
+    if (zoomTouchedRef.current) saveTimelineZoom(project.id, pxPerSec);
+  }, [pxPerSec, project.id]);
+
+  /** Anchored zoom: the timeline time under the anchor point stays under it. */
+  const applyZoom = useCallback((nextPx: number, anchorTime: number, anchorClientX: number) => {
+    const clamped = Math.max(MIN_ZOOM_PX_PER_SECOND, Math.min(MAX_ZOOM_PX_PER_SECOND, nextPx));
+    zoomTouchedRef.current = true;
+    zoomAnchorRef.current = { time: anchorTime, clientX: anchorClientX };
+    pxPerSecRef.current = clamped;
+    setPxPerSec(clamped);
   }, []);
+
+  // Consume a pending zoom anchor once the new zoom has rendered:
+  // scroll so the anchored time is back under the anchor's screen x.
+  useEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    zoomAnchorRef.current = null;
+    const column = tracksColumnRef.current;
+    const container = scrollContainerRef.current;
+    if (!column || !container) return;
+    const colRect = column.getBoundingClientRect();
+    const timeX = (Math.max(0, Math.min(extentRef.current, anchor.time)) / extentRef.current) * (colRect.width || 1);
+    const delta = colRect.left + timeX - anchor.clientX;
+    if (Math.abs(delta) > 0.5) {
+      lastProgrammaticScrollRef.current = container.scrollLeft + delta;
+      container.scrollLeft += delta;
+    }
+  }, [pxPerSec]);
+
+  // SF-4 — a fresh press of Play re-arms follow; a seek jump (>1.5s in
+  // one step — playback itself advances in small steps) re-arms it too
+  // (handled in the playhead effect below).
+  useEffect(() => {
+    if (isPlaying && !wasPlayingRef.current) followSuspendedRef.current = false;
+    wasPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  // SF-4 — tell our own scrolls from the user's: any scroll event whose
+  // position isn't the value our code last wrote is a manual scroll,
+  // and during playback it suspends follow until Play is pressed again
+  // or a seek happens.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      const expected = lastProgrammaticScrollRef.current;
+      if (expected !== null && Math.abs(container.scrollLeft - expected) <= 2) return;
+      if (isPlayingRef.current) followSuspendedRef.current = true;
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // SF-5 — trackpad pinch (ctrl/cmd + wheel) zooms at the cursor, and a
+  // two-finger touch pinch never scrolls the page mid-gesture. Native
+  // listeners: React's wheel/touch handlers are passive at the root.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return; // plain wheel keeps its native horizontal scroll
+      e.preventDefault();
+      const column = tracksColumnRef.current;
+      if (!column) return;
+      const rect = column.getBoundingClientRect();
+      const time = Math.max(0, Math.min(extentRef.current, ((e.clientX - rect.left) / (rect.width || 1)) * extentRef.current));
+      applyZoom(pxPerSecRef.current * (e.deltaY < 0 ? 1.12 : 1 / 1.12), time, e.clientX);
+    };
+    const onTouchMoveGuard = (e: TouchEvent) => {
+      if (pinchRef.current) e.preventDefault();
+    };
+    container.addEventListener('wheel', onWheel, { passive: false });
+    container.addEventListener('touchmove', onTouchMoveGuard, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', onWheel);
+      container.removeEventListener('touchmove', onTouchMoveGuard);
+    };
+  }, [applyZoom]);
 
   // Playhead (R26 WS-T1 (c)): driven imperatively — every currentTime /
   // extent / zoom change writes the playhead element's transform and the
@@ -330,20 +445,117 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
   useEffect(() => {
     const column = tracksColumnRef.current;
     const playhead = playheadRef.current;
+    let playheadX = 0;
     if (column && playhead) {
       const widthPx = column.clientWidth || 1;
-      const x = Math.max(0, Math.min(1, currentTime / extent)) * widthPx;
-      playhead.style.transform = `translateX(${x}px)`;
+      playheadX = Math.max(0, Math.min(1, currentTime / extent)) * widthPx;
+      playhead.style.transform = `translateX(${playheadX}px)`;
     }
     if (timecodeRef.current) {
       timecodeRef.current.textContent = formatTimecode(currentTime);
     }
+    // R44 SF-4 — playback follow. RULE: while playing, when the playhead
+    // would leave the visible window, the timeline page-scrolls so the
+    // playhead re-enters just past the label column. A manual scroll by
+    // the user during playback SUSPENDS follow (they're looking at
+    // something) until the next press of Play or the next seek — a seek
+    // shows up here as a >1.5s jump in currentTime, playback's own
+    // steps are far smaller. Gestures in progress (drag/scrub/pinch)
+    // always win over follow.
+    if (Math.abs(currentTime - prevTimeRef.current) > 1.5) followSuspendedRef.current = false;
+    prevTimeRef.current = currentTime;
+    const container = scrollContainerRef.current;
+    if (
+      container &&
+      column &&
+      isPlayingRef.current &&
+      !followSuspendedRef.current &&
+      !activeDragRef.current &&
+      !scrubbingRef.current &&
+      !pinchRef.current
+    ) {
+      const contRect = container.getBoundingClientRect();
+      const colRect = column.getBoundingClientRect();
+      const playheadScreenX = colRect.left + playheadX;
+      if (playheadScreenX > contRect.right - 16 || playheadScreenX < contRect.left + 4) {
+        const delta = playheadScreenX - (contRect.left + 88);
+        lastProgrammaticScrollRef.current = container.scrollLeft + delta;
+        container.scrollLeft += delta;
+      }
+    }
   }, [currentTime, extent, pxPerSec]);
 
-  const zoomBy = useCallback((factor: number) => {
-    zoomTouchedRef.current = true;
-    setPxPerSec((v) => Math.max(MIN_ZOOM_PX_PER_SECOND, Math.min(MAX_ZOOM_PX_PER_SECOND, v * factor)));
+  /** The zoom anchor for button zooms: the playhead when it's on screen, else the viewport centre. */
+  const zoomAnchorPoint = useCallback((): { time: number; clientX: number } => {
+    const column = tracksColumnRef.current;
+    const container = scrollContainerRef.current;
+    if (!column || !container) return { time: currentTimeRef.current, clientX: 0 };
+    const colRect = column.getBoundingClientRect();
+    const contRect = container.getBoundingClientRect();
+    const playheadScreenX = colRect.left + Math.max(0, Math.min(1, currentTimeRef.current / extentRef.current)) * (colRect.width || 1);
+    if (playheadScreenX >= contRect.left && playheadScreenX <= contRect.right) {
+      return { time: currentTimeRef.current, clientX: playheadScreenX };
+    }
+    const centreClientX = contRect.left + contRect.width / 2;
+    const centreTime = Math.max(0, Math.min(extentRef.current, ((centreClientX - colRect.left) / (colRect.width || 1)) * extentRef.current));
+    return { time: centreTime, clientX: centreClientX };
   }, []);
+
+  const zoomBy = useCallback(
+    (factor: number) => {
+      const anchor = zoomAnchorPoint();
+      applyZoom(pxPerSecRef.current * factor, anchor.time, anchor.clientX);
+    },
+    [applyZoom, zoomAnchorPoint],
+  );
+
+  /** SF-5 Fit: the whole project on screen at once. */
+  const fitZoom = useCallback(() => {
+    const w = scrollContainerRef.current?.clientWidth ?? 0;
+    if (w <= 0) return;
+    const fit = (w - 88) / Math.max(extentRef.current, 1);
+    zoomTouchedRef.current = true;
+    zoomAnchorRef.current = null;
+    pxPerSecRef.current = Math.max(MIN_ZOOM_PX_PER_SECOND, Math.min(MAX_ZOOM_PX_PER_SECOND, fit));
+    setPxPerSec(pxPerSecRef.current);
+    requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      if (container) {
+        lastProgrammaticScrollRef.current = 0;
+        container.scrollLeft = 0;
+      }
+    });
+  }, []);
+
+  // SF-5 — two-finger pinch on the timeline zooms around the time under
+  // the fingers' midpoint. Gesture disambiguation: one finger on the
+  // track background scrubs (SF-6), one finger on a clip drags it; the
+  // moment a SECOND finger lands, any scrub in progress flushes and any
+  // clip drag cancels without committing (see beginScrub/beginDrag),
+  // and the gesture becomes a pinch until fewer than two touches remain.
+  const handleContainerTouch = useCallback(
+    (e: React.TouchEvent) => {
+      if (e.touches.length === 2) {
+        const [a, b] = [e.touches[0], e.touches[1]];
+        const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        const midX = (a.clientX + b.clientX) / 2;
+        if (!pinchRef.current) {
+          const column = tracksColumnRef.current;
+          if (!column || dist <= 0) return;
+          const rect = column.getBoundingClientRect();
+          const time = Math.max(0, Math.min(extentRef.current, ((midX - rect.left) / (rect.width || 1)) * extentRef.current));
+          pinchRef.current = { startDist: dist, startPx: pxPerSecRef.current, time };
+          return;
+        }
+        if (pinchRef.current.startDist > 0) {
+          applyZoom(pinchRef.current.startPx * (dist / pinchRef.current.startDist), pinchRef.current.time, midX);
+        }
+      } else if (e.touches.length < 2) {
+        pinchRef.current = null;
+      }
+    },
+    [applyZoom],
+  );
 
   const seekFromClientX = useCallback(
     (clientX: number) => {
@@ -367,6 +579,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
     if (!column) return;
     const rect = column.getBoundingClientRect();
     if (!(rect.width > 0)) return;
+    scrubbingRef.current = true;
     const throttler = createSeekThrottler(SCRUB_COMMIT_INTERVAL_MS, (t) => onSeekRef.current(t));
     const applyScrub = (clientX: number) => {
       const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
@@ -385,7 +598,19 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
       }
       return ev.clientX;
     };
+    const teardown = () => {
+      window.removeEventListener(pointerEvents.move, handleMove as EventListener);
+      window.removeEventListener(pointerEvents.up, handleUp as EventListener);
+      scrubbingRef.current = false;
+    };
     const handleMove = (ev: MouseEvent | TouchEvent) => {
+      // SF-5 pinch takeover: a second finger turns this gesture into a
+      // pinch — flush the scrub where it stands and hand over.
+      if ('touches' in ev && ev.touches.length >= 2) {
+        throttler.flush();
+        teardown();
+        return;
+      }
       const clientX = getX(ev);
       if (clientX === null) return;
       if ('touches' in ev) ev.preventDefault();
@@ -395,8 +620,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
       const clientX = getX(ev);
       if (clientX !== null) applyScrub(clientX);
       throttler.flush();
-      window.removeEventListener(pointerEvents.move, handleMove as EventListener);
-      window.removeEventListener(pointerEvents.up, handleUp as EventListener);
+      teardown();
     };
     window.addEventListener(pointerEvents.move, handleMove as EventListener, { passive: false });
     window.addEventListener(pointerEvents.up, handleUp as EventListener);
@@ -438,6 +662,9 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
       onSelectItem(item.id);
       setDraggingItemId(item.id);
       setDragTick((n) => n + 1);
+      // PL-4 — a short tick when a trim grab takes hold (Android; iOS no-ops).
+      if (mode !== 'move') snapHaptic();
+      let lastSnap: number | null = null;
 
       const getX = (ev: MouseEvent | TouchEvent): number | null => {
         if ('touches' in ev) {
@@ -447,9 +674,47 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
         return ev.clientX;
       };
 
+      const teardown = (commit: boolean) => {
+        const active = activeDragRef.current;
+        activeDragRef.current = null;
+        window.removeEventListener(pointerEvents.move, handleMove as EventListener);
+        window.removeEventListener(pointerEvents.up, handleUp);
+        const snapLine = snapLineRef.current;
+        if (snapLine) snapLine.style.display = 'none';
+        if (active) {
+          const el = active.clipEl;
+          if (el) {
+            // Clear the imperative preview BEFORE any commit render, so
+            // React's state-driven left/width take over cleanly.
+            el.style.transform = '';
+            el.style.left = '';
+            el.style.width = '';
+            el.style.zIndex = '';
+          }
+          const target = active.lastTarget;
+          if (commit && target && target.moved) {
+            const { mode: dragMode, itemId } = active.session;
+            // The ONE project commit for the whole gesture. Moves go
+            // through the SF-7 magnetic entry point (which itself falls
+            // back to the clamped moveItem for contracted projects,
+            // non-main items and designed overlaps — see magnetic.ts).
+            if (dragMode === 'move') mutate((p) => moveItemMagnetic(p, itemId, target.startTime));
+            else if (dragMode === 'trim-start') mutate((p) => trimItemStart(p, itemId, target.startTime));
+            else mutate((p) => trimItemEnd(p, itemId, target.endTime));
+          }
+        }
+        setDraggingItemId(null);
+        setDragTick((n) => n + 1);
+      };
       const handleMove = (ev: MouseEvent | TouchEvent) => {
         const active = activeDragRef.current;
         if (!active) return;
+        // SF-5 pinch takeover: a second finger cancels the drag WITHOUT
+        // committing — the preview clears and the project is untouched.
+        if ('touches' in ev && ev.touches.length >= 2) {
+          teardown(false);
+          return;
+        }
         const clientX = getX(ev);
         if (clientX === null) return;
         const target = computeDragTarget(active.session, clientX);
@@ -461,6 +726,9 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
         dragMovedRef.current = true;
         active.lastTarget = target;
         if ('touches' in ev) ev.preventDefault(); // stop the page scrolling while dragging on touch
+        // PL-4 — tick when a snap ENGAGES (not while it merely holds).
+        if (target.snappedTo !== null && lastSnap === null) snapHaptic();
+        lastSnap = target.snappedTo;
         const el = active.clipEl;
         if (el) {
           const preview = dragPreviewStyle(active.session, target);
@@ -479,35 +747,7 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
           }
         }
       };
-      const handleUp = () => {
-        const active = activeDragRef.current;
-        activeDragRef.current = null;
-        window.removeEventListener(pointerEvents.move, handleMove as EventListener);
-        window.removeEventListener(pointerEvents.up, handleUp);
-        const snapLine = snapLineRef.current;
-        if (snapLine) snapLine.style.display = 'none';
-        if (active) {
-          const el = active.clipEl;
-          if (el) {
-            // Clear the imperative preview BEFORE the commit render, so
-            // React's state-driven left/width take over cleanly.
-            el.style.transform = '';
-            el.style.left = '';
-            el.style.width = '';
-            el.style.zIndex = '';
-          }
-          const target = active.lastTarget;
-          if (target && target.moved) {
-            const { mode, itemId } = active.session;
-            // The ONE project commit for the whole gesture.
-            if (mode === 'move') mutate((p) => moveItem(p, itemId, target.startTime));
-            else if (mode === 'trim-start') mutate((p) => trimItemStart(p, itemId, target.startTime));
-            else mutate((p) => trimItemEnd(p, itemId, target.endTime));
-          }
-        }
-        setDraggingItemId(null);
-        setDragTick((n) => n + 1);
-      };
+      const handleUp = () => teardown(true);
       window.addEventListener(pointerEvents.move, handleMove as EventListener, { passive: false });
       window.addEventListener(pointerEvents.up, handleUp);
     },
@@ -614,13 +854,34 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
             >
               <ZoomOut size={14} />
             </button>
-            <span className="w-14 text-center">{Math.round(pxPerSec)} px/s</span>
+            {/* R44 SF-5 — the zoom readout is a plain level bar, no engineering units. */}
+            <span className="w-14 flex items-center px-1" aria-hidden="true">
+              <span className="h-1 w-full rounded bg-white/15 overflow-hidden">
+                <span
+                  className="block h-full bg-gold/80"
+                  style={{
+                    width: `${Math.round(
+                      ((Math.log(pxPerSec) - Math.log(MIN_ZOOM_PX_PER_SECOND)) /
+                        (Math.log(MAX_ZOOM_PX_PER_SECOND) - Math.log(MIN_ZOOM_PX_PER_SECOND))) *
+                        100,
+                    )}%`,
+                  }}
+                />
+              </span>
+            </span>
             <button
               onClick={() => zoomBy(ZOOM_STEP)}
               className="min-h-11 min-w-11 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white"
               title="Zoom in timeline"
             >
               <ZoomIn size={14} />
+            </button>
+            <button
+              onClick={fitZoom}
+              className="min-h-11 px-2.5 flex items-center justify-center rounded bg-white/10 hover:bg-white/20 text-white text-[10px] font-bold uppercase tracking-wide"
+              title="Fit the whole project in view"
+            >
+              Fit
             </button>
           </div>
           <button
@@ -646,7 +907,14 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
           already satisfied and no scrollbar appears. The extent is the
           WS-A2 scrollable extent (max item end), which can exceed the
           project duration when an audio item overhangs the main track. */}
-      <div ref={scrollContainerRef} className="overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0">
+      <div
+        ref={scrollContainerRef}
+        className="overflow-x-auto -mx-3 px-3 sm:mx-0 sm:px-0"
+        onTouchStart={handleContainerTouch}
+        onTouchMove={handleContainerTouch}
+        onTouchEnd={handleContainerTouch}
+        onTouchCancel={handleContainerTouch}
+      >
         <div className="flex gap-2 select-none" style={{ minWidth: `${Math.max(1, extent * pxPerSec)}px` }}>
           {/* Label column — plain vertical stack, same row height as the track-box column below so the two stay aligned. */}
           <div className="flex flex-col gap-1 shrink-0 w-16">
@@ -691,7 +959,27 @@ export const TimelinePanel = React.memo(function TimelinePanel({ project, curren
                 beginScrub(e.clientX, { move: 'mousemove', up: 'mouseup' });
               }
             }}
-            className="relative flex-1 flex flex-col gap-1 cursor-pointer"
+            onTouchStart={(e) => {
+              // R44 SF-6 — touch drag-scrub, the mouse path's twin.
+              // Disambiguation: a touch starting on a CLIP drags the clip
+              // (clip handlers stopPropagation, so it never reaches here);
+              // a touch starting on the track BACKGROUND scrubs — the
+              // column is touch-none, so it can never start a container
+              // scroll; horizontal scrolling by touch stays available
+              // from the label column beside it. A second finger turns
+              // any of these into a pinch (SF-5) instead.
+              const touch = e.touches[0];
+              if (!touch || e.touches.length !== 1) return;
+              const targetDataset = (e.target as HTMLElement).dataset;
+              if (
+                e.target === e.currentTarget ||
+                targetDataset?.trackRow !== undefined ||
+                targetDataset?.overlayLane !== undefined
+              ) {
+                beginScrub(touch.clientX, { move: 'touchmove', up: 'touchend' });
+              }
+            }}
+            className="relative flex-1 flex flex-col gap-1 cursor-pointer touch-none"
           >
             <div
               ref={playheadRef}

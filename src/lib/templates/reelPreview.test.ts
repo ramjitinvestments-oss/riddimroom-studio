@@ -56,6 +56,10 @@ function normalizeGeneratedIds(project: Project, knownIds: Set<string>): Project
   return {
     ...project,
     updatedAt: 0,
+    // R44 note: appliedAt is a wall-clock stamp (Date.now() inside the
+    // apply) — two applies a millisecond apart differ by design, so the
+    // honesty comparison zeroes it like updatedAt.
+    ...(project.appliedTemplate ? { appliedTemplate: { ...project.appliedTemplate, appliedAt: 0 } } : {}),
     items: project.items.map((item) =>
       knownIds.has(item.id) ? item : { ...item, id: `added-${added++}` },
     ),

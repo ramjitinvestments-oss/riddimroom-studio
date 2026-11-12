@@ -35,6 +35,7 @@ import {
 import { ensureTemplatesPanelProject, updateTemplatesPanelState } from '../../lib/templates/panelStore';
 import { addPipOverlay, isPipItem } from '../../lib/pip';
 import { removeItem, getProjectDuration } from '../../lib/timeline/utils';
+import { removeItemClosingGap } from '../../lib/timeline/magnetic';
 import { evaluateProjectExportGate } from '../../lib/projectDurationGate';
 import { useLicenseTier } from '../../hooks/useLicenseTier';
 import { OPEN_PLAN_EVENT, OPEN_PLAN_SESSION_KEY } from '../../lib/upgradeRequest';
@@ -574,7 +575,10 @@ function EditorInner({ uid }: { uid: string }) {
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedItemId) {
           e.preventDefault();
-          mutate((p) => removeItem(p, selectedItemId));
+          // R44 SF-7 — a user delete closes the main-track gap behind it
+          // (plain projects only; contracted reels keep the hole for the
+          // drift/Re-apply flow — see lib/timeline/magnetic.ts).
+          mutate((p) => removeItemClosingGap(p, selectedItemId));
           setSelectedItemId(null);
           // R27 WS-M6 — a keyboard delete is a real delete: surface the
           // undo toast exactly like the inspector's Delete button does.
@@ -1045,6 +1049,7 @@ function EditorInner({ uid }: { uid: string }) {
                 onSeek={setCurrentTime}
                 selectedItemId={selectedItemId}
                 onSelectItem={setSelectedItemId}
+                isPlaying={isPlaying}
               />
             </div>
             <div className="w-full max-w-3xl flex gap-2">
