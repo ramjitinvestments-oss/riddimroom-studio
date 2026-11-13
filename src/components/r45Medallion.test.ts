@@ -53,6 +53,31 @@ describe('R45 Phase 1 — medallion is the brand mark', () => {
   });
 });
 
+describe('R45 follow-up — social share preview (Open Graph)', () => {
+  const html = readFileSync(join(SRC, '..', 'index.html'), 'utf8');
+  const decode = readFileSync(join(SRC, '..', 'scripts', 'decode-logo.mjs'), 'utf8');
+
+  it('index.html og:image references the medallion share asset on the production origin', () => {
+    expect(html).toContain(
+      '<meta property="og:image" content="https://riddimroom-studio.vercel.app/og-share-1200x630.png" />',
+    );
+    expect(html).toContain(
+      '<meta name="twitter:image" content="https://riddimroom-studio.vercel.app/og-share-1200x630.png" />',
+    );
+  });
+
+  it('the share asset travels the base64 decode route into public/', () => {
+    expect(decode).toContain("'og-share-1200x630.png'");
+    const payload = readFileSync(join(SRC, 'assets', 'og-share-1200x630.png.b64'), 'utf8');
+    const bytes = Buffer.from(payload.trim(), 'base64');
+    // 1200x630 PNG, byte size of the owner-set source of record.
+    expect(bytes.length).toBe(530870);
+    expect(bytes.subarray(1, 4).toString('ascii')).toBe('PNG');
+    expect(bytes.readUInt32BE(16)).toBe(1200);
+    expect(bytes.readUInt32BE(20)).toBe(630);
+  });
+});
+
 describe('R45 Phase 2 — chrome colour system (index.css tokens)', () => {
   const css = readFileSync(join(SRC, 'index.css'), 'utf8');
 

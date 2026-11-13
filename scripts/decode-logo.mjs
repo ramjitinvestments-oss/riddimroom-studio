@@ -5,6 +5,8 @@
 //   may remain in public/ unreferenced) — removal is a separate decision.
 // - medallion-*.png / favicon-512.png (R45): the owner-designed gold-ring
 //   medallion, circular-masked builds from owner-set/avatar-1080.png.
+// - og-share-1200x630.png (R45 follow-up): the medallion social
+//   share-preview card (owner-set/og-share-1200x630.png, verbatim).
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 mkdirSync(join(root, 'public'), { recursive: true });
 
-for (const name of ['logo.jpg', 'medallion-96.png', 'medallion-hero.png', 'favicon-512.png']) {
+for (const name of ['logo.jpg', 'medallion-96.png', 'medallion-hero.png', 'favicon-512.png', 'og-share-1200x630.png']) {
   const bytes = Buffer.from(readFileSync(join(root, 'src/assets', `${name}.b64`), 'utf8').trim(), 'base64');
   writeFileSync(join(root, 'public', name), bytes);
   console.log(`${name} materialized:`, bytes.length, 'bytes');
